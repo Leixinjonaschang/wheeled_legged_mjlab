@@ -1,0 +1,45 @@
+{
+  "os":  "Linux-6.8.0-110-generic-x86_64-with-glibc2.35",
+  "python":  "CPython 3.13.8",
+  "startedAt":  "2026-05-18T13:00:49.307452Z",
+  "args":  [
+    "Mjlab-Velocity-Flat-WF-Tron1B",
+    "--agent.max-iterations",
+    "1"
+  ],
+  "program":  "/media/phi/641A24011A23CF3C/ubuntu_data/CLX/project/wheeled_legged_proj/wheeled_legged_mjlab/scripts/rsl_rl/train.py",
+  "codePath":  "scripts/rsl_rl/train.py",
+  "codePathLocal":  "scripts/rsl_rl/train.py",
+  "git":  {
+    "remote":  "https://github.com/Leixinjonaschang/wheeled_legged_mjlab.git",
+    "commit":  "16e379950d3ae655f8862fe61fb78d4e0c29c029"
+  },
+  "email":  "leixinchang666@gmail.com",
+  "root":  "/media/phi/641A24011A23CF3C/ubuntu_data/CLX/project/wheeled_legged_proj/wheeled_legged_mjlab",
+  "host":  "phi-4080s",
+  "executable":  "/media/phi/641A24011A23CF3C/ubuntu_data/CLX/project/wheeled_legged_proj/wheeled_legged_mjlab/.venv/bin/python3",
+  "cpu_count":  8,
+  "cpu_count_logical":  16,
+  "gpu":  "NVIDIA GeForce RTX 4080 SUPER",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "489292587008",
+      "used":  "456910635008"
+    }
+  },
+  "memory":  {
+    "total":  "64888860672"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 4080 SUPER",
+      "memoryTotal":  "17171480576",
+      "cudaCores":  10240,
+      "architecture":  "Ada",
+      "uuid":  "GPU-e9f73dd0-700f-96fa-0bfe-d56fb6ab1185"
+    }
+  ],
+  "cudaVersion":  "13.0",
+  "writerId":  "2necnxswtd5hl843sbiu1bmuhruxanaq"
+}
