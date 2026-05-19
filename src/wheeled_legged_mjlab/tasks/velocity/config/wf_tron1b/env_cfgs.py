@@ -109,8 +109,8 @@ def make_sensors(*, rough: bool) -> tuple:
                     ObjRef(type="body", name=body_name, entity=ROBOT_ENTITY)
                     for body_name in WHEEL_BODY_NAMES
                 ),
-                ray_alignment="yaw",
-                pattern=RingPatternCfg.single_ring(radius=0.15, num_samples=8),
+                ray_alignment="world",
+                pattern=RingPatternCfg.single_ring(radius=0.1, num_samples=8),
                 max_distance=1.0,
                 exclude_parent_body=True,
                 include_geom_groups=(0,),

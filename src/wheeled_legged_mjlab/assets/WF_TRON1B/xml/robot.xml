@@ -36,7 +36,7 @@
         <option timestep="0.001"/>
 
     <worldbody>
-        <geom name="floor" rgba="0.5 0.6 0.7 1" pos="0 0 0" size="0 0 0.25" type="plane" material="matplane" condim="3"/>
+        <!-- <geom name="floor" rgba="0.5 0.6 0.7 1" pos="0 0 0" size="0 0 0.25" type="plane" material="matplane" condim="3"/> -->
         <camera name="track" mode="trackcom" pos="0 -2.3 1.6" xyaxes="1 0 0 0 0.707 0.707"/>
         <light directional="true" diffuse=".8 .8 .8" pos="0 0 10" dir="0 0 -10"/>
 
