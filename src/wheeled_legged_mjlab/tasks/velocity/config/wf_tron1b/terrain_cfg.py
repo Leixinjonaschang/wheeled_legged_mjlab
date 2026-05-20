@@ -1,5 +1,6 @@
 from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 from mjlab.terrains import (
+    HfDiscreteObstaclesTerrainCfg,
     BoxRandomGridTerrainCfg,
     HfRandomUniformTerrainCfg,
     HfPyramidSlopedTerrainCfg,
@@ -8,12 +9,15 @@ from mjlab.terrains import (
 
 TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
-    border_width=20.0,
+    border_width=30.0,
     num_rows=10,
     num_cols=20,
     sub_terrains={
         "boxes": BoxRandomGridTerrainCfg(
-            proportion=0.2, grid_width=0.45, grid_height_range=(0.05, 0.2), platform_width=2.0
+            proportion=0.2, 
+            grid_width=0.45, 
+            grid_height_range=(0.05, 0.2), 
+            platform_width=2.0,
         ),
         "random_rough": HfRandomUniformTerrainCfg(
             proportion=0.2,

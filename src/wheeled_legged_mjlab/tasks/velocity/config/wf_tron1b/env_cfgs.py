@@ -67,7 +67,7 @@ NON_WHEEL_COLLISION_GEOMS = (
 )
 
 BASE_HEIGHT_TARGET = 0.80
-WHEEL_DISTANCE_RANGE = (0.18, 0.35)
+WHEEL_DISTANCE_RANGE = (0.15, 0.55)
 
 
 def make_scene(*, rough: bool) -> SceneCfg:
@@ -482,16 +482,6 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
             },
         ),
-        "wheel_lateral_symmetry": RewardTermCfg(
-            func=mdp.wheel_lateral_symmetry,
-            weight=0.3,
-            params={"std": 0.05, "asset_cfg": wheel_body_cfg},
-        ),
-        "wheel_x_alignment": RewardTermCfg(
-            func=mdp.wheel_x_alignment,
-            weight=-1.0,
-            params={"asset_cfg": wheel_body_cfg},
-        ),
         "wheel_distance": RewardTermCfg(
             func=mdp.wheel_distance,
             weight=-1.0,
@@ -623,8 +613,8 @@ def make_metrics() -> dict[str, MetricsTermCfg]:
 
 def make_sim(*, rough: bool) -> SimulationCfg:
     return SimulationCfg(
-        nconmax=256 if rough else None,
-        njmax=512 if rough else 300,
+        nconmax=512 if rough else None, # test for box terrain bug.
+        njmax=1024 if rough else 300,
         contact_sensor_maxmatch=256 if rough else 64,
         mujoco=MujocoCfg(
             timestep=0.005,

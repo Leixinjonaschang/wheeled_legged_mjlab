@@ -43,4 +43,5 @@ def wf_tron1b_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         save_interval=200,
         num_steps_per_env=24,
         max_iterations=30_000,
+        clip_actions=2.0,
     )
