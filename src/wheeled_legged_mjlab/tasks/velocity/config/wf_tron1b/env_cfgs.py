@@ -110,7 +110,15 @@ def make_sensors(*, rough: bool) -> tuple:
                     for body_name in WHEEL_BODY_NAMES
                 ),
                 ray_alignment="world",
-                pattern=RingPatternCfg.single_ring(radius=0.1, num_samples=8),
+                # pattern=RingPatternCfg.single_ring(radius=0.1, num_samples=8),
+                pattern=RingPatternCfg(
+                    rings=(                    
+                        RingPatternCfg.Ring(radius=0.1, num_samples=8),    # 10cm, 8个采样点                
+                        RingPatternCfg.Ring(radius=0.2, num_samples=12),  # 20cm, 12个采样点
+                        RingPatternCfg.Ring(radius=0.3, num_samples=18),  # 20cm, 12个采样点
+                    ),                                                                                      
+                    include_center=True,
+                ),
                 max_distance=1.0,
                 exclude_parent_body=True,
                 include_geom_groups=(0,),
@@ -613,8 +621,8 @@ def make_metrics() -> dict[str, MetricsTermCfg]:
 
 def make_sim(*, rough: bool) -> SimulationCfg:
     return SimulationCfg(
-        nconmax=512 if rough else None, # test for box terrain bug.
-        njmax=1024 if rough else 300,
+        nconmax=256 if rough else None, 
+        njmax=512 if rough else 300,
         contact_sensor_maxmatch=256 if rough else 64,
         mujoco=MujocoCfg(
             timestep=0.005,
@@ -681,8 +689,8 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
         terrain = cfg.scene.terrain
         if terrain is not None and terrain.terrain_generator is not None:
             terrain.terrain_generator.curriculum = False
-            terrain.terrain_generator.num_cols = 5
-            terrain.terrain_generator.num_rows = 5
+            terrain.terrain_generator.num_cols = 8
+            terrain.terrain_generator.num_rows = 8
             terrain.terrain_generator.border_width = 10.0
 
 
