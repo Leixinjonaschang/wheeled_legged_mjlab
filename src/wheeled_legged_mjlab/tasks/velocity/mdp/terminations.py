@@ -15,14 +15,47 @@ _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
 def non_finite_physics(env: ManagerBasedRlEnv) -> torch.Tensor:
-  """Terminate envs whose raw MuJoCo state has become non-finite."""
+  """Terminate envs whose physics or sensor state has become non-finite."""
   data = env.sim.data
   bad = torch.zeros((env.num_envs,), device=env.device, dtype=torch.bool)
-  for name in ("qpos", "qvel", "qacc", "qacc_warmstart"):
+  for name in (
+    "qpos",
+    "qvel",
+    "qacc",
+    "qacc_warmstart",
+    "sensordata",
+    "actuator_force",
+    "qfrc_actuator",
+  ):
     tensor = getattr(data, name, None)
     if tensor is None:
       continue
     bad |= ~torch.isfinite(tensor).reshape(env.num_envs, -1).all(dim=1)
+
+  for sensor in env.scene.sensors.values():
+    if not isinstance(sensor, ContactSensor):
+      continue
+    sensor_data = sensor.data
+    for name in (
+      "found",
+      "force",
+      "torque",
+      "dist",
+      "pos",
+      "normal",
+      "tangent",
+      "current_air_time",
+      "last_air_time",
+      "current_contact_time",
+      "last_contact_time",
+      "force_history",
+      "torque_history",
+      "dist_history",
+    ):
+      tensor = getattr(sensor_data, name, None)
+      if tensor is None:
+        continue
+      bad |= ~torch.isfinite(tensor).reshape(env.num_envs, -1).all(dim=1)
   return bad
 
 
