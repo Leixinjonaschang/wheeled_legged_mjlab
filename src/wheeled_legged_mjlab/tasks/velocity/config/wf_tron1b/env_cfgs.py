@@ -219,6 +219,9 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
             func=mdp.generated_commands,
             params={"command_name": COMMAND_NAME},
         ),
+        "domain_randomization_delta_quantity": ObservationTermCfg(
+            func=mdp.domain_randomization_delta_quantity,
+        ),
     }
 
     critic_terms = {
@@ -571,6 +574,7 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
     if rough:
         terminations["out_of_terrain_bounds"] = TerminationTermCfg(
             func=mdp.out_of_terrain_bounds,
+            params={"margin": 1.5},
             time_out=True,
         )
     return terminations
@@ -598,7 +602,7 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
                     },
                     {
                         "step": 10_000 * 24,
-                        "lin_vel_x": (-2.0, 3.0),
+                        "lin_vel_x": (-2.0, -2.0),
                         "lin_vel_y": (-1.0, 1.0),
                         "ang_vel_z": None,
                     },
