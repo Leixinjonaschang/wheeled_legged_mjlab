@@ -32,6 +32,12 @@ class TrainConfig:
   video_length: int = 200
   video_interval: int = 2000
   enable_nan_guard: bool = False
+  nan_obs_policy: Literal["disabled", "warn", "sanitize", "error"] | None = None
+  """Observation NaN/Inf policy for actor and critic groups.
+
+  If omitted, --enable-nan-guard uses "error" so long runs fail at the
+  offending observation term instead of only at the concatenated RSL-RL group.
+  """
   torchrunx_log_dir: str | None = None
   wandb_run_path: str | None = None
   wandb_checkpoint_name: str | None = None
@@ -101,7 +107,18 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   # Enable NaN guard if requested.
   if cfg.enable_nan_guard:
     cfg.env.sim.nan_guard.enabled = True
+    cfg.env.sim.nan_guard.output_dir = str(log_dir / "nan_guard")
     print(f"[INFO] NaN guard enabled, output dir: {cfg.env.sim.nan_guard.output_dir}")
+
+  nan_obs_policy = cfg.nan_obs_policy
+  if nan_obs_policy is None and cfg.enable_nan_guard:
+    nan_obs_policy = "error"
+  if nan_obs_policy is not None:
+    for group_name in ("actor", "critic"):
+      if group_name in cfg.env.observations:
+        cfg.env.observations[group_name].nan_policy = nan_obs_policy
+        cfg.env.observations[group_name].nan_check_per_term = True
+    print(f"[INFO] Observation NaN policy for actor/critic: {nan_obs_policy}")
 
   if rank == 0:
     print(f"[INFO] Logging experiment in directory: {log_dir}")

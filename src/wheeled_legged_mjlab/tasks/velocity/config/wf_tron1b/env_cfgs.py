@@ -557,6 +557,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
 def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
     """Episode reset conditions."""
     terminations = {
+        "non_finite_physics": TerminationTermCfg(func=mdp.non_finite_physics),
         "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
         "fell_over": TerminationTermCfg(
             func=mdp.bad_orientation,
@@ -689,8 +690,8 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
         terrain = cfg.scene.terrain
         if terrain is not None and terrain.terrain_generator is not None:
             terrain.terrain_generator.curriculum = False
-            terrain.terrain_generator.num_cols = 8
-            terrain.terrain_generator.num_rows = 8
+            terrain.terrain_generator.num_cols = 4
+            terrain.terrain_generator.num_rows = 4
             terrain.terrain_generator.border_width = 10.0
 
 

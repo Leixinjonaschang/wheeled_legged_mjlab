@@ -14,6 +14,18 @@ if TYPE_CHECKING:
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
+def non_finite_physics(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Terminate envs whose raw MuJoCo state has become non-finite."""
+  data = env.sim.data
+  bad = torch.zeros((env.num_envs,), device=env.device, dtype=torch.bool)
+  for name in ("qpos", "qvel", "qacc", "qacc_warmstart"):
+    tensor = getattr(data, name, None)
+    if tensor is None:
+      continue
+    bad |= ~torch.isfinite(tensor).reshape(env.num_envs, -1).all(dim=1)
+  return bad
+
+
 def illegal_contact(
   env: ManagerBasedRlEnv,
   sensor_name: str,
