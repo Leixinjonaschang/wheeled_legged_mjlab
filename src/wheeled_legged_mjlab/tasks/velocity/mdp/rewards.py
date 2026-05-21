@@ -197,7 +197,10 @@ def self_collision_cost(
   data = sensor.data
   if data.force_history is not None:
     # force_history: [B, N, H, 3]
-    force_mag = torch.norm(data.force_history, dim=-1)  # [B, N, H]
+    force_history = torch.nan_to_num(
+      data.force_history, nan=0.0, posinf=0.0, neginf=0.0
+    )
+    force_mag = torch.norm(force_history, dim=-1)  # [B, N, H]
     hit = (force_mag > force_threshold).any(dim=1)  # [B, H]
     return hit.sum(dim=-1).float()  # [B]
   assert data.found is not None
@@ -456,7 +459,7 @@ def soft_landing(
   contact_sensor: ContactSensor = env.scene[sensor_name]
   sensor_data = contact_sensor.data
   assert sensor_data.force is not None
-  forces = sensor_data.force  # [B, N, 3]
+  forces = torch.nan_to_num(sensor_data.force, nan=0.0, posinf=0.0, neginf=0.0)
   force_magnitude = torch.norm(forces, dim=-1)  # [B, N]
   first_contact = contact_sensor.compute_first_contact(dt=env.step_dt)  # [B, N]
   landing_impact = force_magnitude * first_contact.float()  # [B, N]

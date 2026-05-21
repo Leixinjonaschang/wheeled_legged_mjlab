@@ -6,11 +6,63 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
 from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
+
+def _replace_non_finite_(tensor: torch.Tensor, env_ids: torch.Tensor) -> None:
+    if not torch.is_floating_point(tensor):
+        return
+    tensor[env_ids] = torch.nan_to_num(tensor[env_ids], nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def clear_non_finite_sim_data(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+) -> None:
+    """Clear stale non-finite physics/sensor buffers after resetting envs."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, dtype=torch.int64, device=env.device)
+
+    data = env.sim.data
+    for name in (
+        "qpos",
+        "qvel",
+        "qacc",
+        "qacc_warmstart",
+        "sensordata",
+        "actuator_force",
+        "qfrc_actuator",
+    ):
+        tensor = getattr(data, name, None)
+        if tensor is not None:
+            _replace_non_finite_(tensor, env_ids)
+
+    for sensor in env.scene.sensors.values():
+        if not isinstance(sensor, ContactSensor):
+            continue
+        for name in (
+            "force",
+            "torque",
+            "dist",
+            "pos",
+            "normal",
+            "tangent",
+            "current_air_time",
+            "last_air_time",
+            "current_contact_time",
+            "last_contact_time",
+            "force_history",
+            "torque_history",
+            "dist_history",
+        ):
+            tensor = getattr(sensor.data, name, None)
+            if tensor is not None:
+                _replace_non_finite_(tensor, env_ids)
 
 
 def prepare_quantities(
