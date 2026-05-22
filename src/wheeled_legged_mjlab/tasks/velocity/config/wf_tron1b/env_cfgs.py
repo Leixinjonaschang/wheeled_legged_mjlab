@@ -367,6 +367,11 @@ def make_events() -> dict[str, EventTermCfg]:
                 ),
             },
         ),
+        "clear_non_finite_sim_data": EventTermCfg(
+            func=mdp.clear_non_finite_sim_data,
+            mode="reset",
+            params={},
+        ),
         "push_robot": EventTermCfg(
             func=mdp.push_by_setting_velocity,
             mode="interval",
