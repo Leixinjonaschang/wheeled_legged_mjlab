@@ -6,10 +6,12 @@ from mjlab.rl import (
     RslRlPpoAlgorithmCfg,
 )
 
+class WFTRON1BRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
+    trial_message: str = ""
 
-def wf_tron1b_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+def wf_tron1b_ppo_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
     """Create RL runner configuration for WF-TRON1B velocity task."""
-    return RslRlOnPolicyRunnerCfg(
+    return WFTRON1BRslRlOnPolicyRunnerCfg(
         actor=RslRlModelCfg(
             hidden_dims=(512, 256, 128),
             activation="elu",
@@ -44,4 +46,5 @@ def wf_tron1b_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         num_steps_per_env=24,
         max_iterations=30_000,
         clip_actions=2.0,
+        upload_model=False,
     )
