@@ -61,6 +61,7 @@ Common agent options:
 --agent.save-interval 50
 --agent.experiment-name wf_tron1b_velocity
 --agent.run-name test_run
+--agent.trial-message "description of this training run"
 --agent.logger wandb
 --agent.logger tensorboard
 --agent.wandb-project mjlab
@@ -111,6 +112,7 @@ Example debug run:
 uv run python scripts/rsl_rl/train.py Mjlab-Velocity-Rough-WF-Tron1B \
   --gpu-ids [0] \
   --agent.run-name debug \
+  --agent.trial-message "lateral command mode test" \
   --agent.max-iterations 1000 \
   --agent.save-interval 100 \
   --env.scene.num-envs 512 \
