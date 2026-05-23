@@ -607,7 +607,7 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
                     },
                     {
                         "step": 10_000 * 24,
-                        "lin_vel_x": (-2.0, -2.0),
+                        "lin_vel_x": (-2.0, 2.0),
                         "lin_vel_y": (-1.0, 1.0),
                         "ang_vel_z": None,
                     },
