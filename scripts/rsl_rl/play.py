@@ -11,7 +11,6 @@ from typing import Literal
 import torch
 import tyro
 
-from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.scripts._cli import maybe_print_top_level_help
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
@@ -21,6 +20,8 @@ from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 from mjlab.viewer.viser.viewer import CheckpointManager, format_time_ago
+
+from wheeled_legged_mjlab.tasks.velocity.env import WheeledLeggedVelocityEnv
 
 
 def _parse_wandb_dt(value: str | datetime) -> datetime:
@@ -165,7 +166,7 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(
       "[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir)."
     )
-  env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+  env = WheeledLeggedVelocityEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
   if TRAINED_MODE and cfg.video:
     print("[INFO] Recording videos during play")

@@ -49,6 +49,79 @@ def foot_contact_forces(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tenso
   return torch.sign(forces_flat) * torch.log1p(torch.abs(forces_flat))
 
 
+def _resolve_grid_shape(
+  num_samples: int,
+  grid_shape: tuple[int, int] | None,
+) -> tuple[int, int]:
+  if grid_shape is not None:
+    rows, cols = grid_shape
+    if rows * cols != num_samples:
+      raise ValueError(
+        f"grid_shape={grid_shape} does not match {num_samples} height samples"
+      )
+    return rows, cols
+
+  side = int(num_samples**0.5)
+  if side * side != num_samples:
+    raise ValueError(
+      f"Cannot infer a square grid from {num_samples} height samples; "
+      "pass grid_shape explicitly."
+    )
+  return side, side
+
+
+def terrain_roughness_indicator(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  wheel_radius: float = 0.127,
+  std_weight: float = 0.3,
+  range_weight: float = 0.3,
+  jump_weight: float = 0.4,
+  gate_min: float = 0.25,
+  gate_max: float = 0.85,
+  grid_shape: tuple[int, int] | None = None,
+) -> torch.Tensor:
+  """Roughness gate from local wheel terrain scans."""
+  sensor = env.scene[sensor_name]
+  assert isinstance(sensor, TerrainHeightSensor), (
+    f"terrain_roughness_indicator requires a TerrainHeightSensor, got {type(sensor).__name__}"
+  )
+  height_samples = sensor.data.heights
+  if height_samples.ndim != 3:
+    raise ValueError(
+      "terrain_roughness_indicator requires unreduced height samples with shape "
+      f"[B, F, N], got {tuple(height_samples.shape)}"
+    )
+  if gate_max <= gate_min:
+    raise ValueError(f"gate_max ({gate_max}) must be greater than gate_min ({gate_min})")
+
+  height_samples = torch.nan_to_num(height_samples, nan=0.0, posinf=0.0, neginf=0.0)
+  std = torch.std(height_samples, dim=-1, unbiased=False)
+  height_range = height_samples.max(dim=-1).values - height_samples.min(dim=-1).values
+
+  rows, cols = _resolve_grid_shape(height_samples.shape[-1], grid_shape)
+  grid = height_samples.view(height_samples.shape[0], height_samples.shape[1], rows, cols)
+  if cols > 1:
+    jump_x = torch.abs(grid[..., 1:] - grid[..., :-1]).amax(dim=(-1, -2))
+  else:
+    jump_x = torch.zeros_like(std)
+  if rows > 1:
+    jump_y = torch.abs(grid[..., 1:, :] - grid[..., :-1, :]).amax(dim=(-1, -2))
+  else:
+    jump_y = torch.zeros_like(std)
+  jump = torch.maximum(jump_x, jump_y)
+
+  inv_radius = 1.0 / wheel_radius
+  foot_roughness = (
+    std_weight * std * inv_radius
+    + range_weight * height_range * inv_radius
+    + jump_weight * jump * inv_radius
+  )
+  robot_roughness = foot_roughness.max(dim=1).values
+  gate = torch.clamp((robot_roughness - gate_min) / (gate_max - gate_min), 0.0, 1.0)
+  return gate.unsqueeze(-1)
+
+
 def _normalize_to_unit_range(
   value: torch.Tensor, lower: float, upper: float
 ) -> torch.Tensor:

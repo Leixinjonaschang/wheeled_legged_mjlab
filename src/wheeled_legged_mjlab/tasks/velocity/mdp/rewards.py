@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
 
 from mjlab.entity import Entity
-from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import BuiltinSensor, ContactSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
@@ -18,10 +17,163 @@ from mjlab.utils.lab_api.string import (
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
+  from mjlab.managers.reward_manager import RewardTermCfg
   from mjlab.viewer.debug_visualizer import DebugVisualizer
 
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
+
+class _TerrainRoughnessStats(NamedTuple):
+  std: torch.Tensor
+  height_range: torch.Tensor
+  jump: torch.Tensor
+  foot_roughness: torch.Tensor
+  robot_roughness: torch.Tensor
+  gate: torch.Tensor
+
+
+def _roughness_gate_active(
+  gate: torch.Tensor,
+  threshold: float,
+) -> torch.Tensor:
+  return (gate > threshold).float()
+
+
+def _resolve_grid_shape(
+  num_samples: int,
+  grid_shape: tuple[int, int] | None,
+) -> tuple[int, int]:
+  if grid_shape is not None:
+    rows, cols = grid_shape
+    if rows * cols != num_samples:
+      raise ValueError(
+        f"grid_shape={grid_shape} does not match {num_samples} height samples"
+      )
+    return rows, cols
+
+  side = int(num_samples**0.5)
+  if side * side != num_samples:
+    raise ValueError(
+      f"Cannot infer a square grid from {num_samples} height samples; "
+      "pass grid_shape explicitly."
+    )
+  return side, side
+
+
+def _terrain_roughness_from_height_samples(
+  height_samples: torch.Tensor,
+  *,
+  wheel_radius: float,
+  std_weight: float,
+  range_weight: float,
+  jump_weight: float,
+  gate_min: float,
+  gate_max: float,
+  grid_shape: tuple[int, int] | None,
+) -> _TerrainRoughnessStats:
+  """Compute roughness from per-wheel local clearance samples.
+
+  ``TerrainHeightSensor`` reports frame_z - hit_z. Standard deviation, range, and
+  neighbor jumps are invariant to the sign flip from terrain height to clearance.
+  """
+  if height_samples.ndim != 3:
+    raise ValueError(
+      "terrain roughness requires unreduced height samples with shape [B, F, N], "
+      f"got {tuple(height_samples.shape)}"
+    )
+  if gate_max <= gate_min:
+    raise ValueError(f"gate_max ({gate_max}) must be greater than gate_min ({gate_min})")
+
+  height_samples = torch.nan_to_num(height_samples, nan=0.0, posinf=0.0, neginf=0.0)
+  std = torch.std(height_samples, dim=-1, unbiased=False)
+  height_range = height_samples.max(dim=-1).values - height_samples.min(dim=-1).values
+
+  rows, cols = _resolve_grid_shape(height_samples.shape[-1], grid_shape)
+  grid = height_samples.view(height_samples.shape[0], height_samples.shape[1], rows, cols)
+  if cols > 1:
+    jump_x = torch.abs(grid[..., 1:] - grid[..., :-1]).amax(dim=(-1, -2))
+  else:
+    jump_x = torch.zeros_like(std)
+  if rows > 1:
+    jump_y = torch.abs(grid[..., 1:, :] - grid[..., :-1, :]).amax(dim=(-1, -2))
+  else:
+    jump_y = torch.zeros_like(std)
+  jump = torch.maximum(jump_x, jump_y)
+
+  inv_radius = 1.0 / wheel_radius
+  foot_roughness = (
+    std_weight * std * inv_radius
+    + range_weight * height_range * inv_radius
+    + jump_weight * jump * inv_radius
+  )
+  robot_roughness = foot_roughness.max(dim=1).values
+  gate = torch.clamp((robot_roughness - gate_min) / (gate_max - gate_min), 0.0, 1.0)
+  return _TerrainRoughnessStats(
+    std=std,
+    height_range=height_range,
+    jump=jump,
+    foot_roughness=foot_roughness,
+    robot_roughness=robot_roughness,
+    gate=gate,
+  )
+
+
+def _terrain_roughness_from_sensor(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  *,
+  wheel_radius: float = 0.127,
+  std_weight: float = 0.3,
+  range_weight: float = 0.3,
+  jump_weight: float = 0.4,
+  gate_min: float = 0.25,
+  gate_max: float = 0.85,
+  grid_shape: tuple[int, int] | None = None,
+  log: bool = True,
+) -> _TerrainRoughnessStats:
+  sensor = env.scene[sensor_name]
+  assert isinstance(sensor, TerrainHeightSensor), (
+    f"terrain roughness requires a TerrainHeightSensor, got {type(sensor).__name__}"
+  )
+  stats = _terrain_roughness_from_height_samples(
+    sensor.data.heights,
+    wheel_radius=wheel_radius,
+    std_weight=std_weight,
+    range_weight=range_weight,
+    jump_weight=jump_weight,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  if log:
+    log_data = env.extras.setdefault("log", {})
+    log_data["Metrics/roughness_left_mean"] = stats.foot_roughness[:, 0].mean()
+    log_data["Metrics/roughness_right_mean"] = stats.foot_roughness[:, 1].mean()
+    log_data["Metrics/roughness_max_mean"] = stats.robot_roughness.mean()
+    log_data["Metrics/roughness_lambda_mean"] = stats.gate.mean()
+    log_data["Metrics/roughness_std_over_R_mean"] = (
+      stats.std / wheel_radius
+    ).mean()
+    log_data["Metrics/roughness_range_over_R_mean"] = (
+      stats.height_range / wheel_radius
+    ).mean()
+    log_data["Metrics/roughness_jump_over_R_mean"] = (
+      stats.jump / wheel_radius
+    ).mean()
+  return stats
+
+
+def _command_active(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  command_threshold: float,
+) -> torch.Tensor:
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  linear_norm = torch.norm(command[:, :2], dim=1)
+  angular_norm = torch.abs(command[:, 2])
+  return (linear_norm + angular_norm > command_threshold).float()
 
 
 def track_linear_velocity(
@@ -331,6 +483,156 @@ def feet_air_time(
       total_command = linear_norm + angular_norm
       scale = (total_command > command_threshold).float()
       reward *= scale
+  return reward
+
+
+def rough_wheel_usage(
+  env: ManagerBasedRlEnv,
+  roughness_sensor_name: str,
+  asset_cfg: SceneEntityCfg,
+  wheel_radius: float = 0.127,
+  std_weight: float = 0.3,
+  range_weight: float = 0.3,
+  jump_weight: float = 0.4,
+  gate_min: float = 0.25,
+  gate_max: float = 0.85,
+  grid_shape: tuple[int, int] | None = None,
+  roughness_gate_threshold: float = 0.0,
+) -> torch.Tensor:
+  """Penalize wheel speed only when local wheel terrain is rough."""
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    std_weight=std_weight,
+    range_weight=range_weight,
+    jump_weight=jump_weight,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  asset: Entity = env.scene[asset_cfg.name]
+  wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
+  rough_active = _roughness_gate_active(stats.gate, roughness_gate_threshold)
+  return rough_active * torch.sum(torch.square(wheel_vel), dim=1)
+
+
+def rough_wheel_foot_clearance(
+  env: ManagerBasedRlEnv,
+  clearance_sensor_name: str,
+  roughness_sensor_name: str,
+  contact_sensor_name: str,
+  command_name: str,
+  wheel_radius: float = 0.127,
+  std_weight: float = 0.3,
+  range_weight: float = 0.3,
+  jump_weight: float = 0.4,
+  gate_min: float = 0.25,
+  gate_max: float = 0.85,
+  grid_shape: tuple[int, int] | None = None,
+  base_target_height: float = 0.06,
+  range_scale: float = 0.5,
+  max_target_height: float = 0.18,
+  target_std: float = 0.04,
+  command_threshold: float = 0.05,
+  roughness_gate_threshold: float = 0.0,
+) -> torch.Tensor:
+  """Reward wheel-foot swing clearance toward a roughness-aware local target."""
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    std_weight=std_weight,
+    range_weight=range_weight,
+    jump_weight=jump_weight,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+
+  clearance_sensor = env.scene[clearance_sensor_name]
+  assert isinstance(clearance_sensor, TerrainHeightSensor), (
+    "rough_wheel_foot_clearance requires a TerrainHeightSensor, "
+    f"got {type(clearance_sensor).__name__}"
+  )
+  wheel_center_clearance = clearance_sensor.data.heights
+  if wheel_center_clearance.ndim != 2:
+    raise ValueError(
+      "rough_wheel_foot_clearance expects reduced clearance samples with shape "
+      f"[B, F], got {tuple(wheel_center_clearance.shape)}"
+    )
+  wheel_foot_clearance = torch.clamp(wheel_center_clearance - wheel_radius, min=0.0)
+
+  contact_sensor: ContactSensor = env.scene[contact_sensor_name]
+  assert contact_sensor.data.found is not None
+  in_air = (contact_sensor.data.found == 0).float()
+  active = _command_active(env, command_name, command_threshold)
+
+  target = base_target_height + range_scale * stats.height_range
+  target = torch.clamp(target, max=max_target_height)
+  error = wheel_foot_clearance - target
+  reward_per_foot = torch.exp(-torch.square(error) / (target_std**2))
+  rough_active = _roughness_gate_active(stats.gate, roughness_gate_threshold)
+  reward = torch.sum(reward_per_foot * in_air, dim=1) * rough_active * active
+
+  log_data = env.extras.setdefault("log", {})
+  log_data["Metrics/rough_wheel_foot_clearance_mean"] = (
+    wheel_foot_clearance.mean()
+  )
+  log_data["Metrics/rough_wheel_foot_clearance_target_mean"] = target.mean()
+  return reward
+
+
+def rough_foot_clearance(*args, **kwargs) -> torch.Tensor:
+  """Backward-compatible alias for old configs."""
+  return rough_wheel_foot_clearance(*args, **kwargs)
+
+
+def rough_contact_pattern(
+  env: ManagerBasedRlEnv,
+  roughness_sensor_name: str,
+  contact_sensor_name: str,
+  command_name: str,
+  wheel_radius: float = 0.127,
+  std_weight: float = 0.3,
+  range_weight: float = 0.3,
+  jump_weight: float = 0.4,
+  gate_min: float = 0.25,
+  gate_max: float = 0.85,
+  grid_shape: tuple[int, int] | None = None,
+  command_threshold: float = 0.05,
+  roughness_gate_threshold: float = 0.0,
+) -> torch.Tensor:
+  """Reward rough-terrain contact patterns with a negative value for bad modes."""
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    std_weight=std_weight,
+    range_weight=range_weight,
+    jump_weight=jump_weight,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+
+  contact_sensor: ContactSensor = env.scene[contact_sensor_name]
+  assert contact_sensor.data.found is not None
+  in_contact = contact_sensor.data.found > 0
+  contact_count = torch.sum(in_contact.float(), dim=1)
+  num_contacts = in_contact.shape[1]
+  double_contact = contact_count == num_contacts
+  no_contact = contact_count == 0
+  active = _command_active(env, command_name, command_threshold)
+  rough_active = _roughness_gate_active(stats.gate, roughness_gate_threshold)
+  reward = -(double_contact.float() + no_contact.float()) * rough_active * active
+
+  log_data = env.extras.setdefault("log", {})
+  log_data["Metrics/rough_double_contact_mean"] = double_contact.float().mean()
+  log_data["Metrics/rough_no_contact_mean"] = no_contact.float().mean()
+  log_data["Metrics/rough_single_contact_mean"] = (
+    (contact_count == 1).float().mean()
+  )
   return reward
 
 
