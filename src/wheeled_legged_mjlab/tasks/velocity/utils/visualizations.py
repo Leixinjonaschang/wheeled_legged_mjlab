@@ -63,7 +63,7 @@ def draw_roughness_gate_marker(
     active = gate[env_id].item() > gate_threshold
     color = (0.0, 1.0, 0.0, 0.85) if active else (0.45, 0.45, 0.45, 0.65)
     visualizer.add_sphere(
-      center=centers[env_id],
+      center=centers[env_id].cpu().numpy(),
       radius=marker_radius,
       color=color,
       label="roughness_gate_marker",

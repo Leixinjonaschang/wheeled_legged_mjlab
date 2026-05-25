@@ -71,7 +71,7 @@ WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
 WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
-TERRAIN_SCAN_GRID_SHAPE = (21, 21)
+TERRAIN_SCAN_GRID_SHAPE = (11, 11)
 
 
 def make_scene(*, rough: bool) -> SceneCfg:
@@ -539,7 +539,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "joint_power": RewardTermCfg(
             func=mdp.joint_power_l1,
-            weight=-2.0e-5,
+            weight=-5.0e-5,
             params={"asset_cfg": all_joint_cfg},
         ),
         "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
