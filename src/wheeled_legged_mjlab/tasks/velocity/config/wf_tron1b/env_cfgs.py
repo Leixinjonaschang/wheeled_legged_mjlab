@@ -29,7 +29,6 @@ from mjlab.sensor import (
     GridPatternCfg,
     ObjRef,
     RayCastSensorCfg,
-    RingPatternCfg,
     TerrainHeightSensorCfg,
 )
 from mjlab.sim import MujocoCfg, SimulationCfg
@@ -69,9 +68,10 @@ NON_WHEEL_COLLISION_GEOMS = (
 BASE_HEIGHT_TARGET = 0.80
 WHEEL_DISTANCE_RANGE = (0.25, 0.50)
 WHEEL_RADIUS = 0.127
-WHEEL_ROUGHNESS_SCAN_SIZE = (0.40, 0.40)
-WHEEL_ROUGHNESS_SCAN_RESOLUTION = 0.10
-WHEEL_ROUGHNESS_GRID_SHAPE = (5, 5)
+WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
+WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
+WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
+TERRAIN_SCAN_GRID_SHAPE = (21, 21)
 
 
 def make_scene(*, rough: bool) -> SceneCfg:
@@ -99,7 +99,7 @@ def make_sensors(*, rough: bool) -> tuple:
                 name="terrain_scan",
                 frame=ObjRef(type="body", name=BASE_BODY, entity=ROBOT_ENTITY),
                 ray_alignment="yaw",
-                pattern=GridPatternCfg(size=(2.0, 2.0), resolution=0.1),
+                pattern=GridPatternCfg(size=(1.0, 1.0), resolution=0.1),
                 max_distance=10.0,
                 exclude_parent_body=True,
                 include_geom_groups=(0,),
@@ -114,30 +114,9 @@ def make_sensors(*, rough: bool) -> tuple:
                     for body_name in WHEEL_BODY_NAMES
                 ),
                 ray_alignment="world",
-                pattern=RingPatternCfg.single_ring(radius=0.1, num_samples=8),
-                reduction="min",
-                max_distance=1.0,
-                exclude_parent_body=True,
-                include_geom_groups=(0,),
-                debug_vis=True,
-                viz=TerrainHeightSensorCfg.VizCfg(
-                    show_rays=True,
-                    hit_color=(1.0, 0.0, 1.0, 0.8),
-                    hit_sphere_color=(1.0, 0.0, 1.0, 1.0),
-                ),
-            )
-        )
-        sensors.append(
-            TerrainHeightSensorCfg(
-                name="wheel_roughness_scan",
-                frame=tuple(
-                    ObjRef(type="body", name=body_name, entity=ROBOT_ENTITY)
-                    for body_name in WHEEL_BODY_NAMES
-                ),
-                ray_alignment="world",
                 pattern=GridPatternCfg(
-                    size=WHEEL_ROUGHNESS_SCAN_SIZE,
-                    resolution=WHEEL_ROUGHNESS_SCAN_RESOLUTION,
+                    size=WHEEL_HEIGHT_SCAN_SIZE,
+                    resolution=WHEEL_HEIGHT_SCAN_RESOLUTION,
                 ),
                 reduction="none",
                 max_distance=1.0,
@@ -282,14 +261,14 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
         critic_terms["roughness_indicator"] = ObservationTermCfg(
             func=mdp.terrain_roughness_indicator,
             params={
-                "sensor_name": "wheel_roughness_scan",
+                "sensor_name": "terrain_scan",
                 "wheel_radius": WHEEL_RADIUS,
                 "std_weight": 0.3,
                 "range_weight": 0.3,
                 "jump_weight": 0.4,
-                "gate_min": 0.25,
-                "gate_max": 0.85,
-                "grid_shape": WHEEL_ROUGHNESS_GRID_SHAPE,
+                "gate_min": 0.0,
+                "gate_max": 0.2,
+                "grid_shape": TERRAIN_SCAN_GRID_SHAPE,
             },
         )
 
@@ -377,7 +356,7 @@ def make_events() -> dict[str, EventTermCfg]:
             func=mdp.reset_joints_by_offset,
             mode="reset",
             params={
-                "position_range": (-0.05, 0.05),
+                "position_range": (-0.2, 0.2),
                 "velocity_range": (-0.1, 0.1),
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
@@ -390,7 +369,7 @@ def make_events() -> dict[str, EventTermCfg]:
             mode="reset",
             params={
                 "position_range": (0.0, 0.0),
-                "velocity_range": (-0.2, 0.2),
+                "velocity_range": (-0.01, 0.01),
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
                     joint_names=WHEEL_JOINT_NAMES,
@@ -471,7 +450,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "track_angular_velocity": RewardTermCfg(
             func=mdp.track_angular_velocity,
-            weight=1.5,
+            weight=2.0,
             params={"command_name": COMMAND_NAME, "std": math.sqrt(0.25)},
         ),
         "upright": RewardTermCfg(
@@ -587,7 +566,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
 
     if rough:
         roughness_params = {
-            "roughness_sensor_name": "wheel_roughness_scan",
+            "roughness_sensor_name": "terrain_scan",
             "wheel_radius": WHEEL_RADIUS,
             "std_weight": 0.3,
             "range_weight": 0.3,
@@ -595,13 +574,13 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             "gate_min": 0.0,
             "gate_max": 0.2,
             "roughness_gate_threshold": 0.0,
-            "grid_shape": WHEEL_ROUGHNESS_GRID_SHAPE,
+            "grid_shape": TERRAIN_SCAN_GRID_SHAPE,
         }
         rewards.update(
-            {
+            {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
-                    weight=-1.0e-2,
+                    weight=-7.0e-2,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_joint_cfg,
@@ -609,13 +588,14 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "rough_wheel_foot_clearance": RewardTermCfg(
                     func=mdp.rough_wheel_foot_clearance,
-                    weight=5,
+                    weight=2,
                     params={
                         **roughness_params,
                         "clearance_sensor_name": "wheel_height_scan",
+                        "clearance_grid_shape": WHEEL_HEIGHT_GRID_SHAPE,
                         "contact_sensor_name": "wheels_ground_contact",
                         "command_name": COMMAND_NAME,
-                        "base_target_height": 0.06,
+                        "base_target_height": 0.03,
                         "range_scale": 0.5,
                         "max_target_height": 0.18,
                         "target_std": 0.04,
