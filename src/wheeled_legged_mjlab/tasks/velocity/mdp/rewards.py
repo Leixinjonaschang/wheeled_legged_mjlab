@@ -472,6 +472,65 @@ def wheel_x_alignment(
   return torch.abs(wheel_pos_b[:, 0, 0] - wheel_pos_b[:, 1, 0])
 
 
+def non_rough_wheel_lateral_symmetry(
+  env: ManagerBasedRlEnv,
+  roughness_sensor_name: str,
+  std: float,
+  asset_cfg: SceneEntityCfg,
+  wheel_radius: float = 0.127,
+  std_weight: float = 0.3,
+  range_weight: float = 0.3,
+  jump_weight: float = 0.4,
+  gate_min: float = 0.25,
+  gate_max: float = 0.85,
+  grid_shape: tuple[int, int] | None = None,
+  roughness_gate_threshold: float = 0.0,
+) -> torch.Tensor:
+  """Reward wheel lateral symmetry only when terrain is not rough."""
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    std_weight=std_weight,
+    range_weight=range_weight,
+    jump_weight=jump_weight,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
+  return non_rough_active * wheel_lateral_symmetry(env, std, asset_cfg)
+
+
+def non_rough_wheel_x_alignment(
+  env: ManagerBasedRlEnv,
+  roughness_sensor_name: str,
+  asset_cfg: SceneEntityCfg,
+  wheel_radius: float = 0.127,
+  std_weight: float = 0.3,
+  range_weight: float = 0.3,
+  jump_weight: float = 0.4,
+  gate_min: float = 0.25,
+  gate_max: float = 0.85,
+  grid_shape: tuple[int, int] | None = None,
+  roughness_gate_threshold: float = 0.0,
+) -> torch.Tensor:
+  """Penalize front-back wheel misalignment only when terrain is not rough."""
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    std_weight=std_weight,
+    range_weight=range_weight,
+    jump_weight=jump_weight,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
+  return non_rough_active * wheel_x_alignment(env, asset_cfg)
+
+
 def wheel_distance(
   env: ManagerBasedRlEnv,
   min_distance: float,

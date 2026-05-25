@@ -624,12 +624,31 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "rough_contact_pattern": RewardTermCfg(
                     func=mdp.rough_contact_pattern,
-                    weight=1,
+                    weight=0,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
                         "command_name": COMMAND_NAME,
                         "command_threshold": 0.05,
+                    },
+                
+                # wheeled motion
+                ),
+                "non_rough_wheel_lateral_symmetry": RewardTermCfg(
+                    func=mdp.non_rough_wheel_lateral_symmetry,
+                    weight=0.5,
+                    params={
+                        **roughness_params,
+                        "asset_cfg": wheel_body_cfg,
+                        "std": math.sqrt(0.5),
+                    },
+                ),
+                "non_rough_wheel_x_alignment": RewardTermCfg(
+                    func=mdp.non_rough_wheel_x_alignment,
+                    weight=-50.0,
+                    params={
+                        **roughness_params,
+                        "asset_cfg": wheel_body_cfg,
                     },
                 ),
             }
