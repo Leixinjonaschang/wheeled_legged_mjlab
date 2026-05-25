@@ -677,6 +677,19 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
             params={"margin": 1.5},
             time_out=True,
         )
+        terminations["velocity_direction_deviation"] = TerminationTermCfg(
+            func=mdp.velocity_direction_deviation,
+            params={
+                "command_name": COMMAND_NAME,
+                "activation_step": 5_000 * 24,
+                "command_norm_threshold": 0.2,
+                "actual_speed_threshold": 0.15,
+                "angle_threshold_deg": 35.0,
+                "duration_s": 0.15,
+                "command_grace_s": 0.5,
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+            },
+        )
     return terminations
 
 
@@ -759,6 +772,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
 
     if rough:
         cfg.terminations.pop("out_of_terrain_bounds", None)
+        cfg.terminations.pop("velocity_direction_deviation", None)
         cfg.events["randomize_terrain"] = EventTermCfg(
             func=mdp.randomize_terrain,
             mode="reset",
