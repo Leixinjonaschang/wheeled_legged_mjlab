@@ -7,7 +7,7 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.sensor import BuiltinSensor, ContactSensor
+from mjlab.sensor import BuiltinSensor, ContactSensor, RayCastSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.tasks.velocity.mdp.terrain_utils import terrain_normal_from_sensors
 from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
@@ -38,6 +38,13 @@ def _roughness_gate_active(
   threshold: float,
 ) -> torch.Tensor:
   return (gate > threshold).float()
+
+
+def _roughness_gate_inactive(
+  gate: torch.Tensor,
+  threshold: float,
+) -> torch.Tensor:
+  return 1.0 - _roughness_gate_active(gate, threshold)
 
 
 def _resolve_grid_shape(
@@ -119,6 +126,33 @@ def _terrain_roughness_from_height_samples(
   )
 
 
+def _terrain_clearance_samples(
+  sensor: TerrainHeightSensor | RayCastSensor,
+) -> torch.Tensor:
+  if isinstance(sensor, TerrainHeightSensor):
+    return sensor.data.heights
+
+  if isinstance(sensor, RayCastSensor):
+    data = sensor.data
+    f_count = sensor.num_frames
+    n_count = sensor.num_rays_per_frame
+    batch_size = data.distances.shape[0]
+    frame_z = data.frame_pos_w[:, :, 2:3]
+    hit_z = data.hit_pos_w[..., 2].view(batch_size, f_count, n_count)
+    heights = frame_z - hit_z
+    miss_mask = data.distances.view(batch_size, f_count, n_count) < 0
+    return torch.where(
+      miss_mask,
+      torch.full_like(heights, sensor.cfg.max_distance),
+      heights,
+    )
+
+  raise TypeError(
+    "terrain roughness requires a TerrainHeightSensor or RayCastSensor, "
+    f"got {type(sensor).__name__}"
+  )
+
+
 def _terrain_roughness_from_sensor(
   env: ManagerBasedRlEnv,
   sensor_name: str,
@@ -133,11 +167,8 @@ def _terrain_roughness_from_sensor(
   log: bool = True,
 ) -> _TerrainRoughnessStats:
   sensor = env.scene[sensor_name]
-  assert isinstance(sensor, TerrainHeightSensor), (
-    f"terrain roughness requires a TerrainHeightSensor, got {type(sensor).__name__}"
-  )
   stats = _terrain_roughness_from_height_samples(
-    sensor.data.heights,
+    _terrain_clearance_samples(sensor),
     wheel_radius=wheel_radius,
     std_weight=std_weight,
     range_weight=range_weight,
@@ -148,8 +179,10 @@ def _terrain_roughness_from_sensor(
   )
   if log:
     log_data = env.extras.setdefault("log", {})
-    log_data["Metrics/roughness_left_mean"] = stats.foot_roughness[:, 0].mean()
-    log_data["Metrics/roughness_right_mean"] = stats.foot_roughness[:, 1].mean()
+    log_data["Metrics/roughness_mean"] = stats.foot_roughness.mean()
+    if stats.foot_roughness.shape[1] >= 2:
+      log_data["Metrics/roughness_left_mean"] = stats.foot_roughness[:, 0].mean()
+      log_data["Metrics/roughness_right_mean"] = stats.foot_roughness[:, 1].mean()
     log_data["Metrics/roughness_max_mean"] = stats.robot_roughness.mean()
     log_data["Metrics/roughness_lambda_mean"] = stats.gate.mean()
     log_data["Metrics/roughness_std_over_R_mean"] = (
@@ -530,6 +563,7 @@ def rough_wheel_foot_clearance(
   gate_min: float = 0.25,
   gate_max: float = 0.85,
   grid_shape: tuple[int, int] | None = None,
+  clearance_grid_shape: tuple[int, int] | None = None,
   base_target_height: float = 0.06,
   range_scale: float = 0.5,
   max_target_height: float = 0.18,
@@ -556,10 +590,19 @@ def rough_wheel_foot_clearance(
     f"got {type(clearance_sensor).__name__}"
   )
   wheel_center_clearance = clearance_sensor.data.heights
-  if wheel_center_clearance.ndim != 2:
+  if wheel_center_clearance.ndim == 3:
+    _resolve_grid_shape(wheel_center_clearance.shape[-1], clearance_grid_shape)
+    local_height_range = (
+      wheel_center_clearance.max(dim=-1).values
+      - wheel_center_clearance.min(dim=-1).values
+    )
+    wheel_center_clearance = wheel_center_clearance.amin(dim=-1)
+  elif wheel_center_clearance.ndim == 2:
+    local_height_range = torch.zeros_like(wheel_center_clearance)
+  else:
     raise ValueError(
-      "rough_wheel_foot_clearance expects reduced clearance samples with shape "
-      f"[B, F], got {tuple(wheel_center_clearance.shape)}"
+      "rough_wheel_foot_clearance expects clearance samples with shape "
+      f"[B, F] or [B, F, N], got {tuple(wheel_center_clearance.shape)}"
     )
   wheel_foot_clearance = torch.clamp(wheel_center_clearance - wheel_radius, min=0.0)
 
@@ -568,7 +611,7 @@ def rough_wheel_foot_clearance(
   in_air = (contact_sensor.data.found == 0).float()
   active = _command_active(env, command_name, command_threshold)
 
-  target = base_target_height + range_scale * stats.height_range
+  target = base_target_height + range_scale * local_height_range
   target = torch.clamp(target, max=max_target_height)
   error = wheel_foot_clearance - target
   reward_per_foot = torch.exp(-torch.square(error) / (target_std**2))
