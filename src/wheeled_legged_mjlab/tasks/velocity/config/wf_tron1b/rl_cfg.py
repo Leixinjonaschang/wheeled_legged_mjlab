@@ -13,7 +13,7 @@ def wf_tron1b_ppo_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
     """Create RL runner configuration for WF-TRON1B velocity task."""
     return WFTRON1BRslRlOnPolicyRunnerCfg(
         actor=RslRlModelCfg(
-            hidden_dims=(512, 256, 128),
+            hidden_dims=(512, 256, 256, 128),
             activation="elu",
             obs_normalization=True,
             distribution_cfg={
@@ -23,7 +23,7 @@ def wf_tron1b_ppo_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             },
         ),
         critic=RslRlModelCfg(
-            hidden_dims=(512, 256, 128),
+            hidden_dims=(512, 256, 256, 128),
             activation="elu",
             obs_normalization=True,
         ),

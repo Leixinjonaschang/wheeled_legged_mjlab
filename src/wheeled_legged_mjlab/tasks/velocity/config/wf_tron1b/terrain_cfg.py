@@ -13,8 +13,8 @@ from mjlab.terrains import (
 TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=35.0,
-    num_rows=15,
-    num_cols=20,
+    num_rows=30,
+    num_cols=10,
     sub_terrains={
         "discrete_obstacles": HfDiscreteObstaclesTerrainCfg(
             proportion=0.2,
@@ -44,14 +44,14 @@ TERRAINS_CFG = TerrainGeneratorCfg(
         ),
         "pyramid_stair_inv": BoxInvertedPyramidStairsTerrainCfg(
             proportion=0.1,
-            step_height_range=(0.01, 0.20),
+            step_height_range=(0.01, 0.12),
             step_width=0.3,
             border_width =0.5,
             platform_width=2.0,
         ),
         "pyramid_stair": BoxPyramidStairsTerrainCfg(
             proportion=0.1,
-            step_height_range=(0.01, 0.20),
+            step_height_range=(0.01, 0.12),
             step_width=0.3,
             border_width =0.5,
             platform_width=2.0,
@@ -63,7 +63,7 @@ TERRAINS_CFG = TerrainGeneratorCfg(
         #     platform_width=2.0,
         # ),
         "flat": BoxFlatTerrainCfg(
-            proportion=0.2,
+            proportion=0.4,
         ),
     }
 )

@@ -50,6 +50,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+tests/
 
 # Translations
 *.mo
@@ -219,3 +220,6 @@ __marimo__/
 # training results
 wandb/
 logs/
+
+# MuJoCo
+MUJOCO_LOG.TXT
