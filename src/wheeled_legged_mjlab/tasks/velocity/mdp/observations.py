@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.sensor import ContactSensor
+from mjlab.sensor import ContactSensor, RayCastSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 
 if TYPE_CHECKING:
@@ -22,7 +22,15 @@ def foot_height(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
   assert isinstance(sensor, TerrainHeightSensor), (
     f"foot_height requires a TerrainHeightSensor, got {type(sensor).__name__}"
   )
-  return sensor.data.heights
+  heights = sensor.data.heights
+  if heights.ndim == 3:
+    return heights.amin(dim=-1)
+  if heights.ndim == 2:
+    return heights
+  raise ValueError(
+    "foot_height expects terrain clearance samples with shape [B, F] or "
+    f"[B, F, N], got {tuple(heights.shape)}"
+  )
 
 
 def foot_air_time(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
@@ -70,6 +78,39 @@ def _resolve_grid_shape(
   return side, side
 
 
+def _terrain_clearance_samples(
+  sensor: TerrainHeightSensor | RayCastSensor,
+) -> torch.Tensor:
+  if isinstance(sensor, TerrainHeightSensor):
+    height_samples = sensor.data.heights
+    if height_samples.ndim != 3:
+      raise ValueError(
+        "terrain_roughness_indicator requires unreduced height samples with shape "
+        f"[B, F, N], got {tuple(height_samples.shape)}"
+      )
+    return height_samples
+
+  if isinstance(sensor, RayCastSensor):
+    data = sensor.data
+    f_count = sensor.num_frames
+    n_count = sensor.num_rays_per_frame
+    batch_size = data.distances.shape[0]
+    frame_z = data.frame_pos_w[:, :, 2:3]
+    hit_z = data.hit_pos_w[..., 2].view(batch_size, f_count, n_count)
+    heights = frame_z - hit_z
+    miss_mask = data.distances.view(batch_size, f_count, n_count) < 0
+    return torch.where(
+      miss_mask,
+      torch.full_like(heights, sensor.cfg.max_distance),
+      heights,
+    )
+
+  raise TypeError(
+    "terrain_roughness_indicator requires a TerrainHeightSensor or RayCastSensor, "
+    f"got {type(sensor).__name__}"
+  )
+
+
 def terrain_roughness_indicator(
   env: ManagerBasedRlEnv,
   sensor_name: str,
@@ -81,17 +122,9 @@ def terrain_roughness_indicator(
   gate_max: float = 0.85,
   grid_shape: tuple[int, int] | None = None,
 ) -> torch.Tensor:
-  """Roughness gate from local wheel terrain scans."""
+  """Roughness gate from terrain clearance samples."""
   sensor = env.scene[sensor_name]
-  assert isinstance(sensor, TerrainHeightSensor), (
-    f"terrain_roughness_indicator requires a TerrainHeightSensor, got {type(sensor).__name__}"
-  )
-  height_samples = sensor.data.heights
-  if height_samples.ndim != 3:
-    raise ValueError(
-      "terrain_roughness_indicator requires unreduced height samples with shape "
-      f"[B, F, N], got {tuple(height_samples.shape)}"
-    )
+  height_samples = _terrain_clearance_samples(sensor)
   if gate_max <= gate_min:
     raise ValueError(f"gate_max ({gate_max}) must be greater than gate_min ({gate_min})")
 
