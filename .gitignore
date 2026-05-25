@@ -220,3 +220,6 @@ __marimo__/
 # training results
 wandb/
 logs/
+
+# MuJoCo
+MUJOCO_LOG.TXT
