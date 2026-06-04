@@ -421,10 +421,44 @@ def base_height_l2(
   env: ManagerBasedRlEnv,
   target_height: float,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  sensor_name: str | None = None,
+  terrain_sample: str = "mean",
 ) -> torch.Tensor:
-  """Penalize base height error using an L2 kernel."""
+  """Penalize base height error using an L2 kernel.
+
+  When a terrain raycast sensor is provided, height is measured relative to the
+  local terrain under the scan instead of world z.
+  """
   asset: Entity = env.scene[asset_cfg.name]
-  return torch.square(asset.data.root_link_pos_w[:, 2] - target_height)
+  base_z = asset.data.root_link_pos_w[:, 2]
+  if sensor_name is None:
+    base_height = base_z
+  else:
+    sensor = env.scene[sensor_name]
+    if not isinstance(sensor, RayCastSensor):
+      raise TypeError(
+        "base_height_l2 terrain-relative mode requires a RayCastSensor, "
+        f"got {type(sensor).__name__}"
+      )
+    data = sensor.data
+    hit_z = data.hit_pos_w[..., 2].view(data.distances.shape[0], -1)
+    valid_hit = data.distances >= 0
+    if terrain_sample == "center":
+      center_id = hit_z.shape[1] // 2
+      ground_z = torch.where(
+        valid_hit[:, center_id],
+        hit_z[:, center_id],
+        torch.zeros_like(base_z),
+      )
+    elif terrain_sample == "mean":
+      hit_z = torch.where(valid_hit, hit_z, torch.zeros_like(hit_z))
+      hit_count = valid_hit.float().sum(dim=1)
+      ground_z = hit_z.sum(dim=1) / torch.clamp(hit_count, min=1.0)
+      ground_z = torch.where(hit_count > 0, ground_z, torch.zeros_like(ground_z))
+    else:
+      raise ValueError(f"Unsupported terrain_sample: {terrain_sample}")
+    base_height = base_z - ground_z
+  return torch.square(base_height - target_height)
 
 
 def joint_power_l1(
@@ -576,6 +610,32 @@ def feet_air_time(
       scale = (total_command > command_threshold).float()
       reward *= scale
   return reward
+
+
+def wheel_air_time_balance(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  tolerance: float = 0.12,
+  max_time: float = 1.0,
+) -> torch.Tensor:
+  """Penalize sustained left/right wheel air-time imbalance."""
+  sensor: ContactSensor = env.scene[sensor_name]
+  current_air_time = sensor.data.current_air_time
+  assert current_air_time is not None
+  if current_air_time.shape[1] != 2:
+    raise ValueError(
+      "wheel_air_time_balance expects exactly two contact tracks, "
+      f"got {current_air_time.shape[1]}"
+    )
+
+  air_time_diff = torch.abs(current_air_time[:, 0] - current_air_time[:, 1])
+  imbalance = torch.clamp(air_time_diff - tolerance, min=0.0, max=max_time)
+  cost = torch.square(imbalance)
+
+  log_data = env.extras.setdefault("log", {})
+  log_data["Metrics/wheel_air_time_diff_mean"] = air_time_diff.mean()
+  log_data["Metrics/wheel_air_time_balance_cost_mean"] = cost.mean()
+  return cost
 
 
 def rough_wheel_usage(

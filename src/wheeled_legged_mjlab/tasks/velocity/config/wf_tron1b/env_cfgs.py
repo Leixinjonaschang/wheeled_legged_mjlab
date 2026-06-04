@@ -65,8 +65,8 @@ NON_WHEEL_COLLISION_GEOMS = (
     "knee_R_collision",
 )
 
-BASE_HEIGHT_TARGET = 0.80
-WHEEL_DISTANCE_RANGE = (0.25, 0.50)
+BASE_HEIGHT_TARGET = 0.90
+WHEEL_DISTANCE_RANGE = (0.25, 0.55)
 WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
@@ -469,10 +469,12 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "base_height": RewardTermCfg(
             func=mdp.base_height_l2,
-            weight=-5.0,
+            weight=-15.0,
             params={
                 "target_height": BASE_HEIGHT_TARGET,
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "sensor_name": "terrain_scan" if rough else None,
+                "terrain_sample": "center",
             },
         ),
         "pose": RewardTermCfg(
@@ -510,7 +512,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "wheel_distance": RewardTermCfg(
             func=mdp.wheel_distance,
-            weight=-1.0,
+            weight=-5.0,
             params={
                 "asset_cfg": wheel_body_cfg,
                 "min_distance": WHEEL_DISTANCE_RANGE[0],
@@ -560,6 +562,15 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 "sensor_name": "wheels_ground_contact",
                 "command_name": COMMAND_NAME,
                 "command_threshold": 0.05,
+            },
+        ),
+        "wheel_air_time_balance": RewardTermCfg(
+            func=mdp.wheel_air_time_balance,
+            weight=-4.0,
+            params={
+                "sensor_name": "wheels_ground_contact",
+                "tolerance": 0.12,
+                "max_time": 1.0,
             },
         ),
     }
