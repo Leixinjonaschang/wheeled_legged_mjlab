@@ -6,6 +6,7 @@ import torch
 
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor, RayCastSensor
+from mjlab.sensor.camera_sensor import CameraSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 
 if TYPE_CHECKING:
@@ -55,6 +56,13 @@ def foot_contact_forces(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tenso
   forces_flat = sensor_data.force.flatten(start_dim=1)  # [B, N*3]
   forces_flat = torch.nan_to_num(forces_flat, nan=0.0, posinf=0.0, neginf=0.0)
   return torch.sign(forces_flat) * torch.log1p(torch.abs(forces_flat))
+
+
+def depth_image(env: ManagerBasedRlEnv, sensor_name: str = "depth_camera") -> torch.Tensor:
+  """Depth image from the forward-facing camera."""
+  camera: CameraSensor = env.scene[sensor_name]
+  assert camera.data.depth is not None, f"Sensor '{sensor_name}' has no depth data"
+  return camera.data.depth.squeeze(-1)
 
 
 def _resolve_grid_shape(

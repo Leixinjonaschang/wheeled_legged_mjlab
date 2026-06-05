@@ -24,6 +24,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sensor import (
+    CameraSensorCfg,
     ContactMatch,
     ContactSensorCfg,
     GridPatternCfg,
@@ -65,16 +66,20 @@ NON_WHEEL_COLLISION_GEOMS = (
     "knee_R_collision",
 )
 
-BASE_HEIGHT_TARGET = 0.75
+BASE_HEIGHT_TARGET = 0.80
 WHEEL_DISTANCE_RANGE = (0.25, 0.50)
 WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
 WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
 TERRAIN_SCAN_GRID_SHAPE = (11, 11)
+DEPTH_CAMERA_NAME = "depth_camera"
+DEPTH_CAMERA_MUJOCO_NAME = f"{ROBOT_ENTITY}/d435"
+DEPTH_CAMERA_WIDTH = 24
+DEPTH_CAMERA_HEIGHT = 32
 
 
-def make_scene(*, rough: bool) -> SceneCfg:
+def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
     """Scene = terrain + robot + sensors."""
     terrain = deepcopy(TERRAINS_ENTITY_CFG if rough else PLANE_ENTITY_CFG)
     if rough and terrain.terrain_generator is not None:
@@ -83,15 +88,29 @@ def make_scene(*, rough: bool) -> SceneCfg:
     return SceneCfg(
         terrain=terrain,
         entities={ROBOT_ENTITY: WF_TRON1B_ROBOT_CFG},
-        sensors=make_sensors(rough=rough),
+        sensors=make_sensors(rough=rough, depth=depth),
         num_envs=2048,
         extent=1.0,
     )
 
 
-def make_sensors(*, rough: bool) -> tuple:
-    """Terrain scans, wheel height scans, and contact sensors."""
+def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
+    """Terrain scans, optional depth camera, wheel height scans, and contact sensors."""
     sensors = []
+
+    if depth:
+        sensors.append(
+            CameraSensorCfg(
+                name=DEPTH_CAMERA_NAME,
+                camera_name=DEPTH_CAMERA_MUJOCO_NAME,
+                data_types=("depth",),
+                width=DEPTH_CAMERA_WIDTH,
+                height=DEPTH_CAMERA_HEIGHT,
+                use_textures=False,
+                use_shadows=False,
+                enabled_geom_groups=(0, 1),
+            )
+        )
 
     if rough:
         sensors.append(
@@ -176,8 +195,8 @@ def make_sensors(*, rough: bool) -> tuple:
     return tuple(sensors)
 
 
-def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
-    """Teacher observations: actor and critic both use privileged terms."""
+def make_observations(*, rough: bool, depth: bool = False) -> dict[str, ObservationGroupCfg]:
+    """Actor uses deployable proprioception; critic keeps privileged state."""
     actor_terms = {
         "base_ang_vel": ObservationTermCfg(
             func=mdp.builtin_sensor,
@@ -188,12 +207,12 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
             func=mdp.projected_gravity,
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ),
-        "leg_joint_pos": ObservationTermCfg(
+        "joint_pos": ObservationTermCfg(
             func=mdp.joint_pos_rel,
             params={
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
-                    joint_names=LEG_JOINT_NAMES,
+                    joint_names=ALL_JOINT_NAMES,
                 )
             },
             noise=Unoise(n_min=-0.01, n_max=0.01),
@@ -203,7 +222,7 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
             params={
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
-                    joint_names=LEG_JOINT_NAMES,
+                    joint_names=ALL_JOINT_NAMES,
                 )
             },
             noise=Unoise(n_min=-1.5, n_max=1.5),
@@ -213,9 +232,6 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
         "command": ObservationTermCfg(
             func=mdp.generated_commands,
             params={"command_name": COMMAND_NAME},
-        ),
-        "domain_randomization_delta_quantity": ObservationTermCfg(
-            func=mdp.domain_randomization_delta_quantity,
         ),
     }
 
@@ -243,12 +259,6 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
     }
 
     if rough:
-        actor_terms["height_scan"] = ObservationTermCfg(
-            func=mdp.height_scan,
-            params={"sensor_name": "terrain_scan"},
-            noise=Unoise(n_min=-0.1, n_max=0.1),
-            scale=0.1,
-        )
         critic_terms["height_scan"] = ObservationTermCfg(
             func=mdp.height_scan,
             params={"sensor_name": "terrain_scan"},
@@ -272,11 +282,18 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
             },
         )
 
-    return {
+    observations = {
         "actor": ObservationGroupCfg(
-            terms=dict(critic_terms),
+            terms=dict(actor_terms),
             concatenate_terms=True,
             enable_corruption=False,
+        ),
+        "actor_history": ObservationGroupCfg(
+            terms=dict(actor_terms),
+            concatenate_terms=True,
+            enable_corruption=False,
+            history_length=5,
+            flatten_history_dim=True,
         ),
         "critic": ObservationGroupCfg(
             terms=critic_terms,
@@ -284,6 +301,19 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
             enable_corruption=False,
         ),
     }
+    if depth:
+        observations[DEPTH_CAMERA_NAME] = ObservationGroupCfg(
+            terms={
+                DEPTH_CAMERA_NAME: ObservationTermCfg(
+                    func=mdp.depth_image,
+                    params={"sensor_name": DEPTH_CAMERA_NAME},
+                    noise=Unoise(n_min=-0.01, n_max=0.01),
+                )
+            },
+            concatenate_terms=True,
+            enable_corruption=True,
+        )
+    return observations
 
 
 def make_actions() -> dict[str, ActionTermCfg]:
@@ -726,10 +756,10 @@ def make_viewer() -> ViewerConfig:
     )
 
 
-def make_env_cfg(*, rough: bool, play: bool = False) -> ManagerBasedRlEnvCfg:
+def make_env_cfg(*, rough: bool, play: bool = False, depth: bool = False) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
-        scene=make_scene(rough=rough),
-        observations=make_observations(rough=rough),
+        scene=make_scene(rough=rough, depth=depth),
+        observations=make_observations(rough=rough, depth=depth),
         actions=make_actions(),
         commands=make_commands(),
         events=make_events(),
@@ -752,6 +782,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
     """Make rollout/play deterministic enough to inspect behavior."""
     cfg.episode_length_s = int(1e9)
     cfg.observations["actor"].enable_corruption = False
+    cfg.observations["actor_history"].enable_corruption = False
     cfg.events.pop("push_robot", None)
     cfg.curriculum = {}
 
@@ -780,6 +811,11 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
 def wf_tron1b_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create WF-TRON1B rough-terrain velocity tracking configuration."""
     return make_env_cfg(rough=True, play=play)
+
+
+def wf_tron1b_rough_depth_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create WF-TRON1B rough-terrain configuration with a depth camera."""
+    return make_env_cfg(rough=True, play=play, depth=True)
 
 
 def wf_tron1b_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
