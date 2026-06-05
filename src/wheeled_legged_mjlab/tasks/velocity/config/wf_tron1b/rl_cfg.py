@@ -1,5 +1,8 @@
 """RL configuration for WF-TRON1B velocity task."""
 
+from dataclasses import dataclass
+from typing import Tuple
+
 from mjlab.rl import (
     RslRlModelCfg,
     RslRlOnPolicyRunnerCfg,
@@ -8,6 +11,26 @@ from mjlab.rl import (
 
 class WFTRON1BRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     trial_message: str = ""
+
+
+@dataclass
+class RslRlRepresentationModelCfg(RslRlModelCfg):
+    """Config for representation-level teacher-student actor-critic."""
+
+    encoder_hidden_dims: Tuple[int, ...] = (512, 256, 128)
+    latent_dim: int = 32
+    normalize_latent: bool = True
+    class_name: str = "RepresentationActorCritic"
+
+
+@dataclass
+class RslRlRepresentationTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """Config for representation-level teacher-student PPO."""
+
+    proprio_encoder_learning_rate: float = 1.0e-3
+    num_proprio_encoder_substeps: int = 1
+    class_name: str = "RepresentationTeacherStudentPPO"
+
 
 def wf_tron1b_ppo_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
     """Create RL runner configuration for WF-TRON1B velocity task."""
@@ -42,6 +65,53 @@ def wf_tron1b_ppo_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             max_grad_norm=1.0,
         ),
         experiment_name="wf_tron1b_velocity",
+        save_interval=200,
+        num_steps_per_env=24,
+        max_iterations=30_000,
+        clip_actions=2.0,
+        upload_model=False,
+    )
+
+
+def wf_tron1b_rep_ts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
+    """Create representation-level teacher-student runner configuration."""
+    return WFTRON1BRslRlOnPolicyRunnerCfg(
+        actor=RslRlRepresentationModelCfg(
+            hidden_dims=(512, 256, 128),
+            encoder_hidden_dims=(512, 256, 128),
+            activation="elu",
+            obs_normalization=True,
+            latent_dim=32,
+            normalize_latent=True,
+            distribution_cfg={
+                "class_name": "GaussianDistribution",
+                "init_std": 1.0,
+                "std_type": "scalar",
+            },
+        ),
+        algorithm=RslRlRepresentationTeacherStudentPpoAlgorithmCfg(
+            value_loss_coef=1.0,
+            use_clipped_value_loss=True,
+            clip_param=0.2,
+            entropy_coef=0.01,
+            num_learning_epochs=5,
+            num_mini_batches=4,
+            learning_rate=1.0e-3,
+            schedule="adaptive",
+            gamma=0.99,
+            lam=0.95,
+            desired_kl=0.01,
+            max_grad_norm=1.0,
+            proprio_encoder_learning_rate=1.0e-3,
+            num_proprio_encoder_substeps=1,
+        ),
+        obs_groups={
+            "actor": ("actor",),
+            "critic": ("critic",),
+            "proprio_encoder": ("actor_history",),
+            "privileged_encoder": ("critic",),
+        },
+        experiment_name="wf_tron1b_velocity_rep_ts",
         save_interval=200,
         num_steps_per_env=24,
         max_iterations=30_000,

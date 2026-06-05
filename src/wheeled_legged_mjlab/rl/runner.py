@@ -8,6 +8,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
+from rsl_rl.models import RepresentationActorCritic
 
 
 def _action_scale_values(action_term) -> list[float]:
@@ -20,6 +21,7 @@ def _action_scale_values(action_term) -> list[float]:
 def get_wheeled_legged_metadata(
     env: ManagerBasedRlEnv,
     run_path: str,
+    policy=None,
 ) -> dict[str, list | str | float]:
     """Metadata export that supports mixed position/velocity action terms."""
     robot = env.scene["robot"]
@@ -45,7 +47,7 @@ def get_wheeled_legged_metadata(
     joint_stiffness = env.sim.mj_model.actuator_gainprm[ctrl_ids_natural, 0]
     joint_damping = -env.sim.mj_model.actuator_biasprm[ctrl_ids_natural, 2]
 
-    return {
+    metadata = {
         "run_path": run_path,
         "joint_names": list(robot.joint_names),
         "joint_stiffness": joint_stiffness.tolist(),
@@ -57,6 +59,18 @@ def get_wheeled_legged_metadata(
         "action_target_names": action_target_names,
         "action_scale": action_scales,
     }
+    if isinstance(policy, RepresentationActorCritic):
+        actor_history_cfg = env.cfg.observations["actor_history"]
+        metadata.update(
+            {
+                "policy_input_names": ["actor_obs", "proprio_obs"],
+                "actor_observation_names": env.observation_manager.active_terms["actor"],
+                "proprio_observation_names": env.observation_manager.active_terms["actor_history"],
+                "proprio_history_length": str(actor_history_cfg.history_length),
+                "proprio_flatten_history_dim": str(actor_history_cfg.flatten_history_dim).lower(),
+            }
+        )
+    return metadata
 
 
 class WheeledLeggedVelocityOnPolicyRunner(VelocityOnPolicyRunner):
@@ -74,7 +88,7 @@ class WheeledLeggedVelocityOnPolicyRunner(VelocityOnPolicyRunner):
                 if self.logger.logger_type == "wandb" and wandb.run
                 else "local"
             )
-            metadata = get_wheeled_legged_metadata(self.env.unwrapped, run_name)
+            metadata = get_wheeled_legged_metadata(self.env.unwrapped, run_name, self.alg.get_policy())
             attach_metadata_to_onnx(str(onnx_path), metadata)
             if self.logger.logger_type in ["wandb"] and self.cfg["upload_model"]:
                 wandb.save(str(onnx_path), base_path=str(policy_dir))

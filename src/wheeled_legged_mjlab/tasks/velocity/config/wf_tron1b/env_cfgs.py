@@ -177,7 +177,7 @@ def make_sensors(*, rough: bool) -> tuple:
 
 
 def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
-    """Teacher observations: actor and critic both use privileged terms."""
+    """Actor uses deployable proprioception; critic keeps privileged state."""
     actor_terms = {
         "base_ang_vel": ObservationTermCfg(
             func=mdp.builtin_sensor,
@@ -188,12 +188,12 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
             func=mdp.projected_gravity,
             noise=Unoise(n_min=-0.05, n_max=0.05),
         ),
-        "leg_joint_pos": ObservationTermCfg(
+        "joint_pos": ObservationTermCfg(
             func=mdp.joint_pos_rel,
             params={
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
-                    joint_names=LEG_JOINT_NAMES,
+                    joint_names=ALL_JOINT_NAMES,
                 )
             },
             noise=Unoise(n_min=-0.01, n_max=0.01),
@@ -203,7 +203,7 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
             params={
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
-                    joint_names=LEG_JOINT_NAMES,
+                    joint_names=ALL_JOINT_NAMES,
                 )
             },
             noise=Unoise(n_min=-1.5, n_max=1.5),
@@ -213,9 +213,6 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
         "command": ObservationTermCfg(
             func=mdp.generated_commands,
             params={"command_name": COMMAND_NAME},
-        ),
-        "domain_randomization_delta_quantity": ObservationTermCfg(
-            func=mdp.domain_randomization_delta_quantity,
         ),
     }
 
@@ -243,12 +240,6 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
     }
 
     if rough:
-        actor_terms["height_scan"] = ObservationTermCfg(
-            func=mdp.height_scan,
-            params={"sensor_name": "terrain_scan"},
-            noise=Unoise(n_min=-0.1, n_max=0.1),
-            scale=0.1,
-        )
         critic_terms["height_scan"] = ObservationTermCfg(
             func=mdp.height_scan,
             params={"sensor_name": "terrain_scan"},
@@ -274,9 +265,16 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
 
     return {
         "actor": ObservationGroupCfg(
-            terms=dict(critic_terms),
+            terms=dict(actor_terms),
             concatenate_terms=True,
             enable_corruption=False,
+        ),
+        "actor_history": ObservationGroupCfg(
+            terms=dict(actor_terms),
+            concatenate_terms=True,
+            enable_corruption=False,
+            history_length=5,
+            flatten_history_dim=True,
         ),
         "critic": ObservationGroupCfg(
             terms=critic_terms,
@@ -752,6 +750,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
     """Make rollout/play deterministic enough to inspect behavior."""
     cfg.episode_length_s = int(1e9)
     cfg.observations["actor"].enable_corruption = False
+    cfg.observations["actor_history"].enable_corruption = False
     cfg.events.pop("push_robot", None)
     cfg.curriculum = {}
 
