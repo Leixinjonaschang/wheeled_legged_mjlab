@@ -34,6 +34,8 @@ def _parse_wandb_dt(value: str | datetime) -> datetime:
 @dataclass(frozen=True)
 class PlayConfig:
   agent: Literal["zero", "random", "trained"] = "trained"
+  policy_role: Literal["student", "teacher"] = "student"
+  """Policy path to play for representation teacher-student checkpoints."""
   registry_name: str | None = None
   wandb_run_path: str | None = None
   wandb_checkpoint_name: str | None = None
@@ -55,6 +57,31 @@ class PlayConfig:
   _demo_mode: tyro.conf.Suppress[bool] = False
 
 
+def _select_play_policy(policy, policy_role: Literal["student", "teacher"]):
+  if policy_role == "student":
+    return policy
+
+  if not hasattr(policy, "act_teacher"):
+    raise ValueError(
+      "--policy-role teacher is only supported by representation teacher-student "
+      "policies that implement act_teacher()."
+    )
+
+  class TeacherPolicy:
+    def __init__(self, model):
+      self.model = model
+
+    def __call__(self, obs) -> torch.Tensor:
+      return self.model.act_teacher(obs, stochastic_output=False)
+
+    def reset(self, *args, **kwargs):
+      if hasattr(self.model, "reset"):
+        return self.model.reset(*args, **kwargs)
+      return None
+
+  return TeacherPolicy(policy)
+
+
 def run_play(task_id: str, cfg: PlayConfig):
   configure_torch_backends()
 
@@ -65,6 +92,8 @@ def run_play(task_id: str, cfg: PlayConfig):
 
   DUMMY_MODE = cfg.agent in {"zero", "random"}
   TRAINED_MODE = not DUMMY_MODE
+  if DUMMY_MODE and cfg.policy_role != "student":
+    raise ValueError("--policy-role teacher requires --agent trained.")
 
   # Disable terminations if requested (useful for viewing motions).
   if cfg.no_terminations:
@@ -204,7 +233,10 @@ def run_play(task_id: str, cfg: PlayConfig):
     runner.load(
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
-    policy = runner.get_inference_policy(device=device)
+    policy = _select_play_policy(
+      runner.get_inference_policy(device=device), cfg.policy_role
+    )
+    print(f"[INFO]: Playing {cfg.policy_role} policy")
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
   ckpt_manager: CheckpointManager | None = None
@@ -218,7 +250,9 @@ def run_play(task_id: str, cfg: PlayConfig):
         strict=True,
         map_location=device,
       )
-      return _ckpt_runner.get_inference_policy(device=device)
+      return _select_play_policy(
+        _ckpt_runner.get_inference_policy(device=device), cfg.policy_role
+      )
 
     if cfg.wandb_run_path is None:
       ckpt_dir = resume_path.parent
