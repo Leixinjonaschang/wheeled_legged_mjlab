@@ -234,3 +234,9 @@ logs/
 
 # MuJoCo
 MUJOCO_LOG.TXT
+
+# cursor
+.cursor/
+
+# codegraph
+.codegraph/
