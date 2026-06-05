@@ -66,7 +66,7 @@ NON_WHEEL_COLLISION_GEOMS = (
     "knee_R_collision",
 )
 
-BASE_HEIGHT_TARGET = 0.75
+BASE_HEIGHT_TARGET = 0.80
 WHEEL_DISTANCE_RANGE = (0.25, 0.50)
 WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
@@ -75,7 +75,8 @@ WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
 TERRAIN_SCAN_GRID_SHAPE = (11, 11)
 DEPTH_CAMERA_NAME = "depth_camera"
 DEPTH_CAMERA_MUJOCO_NAME = f"{ROBOT_ENTITY}/d435"
-DEPTH_CAMERA_SIZE = 64
+DEPTH_CAMERA_WIDTH = 24
+DEPTH_CAMERA_HEIGHT = 32
 
 
 def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
@@ -103,8 +104,8 @@ def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
                 name=DEPTH_CAMERA_NAME,
                 camera_name=DEPTH_CAMERA_MUJOCO_NAME,
                 data_types=("depth",),
-                width=DEPTH_CAMERA_SIZE,
-                height=DEPTH_CAMERA_SIZE,
+                width=DEPTH_CAMERA_WIDTH,
+                height=DEPTH_CAMERA_HEIGHT,
                 use_textures=False,
                 use_shadows=False,
                 enabled_geom_groups=(0, 1),
