@@ -24,6 +24,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sensor import (
+    CameraSensorCfg,
     ContactMatch,
     ContactSensorCfg,
     GridPatternCfg,
@@ -72,9 +73,12 @@ WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
 WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
 TERRAIN_SCAN_GRID_SHAPE = (11, 11)
+DEPTH_CAMERA_NAME = "depth_camera"
+DEPTH_CAMERA_MUJOCO_NAME = f"{ROBOT_ENTITY}/d435"
+DEPTH_CAMERA_SIZE = 64
 
 
-def make_scene(*, rough: bool) -> SceneCfg:
+def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
     """Scene = terrain + robot + sensors."""
     terrain = deepcopy(TERRAINS_ENTITY_CFG if rough else PLANE_ENTITY_CFG)
     if rough and terrain.terrain_generator is not None:
@@ -83,15 +87,29 @@ def make_scene(*, rough: bool) -> SceneCfg:
     return SceneCfg(
         terrain=terrain,
         entities={ROBOT_ENTITY: WF_TRON1B_ROBOT_CFG},
-        sensors=make_sensors(rough=rough),
+        sensors=make_sensors(rough=rough, depth=depth),
         num_envs=2048,
         extent=1.0,
     )
 
 
-def make_sensors(*, rough: bool) -> tuple:
-    """Terrain scans, wheel height scans, and contact sensors."""
+def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
+    """Terrain scans, optional depth camera, wheel height scans, and contact sensors."""
     sensors = []
+
+    if depth:
+        sensors.append(
+            CameraSensorCfg(
+                name=DEPTH_CAMERA_NAME,
+                camera_name=DEPTH_CAMERA_MUJOCO_NAME,
+                data_types=("depth",),
+                width=DEPTH_CAMERA_SIZE,
+                height=DEPTH_CAMERA_SIZE,
+                use_textures=False,
+                use_shadows=False,
+                enabled_geom_groups=(0, 1),
+            )
+        )
 
     if rough:
         sensors.append(
@@ -176,7 +194,7 @@ def make_sensors(*, rough: bool) -> tuple:
     return tuple(sensors)
 
 
-def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
+def make_observations(*, rough: bool, depth: bool = False) -> dict[str, ObservationGroupCfg]:
     """Actor uses deployable proprioception; critic keeps privileged state."""
     actor_terms = {
         "base_ang_vel": ObservationTermCfg(
@@ -263,7 +281,7 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
             },
         )
 
-    return {
+    observations = {
         "actor": ObservationGroupCfg(
             terms=dict(actor_terms),
             concatenate_terms=True,
@@ -282,6 +300,19 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
             enable_corruption=False,
         ),
     }
+    if depth:
+        observations[DEPTH_CAMERA_NAME] = ObservationGroupCfg(
+            terms={
+                DEPTH_CAMERA_NAME: ObservationTermCfg(
+                    func=mdp.depth_image,
+                    params={"sensor_name": DEPTH_CAMERA_NAME},
+                    noise=Unoise(n_min=-0.01, n_max=0.01),
+                )
+            },
+            concatenate_terms=True,
+            enable_corruption=True,
+        )
+    return observations
 
 
 def make_actions() -> dict[str, ActionTermCfg]:
@@ -724,10 +755,10 @@ def make_viewer() -> ViewerConfig:
     )
 
 
-def make_env_cfg(*, rough: bool, play: bool = False) -> ManagerBasedRlEnvCfg:
+def make_env_cfg(*, rough: bool, play: bool = False, depth: bool = False) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
-        scene=make_scene(rough=rough),
-        observations=make_observations(rough=rough),
+        scene=make_scene(rough=rough, depth=depth),
+        observations=make_observations(rough=rough, depth=depth),
         actions=make_actions(),
         commands=make_commands(),
         events=make_events(),
@@ -779,6 +810,11 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
 def wf_tron1b_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create WF-TRON1B rough-terrain velocity tracking configuration."""
     return make_env_cfg(rough=True, play=play)
+
+
+def wf_tron1b_rough_depth_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create WF-TRON1B rough-terrain configuration with a depth camera."""
+    return make_env_cfg(rough=True, play=play, depth=True)
 
 
 def wf_tron1b_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
