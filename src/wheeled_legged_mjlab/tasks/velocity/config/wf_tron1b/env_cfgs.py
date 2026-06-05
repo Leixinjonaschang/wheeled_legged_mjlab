@@ -77,6 +77,8 @@ DEPTH_CAMERA_NAME = "depth_camera"
 DEPTH_CAMERA_MUJOCO_NAME = f"{ROBOT_ENTITY}/d435"
 DEPTH_CAMERA_WIDTH = 24
 DEPTH_CAMERA_HEIGHT = 32
+DEPTH_BUFFER_SIZE = 5
+DEPTH_BUFFER_UPDATE_PERIOD = 5
 
 
 def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
@@ -305,13 +307,16 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
         observations[DEPTH_CAMERA_NAME] = ObservationGroupCfg(
             terms={
                 DEPTH_CAMERA_NAME: ObservationTermCfg(
-                    func=mdp.depth_image,
-                    params={"sensor_name": DEPTH_CAMERA_NAME},
-                    noise=Unoise(n_min=-0.01, n_max=0.01),
+                    func=mdp.depth_buffer,
+                    params={
+                        "sensor_name": DEPTH_CAMERA_NAME,
+                        "buffer_size": DEPTH_BUFFER_SIZE,
+                        "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
+                    },
                 )
             },
             concatenate_terms=True,
-            enable_corruption=True,
+            enable_corruption=False,
         )
     return observations
 

@@ -65,6 +65,81 @@ def depth_image(env: ManagerBasedRlEnv, sensor_name: str = "depth_camera") -> to
   return camera.data.depth.squeeze(-1)
 
 
+class DepthBuffer:
+  """Depth image buffer updated at a lower policy-step rate."""
+
+  def __init__(self, cfg, env: ManagerBasedRlEnv) -> None:
+    del cfg, env
+    self._buffer: torch.Tensor | None = None
+    self._last_update_step: int | None = None
+    self._invalid_env_ids: torch.Tensor | None = None
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "depth_camera",
+    buffer_size: int = 5,
+    update_period: int = 5,
+  ) -> torch.Tensor:
+    if buffer_size < 1:
+      raise ValueError(f"buffer_size must be >= 1, got {buffer_size}")
+    if update_period < 1:
+      raise ValueError(f"update_period must be >= 1, got {update_period}")
+
+    step = int(getattr(env, "common_step_counter", 0))
+    needs_init = self._buffer is None or self._buffer.shape[1] != buffer_size
+    needs_reset_fill = self._invalid_env_ids is not None
+    needs_periodic_update = (
+      self._last_update_step is None
+      or step - self._last_update_step >= update_period
+    )
+
+    if not (needs_init or needs_reset_fill or needs_periodic_update):
+      assert self._buffer is not None
+      return self._buffer
+
+    frame = depth_image(env, sensor_name=sensor_name)
+
+    if needs_init:
+      self._buffer = frame.unsqueeze(1).repeat(
+        1, buffer_size, *(1 for _ in frame.shape[1:])
+      )
+      self._last_update_step = step
+      self._invalid_env_ids = None
+      return self._buffer
+
+    if needs_reset_fill:
+      assert self._invalid_env_ids is not None
+      env_ids = self._invalid_env_ids.to(device=frame.device, dtype=torch.long)
+      self._buffer[env_ids] = frame[env_ids].unsqueeze(1).expand(
+        -1, buffer_size, *frame.shape[1:]
+      )
+      self._invalid_env_ids = None
+
+    if needs_periodic_update:
+      self._buffer = torch.roll(self._buffer, shifts=-1, dims=1)
+      self._buffer[:, -1] = frame
+      self._last_update_step = step
+
+    return self._buffer
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None or isinstance(env_ids, slice):
+      self._buffer = None
+      self._last_update_step = None
+      self._invalid_env_ids = None
+      return
+    if self._buffer is None or env_ids.numel() == 0:
+      return
+    env_ids = env_ids.to(device=self._buffer.device, dtype=torch.long)
+    if self._invalid_env_ids is None:
+      self._invalid_env_ids = env_ids
+    else:
+      self._invalid_env_ids = torch.unique(
+        torch.cat((self._invalid_env_ids, env_ids))
+      )
+
+
 def _resolve_grid_shape(
   num_samples: int,
   grid_shape: tuple[int, int] | None,

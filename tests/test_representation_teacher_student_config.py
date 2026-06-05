@@ -15,7 +15,14 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, list_tasks
 import wheeled_legged_mjlab  # noqa: F401
 from rsl_rl.models import RepresentationActorCritic
 from wheeled_legged_mjlab.rl.runner import get_wheeled_legged_metadata
-from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import wf_tron1b_rough_env_cfg
+from wheeled_legged_mjlab.tasks.velocity import mdp
+from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
+    DEPTH_BUFFER_SIZE,
+    DEPTH_BUFFER_UPDATE_PERIOD,
+    DEPTH_CAMERA_NAME,
+    wf_tron1b_rough_env_cfg,
+)
+from wheeled_legged_mjlab.tasks.velocity.mdp import observations as observation_mdp
 
 
 def test_representation_teacher_student_tasks_are_registered() -> None:
@@ -53,6 +60,75 @@ def test_actor_history_and_rough_privileged_observations() -> None:
     assert "height_scan" in critic_terms
     assert "domain_randomization_delta_quantity" not in actor_terms
     assert "domain_randomization_delta_quantity" not in actor_history_terms
+
+
+def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
+    cfg = load_env_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth")
+    agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth"))
+
+    depth_group = cfg.observations[DEPTH_CAMERA_NAME]
+    depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
+
+    assert depth_term.func is mdp.depth_buffer
+    assert depth_term.params == {
+        "sensor_name": DEPTH_CAMERA_NAME,
+        "buffer_size": DEPTH_BUFFER_SIZE,
+        "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
+    }
+    assert depth_group.enable_corruption is False
+    assert agent["obs_groups"] == {
+        "actor": ("actor",),
+        "critic": ("critic",),
+        "proprio_encoder": ("actor_history",),
+        "privileged_encoder": ("critic",),
+    }
+    training_obs_groups = {
+        group for groups in agent["obs_groups"].values() for group in groups
+    }
+    assert DEPTH_CAMERA_NAME not in training_obs_groups
+
+
+def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:
+    env = SimpleNamespace(common_step_counter=0, frame=torch.ones(2, 2, 3))
+    term = observation_mdp.depth_buffer(cfg=None, env=env)
+    depth_calls = 0
+
+    def get_depth(env, sensor_name):
+        nonlocal depth_calls
+        depth_calls += 1
+        return env.frame
+
+    monkeypatch.setattr(
+        observation_mdp,
+        "depth_image",
+        get_depth,
+    )
+
+    obs = term(env, buffer_size=5, update_period=5)
+    assert obs.shape == (2, 5, 2, 3)
+    assert torch.all(obs == 1.0)
+    assert depth_calls == 1
+
+    env.common_step_counter = 4
+    env.frame = torch.full((2, 2, 3), 2.0)
+    obs = term(env, buffer_size=5, update_period=5)
+    assert torch.all(obs == 1.0)
+    assert depth_calls == 1
+
+    env.common_step_counter = 5
+    obs = term(env, buffer_size=5, update_period=5)
+    assert torch.all(obs[:, :4] == 1.0)
+    assert torch.all(obs[:, 4] == 2.0)
+    assert depth_calls == 2
+
+    env.common_step_counter = 6
+    env.frame = torch.stack((torch.full((2, 3), 3.0), torch.full((2, 3), 4.0)))
+    term.reset(torch.tensor([1]))
+    obs = term(env, buffer_size=5, update_period=5)
+    assert torch.all(obs[0, :4] == 1.0)
+    assert torch.all(obs[0, 4] == 2.0)
+    assert torch.all(obs[1] == 4.0)
+    assert depth_calls == 3
 
 
 def _make_dummy_metadata_env():
