@@ -234,18 +234,11 @@ def run_play(task_id: str, cfg: PlayConfig):
     runner.load(
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
-<<<<<<< HEAD
-    policy = _select_play_policy(
-      runner.get_inference_policy(device=device), cfg.policy_role
-    )
-    print(f"[INFO]: Playing {cfg.policy_role} policy")
-=======
     if cfg.export_onnx:
       assert log_dir is not None
       runner.export_policy_to_onnx(str(log_dir), "policy.onnx")
       print(f"[INFO]: Exported student policy to {log_dir / 'policy.onnx'}")
     policy = runner.get_inference_policy(device=device)
->>>>>>> 144260c (add export policy)
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
   ckpt_manager: CheckpointManager | None = None
