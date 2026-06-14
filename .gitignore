@@ -235,8 +235,19 @@ logs/
 # MuJoCo
 MUJOCO_LOG.TXT
 
+<<<<<<< HEAD
 # cursor
 .cursor/
 
 # codegraph
 .codegraph/
+=======
+# VSCode
+.vscode
+
+# Agents
+.agents
+
+# codex
+.codex
+>>>>>>> 144260c (add export policy)
