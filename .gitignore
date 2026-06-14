@@ -235,13 +235,12 @@ logs/
 # MuJoCo
 MUJOCO_LOG.TXT
 
-<<<<<<< HEAD
 # cursor
 .cursor/
 
 # codegraph
 .codegraph/
-=======
+
 # VSCode
 .vscode
 
@@ -250,4 +249,3 @@ MUJOCO_LOG.TXT
 
 # codex
 .codex
->>>>>>> 144260c (add export policy)
