@@ -69,7 +69,7 @@
                             <inertial pos="3e-05 0.00807 -2e-05" quat="0.683013 0.183016 0.183017 0.683011" mass="1.08" diaginertia="0.00974272 0.00515568 0.00515344" />
                             <joint name="wheel_L_Joint" pos="0 0 0" axis="0 1 0" limited="true" range="-1000000 1000000" frictionloss="0.01" />
                             <geom class="visual" rgba="0.26667 0.26667 0.26667 1" mesh="wheel_L_Link" />
-                            <geom name="wheel_L_collision" pos="0.0 0.008 0.0" size="0.127 0.005" quat="0.707107 0.707107 0 0" type="cylinder" rgba="1 0.423529 0.0392157 1" />
+                            <geom name="wheel_L_collision" pos="0.0 0.008 0.0" size="0.127 0.010" quat="0.707107 0.707107 0 0" type="cylinder" rgba="1 0.423529 0.0392157 1" />
                         </body>
                     </body>
                 </body>
@@ -96,7 +96,7 @@
                             <inertial pos="3e-05 -0.00807 -2e-05" quat="0.683011 0.183017 0.183016 0.683013" mass="1.08" diaginertia="0.00974272 0.00515568 0.00515344" />
                             <joint name="wheel_R_Joint" pos="0 0 0" axis="0 1 0" limited="true" range="-1000000 1000000" frictionloss="0.01" />
                             <geom class="visual" rgba="0.26667 0.26667 0.26667 1" mesh="wheel_R_Link" />
-                            <geom name="wheel_R_collision" pos="0.0 -0.008 0.0" size="0.127 0.005" quat="0.707107 0.707107 0 0" type="cylinder" rgba="1 0.423529 0.0392157 1" />
+                            <geom name="wheel_R_collision" pos="0.0 -0.008 0.0" size="0.127 0.010" quat="0.707107 0.707107 0 0" type="cylinder" rgba="1 0.423529 0.0392157 1" />
                         </body>
                     </body>
                 </body>

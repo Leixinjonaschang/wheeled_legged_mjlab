@@ -10,8 +10,6 @@ import torch
 from mjlab.entity import Entity
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.utils.lab_api.math import (
-  matrix_from_quat,
-  quat_apply,
   wrap_to_pi,
 )
 
@@ -35,15 +33,16 @@ class UniformVelocityCommand(CommandTerm):
 
     self.robot: Entity = env.scene[cfg.entity_name]
 
-    self.vel_command_b = torch.zeros(self.num_envs, 3, device=self.device)
+    # High-level command is sampled in world yaw frame. The third column stores
+    # the yaw-rate command derived from heading_target when heading mode is on.
     self.vel_command_w = torch.zeros(self.num_envs, 3, device=self.device)
+    self.vel_command_b = torch.zeros(self.num_envs, 3, device=self.device)
     self.heading_target = torch.zeros(self.num_envs, device=self.device)
     self.heading_error = torch.zeros(self.num_envs, device=self.device)
     self.is_heading_env = torch.zeros(
       self.num_envs, dtype=torch.bool, device=self.device
     )
     self.is_standing_env = torch.zeros_like(self.is_heading_env)
-    self.is_world_env = torch.zeros_like(self.is_heading_env)
     self.is_forward_env = torch.zeros_like(self.is_heading_env)
 
     self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
@@ -56,14 +55,31 @@ class UniformVelocityCommand(CommandTerm):
 
   @property
   def command(self) -> torch.Tensor:
+    """Body-frame command exposed to policy observations."""
     return self.vel_command_b
+
+  @property
+  def command_w(self) -> torch.Tensor:
+    """World-frame linear command plus yaw-rate command."""
+    return self.vel_command_w
+
+  @property
+  def command_heading_w(self) -> torch.Tensor:
+    """High-level world-frame command: [lin_vel_x_w, lin_vel_y_w, heading]."""
+    if self.cfg.heading_command:
+      return torch.cat(
+        (self.vel_command_w[:, :2], self.heading_target[:, None]),
+        dim=1,
+      )
+    return self.vel_command_w
 
   def _update_metrics(self) -> None:
     max_command_time = self.cfg.resampling_time_range[1]
     max_command_step = max_command_time / self._env.step_dt
     self.metrics["error_vel_xy"] += (
       torch.norm(
-        self.vel_command_b[:, :2] - self.robot.data.root_link_lin_vel_b[:, :2], dim=-1
+        self.vel_command_w[:, :2] - self.robot.data.root_link_lin_vel_w[:, :2],
+        dim=-1,
       )
       / max_command_step
     )
@@ -74,38 +90,36 @@ class UniformVelocityCommand(CommandTerm):
 
   def _resample_command(self, env_ids: torch.Tensor) -> None:
     r = torch.empty(len(env_ids), device=self.device)
-    self.vel_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
-    self.vel_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
-    self.vel_command_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.ang_vel_z)
+    self.vel_command_w[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
+    self.vel_command_w[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
+    self.vel_command_w[env_ids, 2] = r.uniform_(*self.cfg.ranges.ang_vel_z)
     if self.cfg.heading_command:
       assert self.cfg.ranges.heading is not None
       self.heading_target[env_ids] = r.uniform_(*self.cfg.ranges.heading)
       self.is_heading_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_heading_envs
     self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_standing_envs
 
-    # Randomly assign world-frame envs.
-    self.is_world_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_world_envs
-    # Copy sampled velocities as world-frame reference for world envs.
-    self.vel_command_w[env_ids] = self.vel_command_b[env_ids]
-
-    # Forward-only envs: positive lin_vel_x, zero lateral and angular.
+    # Forward-only envs: positive world-x velocity, zero lateral and angular.
     self.is_forward_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_forward_envs
     fwd_ids = env_ids[self.is_forward_env[env_ids]]
     if len(fwd_ids) > 0:
-      self.vel_command_b[fwd_ids, 0] = (
-        self.vel_command_b[fwd_ids, 0].abs().clamp(min=0.3)
+      self.vel_command_w[fwd_ids, 0] = (
+        self.vel_command_w[fwd_ids, 0].abs().clamp(min=0.3)
       )
-      self.vel_command_b[fwd_ids, 1] = 0.0
-      self.vel_command_b[fwd_ids, 2] = 0.0
+      self.vel_command_w[fwd_ids, 1] = 0.0
+      self.vel_command_w[fwd_ids, 2] = 0.0
+      if self.cfg.heading_command:
+        self.heading_target[fwd_ids] = 0.0
+
+    self._update_command()
 
     init_vel_mask = r.uniform_(0.0, 1.0) < self.cfg.init_velocity_prob
     init_vel_env_ids = env_ids[init_vel_mask]
     if len(init_vel_env_ids) > 0:
       root_pos = self.robot.data.root_link_pos_w[init_vel_env_ids]
       root_quat = self.robot.data.root_link_quat_w[init_vel_env_ids]
-      lin_vel_b = self.robot.data.root_link_lin_vel_b[init_vel_env_ids]
-      lin_vel_b[:, :2] = self.vel_command_b[init_vel_env_ids, :2]
-      root_lin_vel_w = quat_apply(root_quat, lin_vel_b)
+      root_lin_vel_w = self.robot.data.root_link_lin_vel_w[init_vel_env_ids]
+      root_lin_vel_w[:, :2] = self.vel_command_w[init_vel_env_ids, :2]
       root_ang_vel_b = self.robot.data.root_link_ang_vel_b[init_vel_env_ids]
       root_ang_vel_b[:, 2] = self.vel_command_b[init_vel_env_ids, 2]
       root_state = torch.cat(
@@ -114,24 +128,26 @@ class UniformVelocityCommand(CommandTerm):
       self.robot.write_root_state_to_sim(root_state, init_vel_env_ids)
 
   def _update_command(self) -> None:
+    self.vel_command_b[:, 2] = self.vel_command_w[:, 2]
     if self.cfg.heading_command:
       self.heading_error = wrap_to_pi(self.heading_target - self.robot.data.heading_w)
       env_ids = self.is_heading_env.nonzero(as_tuple=False).flatten()
-      self.vel_command_b[env_ids, 2] = torch.clip(
+      yaw_rate_cmd = torch.clip(
         self.cfg.heading_control_stiffness * self.heading_error[env_ids],
         min=self.cfg.ranges.ang_vel_z[0],
         max=self.cfg.ranges.ang_vel_z[1],
       )
-    # World-frame envs: rotate world-frame linear vel into body frame.
-    if self.is_world_env.any():
-      w_ids = self.is_world_env.nonzero(as_tuple=False).flatten()
-      heading = self.robot.data.heading_w[w_ids]
-      cos_h = torch.cos(heading)
-      sin_h = torch.sin(heading)
-      vx_w = self.vel_command_w[w_ids, 0]
-      vy_w = self.vel_command_w[w_ids, 1]
-      self.vel_command_b[w_ids, 0] = cos_h * vx_w + sin_h * vy_w
-      self.vel_command_b[w_ids, 1] = -sin_h * vx_w + cos_h * vy_w
+      self.vel_command_w[env_ids, 2] = yaw_rate_cmd
+      self.vel_command_b[env_ids, 2] = yaw_rate_cmd
+
+    # Rotate fixed world-frame linear command into robot yaw frame for policy.
+    heading = self.robot.data.heading_w
+    cos_h = torch.cos(heading)
+    sin_h = torch.sin(heading)
+    vx_w = self.vel_command_w[:, 0]
+    vy_w = self.vel_command_w[:, 1]
+    self.vel_command_b[:, 0] = cos_h * vx_w + sin_h * vy_w
+    self.vel_command_b[:, 1] = -sin_h * vx_w + cos_h * vy_w
 
     standing_env_ids = self.is_standing_env.nonzero(as_tuple=False).flatten()
     self.vel_command_b[standing_env_ids, :] = 0.0
@@ -152,10 +168,16 @@ class UniformVelocityCommand(CommandTerm):
 
     ranges = self.cfg.ranges
 
+    yaw_label = "heading" if self.cfg.heading_command else "ang_vel_z"
+    yaw_max = (
+      max(abs(ranges.heading[0]), abs(ranges.heading[1]))
+      if self.cfg.heading_command and ranges.heading is not None
+      else ranges.ang_vel_z[1]
+    )
     axes = [
-      ("lin_vel_x", ranges.lin_vel_x[1]),
-      ("lin_vel_y", ranges.lin_vel_y[1]),
-      ("ang_vel_z", ranges.ang_vel_z[1]),
+      ("lin_vel_x_w", ranges.lin_vel_x[1]),
+      ("lin_vel_y_w", ranges.lin_vel_y[1]),
+      (yaw_label, yaw_max),
     ]
     sliders: list = []
 
@@ -203,7 +225,15 @@ class UniformVelocityCommand(CommandTerm):
       assert self._joystick_get_env_idx is not None
       idx = self._joystick_get_env_idx()
       for i, s in enumerate(self._joystick_sliders):
-        self.vel_command_b[idx, i] = s.value
+        if i < 2:
+          self.vel_command_w[idx, i] = s.value
+        elif self.cfg.heading_command:
+          self.heading_target[idx] = s.value
+          self.is_heading_env[idx] = True
+        else:
+          self.vel_command_w[idx, i] = s.value
+      self.is_standing_env[idx] = False
+      self._update_command()
 
   # Visualization.
 
@@ -213,11 +243,11 @@ class UniformVelocityCommand(CommandTerm):
     if not env_indices:
       return
 
-    cmds = self.command.cpu().numpy()
+    cmds_b = self.command.cpu().numpy()
+    cmds_w = self.command_w.cpu().numpy()
+    heading_targets = self.heading_target.cpu().numpy()
     base_pos_ws = self.robot.data.root_link_pos_w.cpu().numpy()
-    base_quat_w = self.robot.data.root_link_quat_w
-    base_mat_ws = matrix_from_quat(base_quat_w).cpu().numpy()
-    lin_vel_bs = self.robot.data.root_link_lin_vel_b.cpu().numpy()
+    lin_vel_ws = self.robot.data.root_link_lin_vel_w.cpu().numpy()
     ang_vel_bs = self.robot.data.root_link_ang_vel_b.cpu().numpy()
 
     scale = self.cfg.viz.scale
@@ -225,53 +255,51 @@ class UniformVelocityCommand(CommandTerm):
 
     for batch in env_indices:
       base_pos_w = base_pos_ws[batch]
-      base_mat_w = base_mat_ws[batch]
-      cmd = cmds[batch]
-      lin_vel_b = lin_vel_bs[batch]
+      cmd_b = cmds_b[batch]
+      cmd_w = cmds_w[batch]
+      heading_target = heading_targets[batch]
+      lin_vel_w = lin_vel_ws[batch]
       ang_vel_b = ang_vel_bs[batch]
 
       # Skip if robot appears uninitialized (at origin).
       if np.linalg.norm(base_pos_w) < 1e-6:
         continue
 
-      # Helper to transform local to world coordinates.
-      def local_to_world(
-        vec: np.ndarray, pos: np.ndarray = base_pos_w, mat: np.ndarray = base_mat_w
-      ) -> np.ndarray:
-        return pos + mat @ vec
+      origin = base_pos_w + np.array([0, 0, z_offset]) * scale
 
-      # Command linear velocity arrow (blue).
-      cmd_lin_from = local_to_world(np.array([0, 0, z_offset]) * scale)
-      cmd_lin_to = local_to_world(
-        (np.array([0, 0, z_offset]) + np.array([cmd[0], cmd[1], 0])) * scale
-      )
+      # World-frame command linear velocity arrow (blue).
+      cmd_lin_from = origin
+      cmd_lin_to = origin + np.array([cmd_w[0], cmd_w[1], 0]) * scale
       visualizer.add_arrow(
         cmd_lin_from, cmd_lin_to, color=(0.2, 0.2, 0.6, 0.6), width=0.015
       )
 
+      # Desired heading arrow (yellow).
+      heading_from = origin + np.array([0, 0, 0.08])
+      heading_to = heading_from + np.array(
+        [np.cos(heading_target), np.sin(heading_target), 0]
+      ) * scale
+      visualizer.add_arrow(
+        heading_from, heading_to, color=(0.9, 0.75, 0.15, 0.7), width=0.012
+      )
+
       # Command angular velocity arrow (green).
       cmd_ang_from = cmd_lin_from
-      cmd_ang_to = local_to_world(
-        (np.array([0, 0, z_offset]) + np.array([0, 0, cmd[2]])) * scale
-      )
+      cmd_ang_to = origin + np.array([0, 0, cmd_b[2]]) * scale
       visualizer.add_arrow(
         cmd_ang_from, cmd_ang_to, color=(0.2, 0.6, 0.2, 0.6), width=0.015
       )
 
-      # Actual linear velocity arrow (cyan).
-      act_lin_from = local_to_world(np.array([0, 0, z_offset]) * scale)
-      act_lin_to = local_to_world(
-        (np.array([0, 0, z_offset]) + np.array([lin_vel_b[0], lin_vel_b[1], 0])) * scale
-      )
+      # Actual world-frame linear velocity arrow (cyan).
+      act_lin_from = origin
+      act_lin_to = origin + np.array([lin_vel_w[0], lin_vel_w[1], 0]) * scale
       visualizer.add_arrow(
         act_lin_from, act_lin_to, color=(0.0, 0.6, 1.0, 0.7), width=0.015
       )
 
       # Actual angular velocity arrow (light green).
       act_ang_from = act_lin_from
-      act_ang_to = local_to_world(
-        (np.array([0, 0, z_offset]) + np.array([0, 0, ang_vel_b[2]])) * scale
-      )
+      act_ang_to = origin + np.array([0, 0, ang_vel_b[2]]) * scale
       visualizer.add_arrow(
         act_ang_from, act_ang_to, color=(0.0, 1.0, 0.4, 0.7), width=0.015
       )
@@ -284,13 +312,9 @@ class UniformVelocityCommandCfg(CommandTermCfg):
   heading_control_stiffness: float = 1.0
   rel_standing_envs: float = 0.0
   rel_heading_envs: float = 1.0
-  rel_world_envs: float = 0.0
-  """Fraction of environments that use world-frame velocity commands.
-  World-frame envs sample linear velocity in world frame and rotate to body
-  frame each step, so the command direction stays fixed in the world."""
   rel_forward_envs: float = 0.0
   """Fraction of environments that receive forward-only commands (positive
-  lin_vel_x, zero lin_vel_y and ang_vel_z). Increases training coverage for
+  world lin_vel_x, zero lin_vel_y and ang_vel_z). Increases training coverage for
   straight-line walking, which is important for stair climbing."""
   init_velocity_prob: float = 0.0
 

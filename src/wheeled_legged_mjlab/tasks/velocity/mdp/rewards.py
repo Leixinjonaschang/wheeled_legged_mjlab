@@ -10,10 +10,12 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import BuiltinSensor, ContactSensor, RayCastSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.tasks.velocity.mdp.terrain_utils import terrain_normal_from_sensors
-from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
+from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse, wrap_to_pi
 from mjlab.utils.lab_api.string import (
   resolve_matching_names_values,
 )
+
+from .commands import UniformVelocityCommand
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -25,9 +27,8 @@ _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
 class _TerrainRoughnessStats(NamedTuple):
-  std: torch.Tensor
-  height_range: torch.Tensor
   jump: torch.Tensor
+  curvature: torch.Tensor
   foot_roughness: torch.Tensor
   robot_roughness: torch.Tensor
   gate: torch.Tensor
@@ -35,14 +36,14 @@ class _TerrainRoughnessStats(NamedTuple):
 
 def _roughness_gate_active(
   gate: torch.Tensor,
-  threshold: float,
+  threshold: float = 0.2,
 ) -> torch.Tensor:
   return (gate > threshold).float()
 
 
 def _roughness_gate_inactive(
   gate: torch.Tensor,
-  threshold: float,
+  threshold: float = 0.2,
 ) -> torch.Tensor:
   return 1.0 - _roughness_gate_active(gate, threshold)
 
@@ -72,54 +73,59 @@ def _terrain_roughness_from_height_samples(
   height_samples: torch.Tensor,
   *,
   wheel_radius: float,
-  std_weight: float,
-  range_weight: float,
-  jump_weight: float,
   gate_min: float,
   gate_max: float,
   grid_shape: tuple[int, int] | None,
 ) -> _TerrainRoughnessStats:
-  """Compute roughness from per-wheel local clearance samples.
-
-  ``TerrainHeightSensor`` reports frame_z - hit_z. Standard deviation, range, and
-  neighbor jumps are invariant to the sign flip from terrain height to clearance.
-  """
+  """Compute roughness from per-wheel local clearance samples."""
   if height_samples.ndim != 3:
     raise ValueError(
       "terrain roughness requires unreduced height samples with shape [B, F, N], "
       f"got {tuple(height_samples.shape)}"
     )
+  if wheel_radius <= 0.0:
+    raise ValueError(f"wheel_radius ({wheel_radius}) must be positive")
   if gate_max <= gate_min:
-    raise ValueError(f"gate_max ({gate_max}) must be greater than gate_min ({gate_min})")
+    raise ValueError(
+      f"gate_max ({gate_max}) must be greater than gate_min ({gate_min})"
+    )
 
   height_samples = torch.nan_to_num(height_samples, nan=0.0, posinf=0.0, neginf=0.0)
-  std = torch.std(height_samples, dim=-1, unbiased=False)
-  height_range = height_samples.max(dim=-1).values - height_samples.min(dim=-1).values
-
   rows, cols = _resolve_grid_shape(height_samples.shape[-1], grid_shape)
   grid = height_samples.view(height_samples.shape[0], height_samples.shape[1], rows, cols)
+  zeros = torch.zeros_like(height_samples[..., 0])
+
   if cols > 1:
     jump_x = torch.abs(grid[..., 1:] - grid[..., :-1]).amax(dim=(-1, -2))
   else:
-    jump_x = torch.zeros_like(std)
+    jump_x = zeros
   if rows > 1:
     jump_y = torch.abs(grid[..., 1:, :] - grid[..., :-1, :]).amax(dim=(-1, -2))
   else:
-    jump_y = torch.zeros_like(std)
+    jump_y = zeros
   jump = torch.maximum(jump_x, jump_y)
 
-  inv_radius = 1.0 / wheel_radius
-  foot_roughness = (
-    std_weight * std * inv_radius
-    + range_weight * height_range * inv_radius
-    + jump_weight * jump * inv_radius
-  )
+  if cols > 2:
+    curvature_x = torch.abs(
+      grid[..., :, 2:] - 2.0 * grid[..., :, 1:-1] + grid[..., :, :-2]
+    ).amax(dim=(-1, -2))
+  else:
+    curvature_x = zeros
+  if rows > 2:
+    curvature_y = torch.abs(
+      grid[..., 2:, :] - 2.0 * grid[..., 1:-1, :] + grid[..., :-2, :]
+    ).amax(dim=(-1, -2))
+  else:
+    curvature_y = zeros
+  curvature = torch.maximum(curvature_x, curvature_y)
+
+  foot_roughness = torch.maximum(jump / wheel_radius, curvature / wheel_radius)
   robot_roughness = foot_roughness.max(dim=1).values
-  gate = torch.clamp((robot_roughness - gate_min) / (gate_max - gate_min), 0.0, 1.0)
+  u = torch.clamp((robot_roughness - gate_min) / (gate_max - gate_min), 0.0, 1.0)
+  gate = u * u * (3.0 - 2.0 * u)
   return _TerrainRoughnessStats(
-    std=std,
-    height_range=height_range,
     jump=jump,
+    curvature=curvature,
     foot_roughness=foot_roughness,
     robot_roughness=robot_roughness,
     gate=gate,
@@ -158,11 +164,8 @@ def _terrain_roughness_from_sensor(
   sensor_name: str,
   *,
   wheel_radius: float = 0.127,
-  std_weight: float = 0.3,
-  range_weight: float = 0.3,
-  jump_weight: float = 0.4,
-  gate_min: float = 0.25,
-  gate_max: float = 0.85,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
   grid_shape: tuple[int, int] | None = None,
   log: bool = True,
 ) -> _TerrainRoughnessStats:
@@ -170,9 +173,6 @@ def _terrain_roughness_from_sensor(
   stats = _terrain_roughness_from_height_samples(
     _terrain_clearance_samples(sensor),
     wheel_radius=wheel_radius,
-    std_weight=std_weight,
-    range_weight=range_weight,
-    jump_weight=jump_weight,
     gate_min=gate_min,
     gate_max=gate_max,
     grid_shape=grid_shape,
@@ -185,14 +185,11 @@ def _terrain_roughness_from_sensor(
       log_data["Metrics/roughness_right_mean"] = stats.foot_roughness[:, 1].mean()
     log_data["Metrics/roughness_max_mean"] = stats.robot_roughness.mean()
     log_data["Metrics/roughness_lambda_mean"] = stats.gate.mean()
-    log_data["Metrics/roughness_std_over_R_mean"] = (
-      stats.std / wheel_radius
-    ).mean()
-    log_data["Metrics/roughness_range_over_R_mean"] = (
-      stats.height_range / wheel_radius
-    ).mean()
     log_data["Metrics/roughness_jump_over_R_mean"] = (
       stats.jump / wheel_radius
+    ).mean()
+    log_data["Metrics/roughness_curvature_over_R_mean"] = (
+      stats.curvature / wheel_radius
     ).mean()
   return stats
 
@@ -202,8 +199,14 @@ def _command_active(
   command_name: str,
   command_threshold: float,
 ) -> torch.Tensor:
-  command = env.command_manager.get_command(command_name)
-  assert command is not None, f"Command '{command_name}' not found."
+  command_term = env.command_manager.get_term(command_name)
+  assert command_term is not None, f"Command '{command_name}' not found."
+  command = (
+    command_term.command_w
+    if isinstance(command_term, UniformVelocityCommand)
+    else env.command_manager.get_command(command_name)
+  )
+  assert command is not None
   linear_norm = torch.norm(command[:, :2], dim=1)
   angular_norm = torch.abs(command[:, 2])
   return (linear_norm + angular_norm > command_threshold).float()
@@ -220,10 +223,17 @@ def track_linear_velocity(
   The commanded z velocity is assumed to be zero.
   """
   asset: Entity = env.scene[asset_cfg.name]
-  command = env.command_manager.get_command(command_name)
-  assert command is not None, f"Command '{command_name}' not found."
-  actual = asset.data.root_link_lin_vel_b
-  xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
+  command_term = env.command_manager.get_term(command_name)
+  assert command_term is not None, f"Command '{command_name}' not found."
+  if isinstance(command_term, UniformVelocityCommand):
+    command_xy = command_term.command_w[:, :2]
+    actual = asset.data.root_link_lin_vel_w
+  else:
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    command_xy = command[:, :2]
+    actual = asset.data.root_link_lin_vel_b
+  xy_error = torch.sum(torch.square(command_xy - actual[:, :2]), dim=1)
   z_error = torch.square(actual[:, 2])
   lin_vel_error = xy_error + z_error
   return torch.exp(-lin_vel_error / std**2)
@@ -235,18 +245,93 @@ def track_angular_velocity(
   command_name: str,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Reward heading error for heading-controlled envs, angular velocity for others.
-
-  The commanded xy angular velocities are assumed to be zero.
-  """
+  """Reward tracking of the commanded yaw rate."""
   asset: Entity = env.scene[asset_cfg.name]
   command = env.command_manager.get_command(command_name)
   assert command is not None, f"Command '{command_name}' not found."
   actual = asset.data.root_link_ang_vel_b
   z_error = torch.square(command[:, 2] - actual[:, 2])
-  xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
-  ang_vel_error = z_error + xy_error
-  return torch.exp(-ang_vel_error / std**2)
+  return torch.exp(-z_error / std**2)
+
+
+def base_ang_vel_xy_l2(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize base roll and pitch angular velocity."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.sum(torch.square(asset.data.root_link_ang_vel_b[:, :2]), dim=1)
+
+
+def track_heading(
+  env: ManagerBasedRlEnv,
+  std: float,
+  command_name: str,
+  command_norm_threshold: float = 0.2,
+) -> torch.Tensor:
+  """Reward the base heading for aligning with the commanded world heading."""
+  command_term = env.command_manager.get_term(command_name)
+  assert isinstance(command_term, UniformVelocityCommand)
+
+  command_speed = torch.norm(command_term.command_w[:, :2], dim=1)
+  active = command_speed > command_norm_threshold
+  heading_error = wrap_to_pi(
+    command_term.heading_target - command_term.robot.data.heading_w
+  )
+  reward = torch.exp(-torch.square(heading_error) / std**2)
+  return reward * active.float()
+
+
+class heading_progress:
+  """Reward reductions in absolute heading error between consecutive steps."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg  # Parameters are passed to __call__ by the manager.
+    self._prev_abs_heading_error = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.float32
+    )
+    self._has_prev = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    self._last_command_counter = torch.full(
+      (env.num_envs,), -1, device=env.device, dtype=torch.long
+    )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    max_progress: float = 0.05,
+  ) -> torch.Tensor:
+    command_term = env.command_manager.get_term(command_name)
+    assert isinstance(command_term, UniformVelocityCommand)
+    assert command_term.cfg.heading_command
+
+    heading_error = wrap_to_pi(
+      command_term.heading_target - command_term.robot.data.heading_w
+    )
+    abs_heading_error = torch.abs(heading_error)
+
+    command_changed = command_term.command_counter != self._last_command_counter
+    active = command_term.is_heading_env & ~command_term.is_standing_env
+    valid = self._has_prev & ~command_changed & active
+
+    progress_scale = max(max_progress, 1.0e-6)
+    progress = self._prev_abs_heading_error - abs_heading_error
+    progress_reward = torch.clamp(progress, min=0.0, max=progress_scale)
+    progress_reward = progress_reward / progress_scale
+    progress_reward = progress_reward * valid.float()
+
+    log_data = env.extras.setdefault("log", {})
+    log_data["Metrics/heading_progress_mean"] = progress_reward.mean()
+
+    self._prev_abs_heading_error = abs_heading_error.detach()
+    self._has_prev[:] = True
+    self._last_command_counter = command_term.command_counter.clone()
+    return progress_reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self._prev_abs_heading_error[env_ids] = 0.0
+    self._has_prev[env_ids] = False
+    self._last_command_counter[env_ids] = -1
 
 
 def stand_still(
@@ -512,22 +597,16 @@ def non_rough_wheel_lateral_symmetry(
   std: float,
   asset_cfg: SceneEntityCfg,
   wheel_radius: float = 0.127,
-  std_weight: float = 0.3,
-  range_weight: float = 0.3,
-  jump_weight: float = 0.4,
-  gate_min: float = 0.25,
-  gate_max: float = 0.85,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
   grid_shape: tuple[int, int] | None = None,
-  roughness_gate_threshold: float = 0.0,
 ) -> torch.Tensor:
   """Reward wheel lateral symmetry only when terrain is not rough."""
   stats = _terrain_roughness_from_sensor(
     env,
     roughness_sensor_name,
     wheel_radius=wheel_radius,
-    std_weight=std_weight,
-    range_weight=range_weight,
-    jump_weight=jump_weight,
     gate_min=gate_min,
     gate_max=gate_max,
     grid_shape=grid_shape,
@@ -541,22 +620,16 @@ def non_rough_wheel_x_alignment(
   roughness_sensor_name: str,
   asset_cfg: SceneEntityCfg,
   wheel_radius: float = 0.127,
-  std_weight: float = 0.3,
-  range_weight: float = 0.3,
-  jump_weight: float = 0.4,
-  gate_min: float = 0.25,
-  gate_max: float = 0.85,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
   grid_shape: tuple[int, int] | None = None,
-  roughness_gate_threshold: float = 0.0,
 ) -> torch.Tensor:
   """Penalize front-back wheel misalignment only when terrain is not rough."""
   stats = _terrain_roughness_from_sensor(
     env,
     roughness_sensor_name,
     wheel_radius=wheel_radius,
-    std_weight=std_weight,
-    range_weight=range_weight,
-    jump_weight=jump_weight,
     gate_min=gate_min,
     gate_max=gate_max,
     grid_shape=grid_shape,
@@ -638,27 +711,85 @@ def wheel_air_time_balance(
   return cost
 
 
+def standing_forward_wheel_air_time(
+  env: ManagerBasedRlEnv,
+  contact_sensor_name: str,
+  roughness_sensor_name: str,
+  command_name: str,
+  wheel_radius: float = 0.127,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
+  grid_shape: tuple[int, int] | None = None,
+  max_time: float = 0.5,
+  standing_scale: float = 2.5,
+  forward_scale: float = 1.0,
+  lin_threshold: float = 0.05,
+  ang_threshold: float = 0.05,
+  forward_speed_threshold: float = 0.05,
+  forward_lateral_threshold: float = 0.05,
+  forward_ang_threshold: float = 0.05,
+) -> torch.Tensor:
+  """Penalize standing air time globally and forward air time only on non-rough terrain."""
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
+
+  contact_sensor: ContactSensor = env.scene[contact_sensor_name]
+  current_air_time = contact_sensor.data.current_air_time
+  assert current_air_time is not None
+  air_time = torch.sum(torch.clamp(current_air_time, max=max_time), dim=1)
+
+  command_term = env.command_manager.get_term(command_name)
+  assert command_term is not None, f"Command '{command_name}' not found."
+  if isinstance(command_term, UniformVelocityCommand):
+    standing = command_term.is_standing_env
+    forward = command_term.is_forward_env & ~standing
+  else:
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    linear_norm = torch.norm(command[:, :2], dim=1)
+    angular_norm = torch.abs(command[:, 2])
+    standing = (linear_norm < lin_threshold) & (angular_norm < ang_threshold)
+    forward = (
+      (command[:, 0] > forward_speed_threshold)
+      & (torch.abs(command[:, 1]) < forward_lateral_threshold)
+      & (torch.abs(command[:, 2]) < forward_ang_threshold)
+      & ~standing
+    )
+
+  standing_cost = air_time * standing.float() * standing_scale
+  forward_cost = air_time * forward.float() * forward_scale * non_rough_active
+  cost = standing_cost + forward_cost
+
+  log_data = env.extras.setdefault("log", {})
+  log_data["Metrics/standing_forward_wheel_air_time_mean"] = cost.mean()
+  log_data["Metrics/standing_wheel_air_time_mean"] = standing_cost.mean()
+  log_data["Metrics/non_rough_forward_wheel_air_time_mean"] = forward_cost.mean()
+  return cost
+
+
 def rough_wheel_usage(
   env: ManagerBasedRlEnv,
   roughness_sensor_name: str,
   asset_cfg: SceneEntityCfg,
   wheel_radius: float = 0.127,
-  std_weight: float = 0.3,
-  range_weight: float = 0.3,
-  jump_weight: float = 0.4,
-  gate_min: float = 0.25,
-  gate_max: float = 0.85,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
   grid_shape: tuple[int, int] | None = None,
-  roughness_gate_threshold: float = 0.0,
 ) -> torch.Tensor:
   """Penalize wheel speed only when local wheel terrain is rough."""
   stats = _terrain_roughness_from_sensor(
     env,
     roughness_sensor_name,
     wheel_radius=wheel_radius,
-    std_weight=std_weight,
-    range_weight=range_weight,
-    jump_weight=jump_weight,
     gate_min=gate_min,
     gate_max=gate_max,
     grid_shape=grid_shape,
@@ -676,11 +807,9 @@ def rough_wheel_foot_clearance(
   contact_sensor_name: str,
   command_name: str,
   wheel_radius: float = 0.127,
-  std_weight: float = 0.3,
-  range_weight: float = 0.3,
-  jump_weight: float = 0.4,
-  gate_min: float = 0.25,
-  gate_max: float = 0.85,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
   grid_shape: tuple[int, int] | None = None,
   clearance_grid_shape: tuple[int, int] | None = None,
   base_target_height: float = 0.06,
@@ -688,16 +817,12 @@ def rough_wheel_foot_clearance(
   max_target_height: float = 0.18,
   target_std: float = 0.04,
   command_threshold: float = 0.05,
-  roughness_gate_threshold: float = 0.0,
 ) -> torch.Tensor:
   """Reward wheel-foot swing clearance toward a roughness-aware local target."""
   stats = _terrain_roughness_from_sensor(
     env,
     roughness_sensor_name,
     wheel_radius=wheel_radius,
-    std_weight=std_weight,
-    range_weight=range_weight,
-    jump_weight=jump_weight,
     gate_min=gate_min,
     gate_max=gate_max,
     grid_shape=grid_shape,
@@ -756,23 +881,17 @@ def rough_contact_pattern(
   contact_sensor_name: str,
   command_name: str,
   wheel_radius: float = 0.127,
-  std_weight: float = 0.3,
-  range_weight: float = 0.3,
-  jump_weight: float = 0.4,
-  gate_min: float = 0.25,
-  gate_max: float = 0.85,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
   grid_shape: tuple[int, int] | None = None,
   command_threshold: float = 0.05,
-  roughness_gate_threshold: float = 0.0,
 ) -> torch.Tensor:
   """Reward rough-terrain contact patterns with a negative value for bad modes."""
   stats = _terrain_roughness_from_sensor(
     env,
     roughness_sensor_name,
     wheel_radius=wheel_radius,
-    std_weight=std_weight,
-    range_weight=range_weight,
-    jump_weight=jump_weight,
     gate_min=gate_min,
     gate_max=gate_max,
     grid_shape=grid_shape,
