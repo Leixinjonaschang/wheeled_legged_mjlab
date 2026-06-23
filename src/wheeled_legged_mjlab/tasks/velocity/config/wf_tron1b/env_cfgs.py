@@ -604,7 +604,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
-                    weight=-7.0e-2,
+                    weight=-4.0e-2,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_joint_cfg,
@@ -702,7 +702,12 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
     if rough:
         curriculum["terrain_levels"] = CurriculumTermCfg(
             func=mdp.terrain_levels_vel,
-            params={"command_name": COMMAND_NAME},
+            params={
+                "command_name": COMMAND_NAME,
+                "move_up_path_ratio": 0.65,
+                "min_command_path_ratio": 0.25,
+                "move_down_path_ratio": 0.35,
+            },
         )
     return curriculum
 

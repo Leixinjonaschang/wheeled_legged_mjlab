@@ -28,6 +28,7 @@ def _get_velocity_curriculum_state(env: ManagerBasedRlEnv) -> dict[str, torch.Te
   if state is None:
     state = {
       "cmd_path": torch.zeros(env.num_envs, device=env.device, dtype=torch.float32),
+      "actual_path": torch.zeros(env.num_envs, device=env.device, dtype=torch.float32),
       "progress": torch.zeros(env.num_envs, device=env.device, dtype=torch.float32),
       "tracking_error_path": torch.zeros(
         env.num_envs, device=env.device, dtype=torch.float32
@@ -43,7 +44,7 @@ def _safe_ratio(numerator: torch.Tensor, denominator: torch.Tensor) -> torch.Ten
 
 
 class velocity_curriculum_progress:
-  """Accumulate per-episode command path and realized command-direction progress."""
+  """Accumulate per-episode command, actual, and command-direction paths."""
 
   def __init__(self, cfg: Any, env: ManagerBasedRlEnv):
     del cfg
@@ -72,27 +73,40 @@ class velocity_curriculum_progress:
     active = command_speed > command_threshold
     active_f = active.float()
     command_dir = command_xy / torch.clamp(command_speed[:, None], min=1.0e-6)
+    actual_path_step = torch.norm(asset.data.root_link_lin_vel_w[:, :2], dim=1) * (
+      env.step_dt
+    )
     progress_step = torch.sum(actual_xy * command_dir, dim=1) * env.step_dt
     cmd_path_step = command_speed * env.step_dt
     tracking_error_step = torch.norm(actual_xy - command_xy, dim=1) * env.step_dt
 
     self._state["cmd_path"] += cmd_path_step * active_f
+    self._state["actual_path"] += actual_path_step * active_f
     self._state["progress"] += progress_step * active_f
     self._state["tracking_error_path"] += tracking_error_step * active_f
     self._state["active_steps"] += active.long()
 
+    actual_path_ratio = _safe_ratio(
+      self._state["actual_path"], self._state["cmd_path"]
+    )
     progress_ratio = _safe_ratio(self._state["progress"], self._state["cmd_path"])
     tracking_error_ratio = _safe_ratio(
       self._state["tracking_error_path"], self._state["cmd_path"]
     )
     log_data = env.extras.setdefault("log", {})
+    log_data["Metrics/velocity_curriculum_actual_path_mean"] = self._state[
+      "actual_path"
+    ].mean()
+    log_data["Metrics/velocity_curriculum_actual_path_ratio_mean"] = (
+      actual_path_ratio.mean()
+    )
     log_data["Metrics/velocity_curriculum_progress_ratio_mean"] = (
       progress_ratio.mean()
     )
     log_data["Metrics/velocity_curriculum_tracking_error_ratio_mean"] = (
       tracking_error_ratio.mean()
     )
-    return progress_ratio
+    return actual_path_ratio
 
   def reset(self, env_ids: torch.Tensor | slice | None) -> None:
     if env_ids is None:
@@ -105,9 +119,9 @@ def terrain_levels_vel(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor,
   command_name: str,
+  move_up_path_ratio: float = 0.65,
   min_command_path_ratio: float = 0.25,
-  move_up_progress_ratio: float = 0.70,
-  move_down_progress_ratio: float = 0.40,
+  move_down_path_ratio: float = 0.35,
   asset_cfg: SceneEntityCfg = _DEFAULT_SCENE_CFG,
 ) -> dict[str, torch.Tensor]:
   asset: Entity = env.scene[asset_cfg.name]
@@ -128,24 +142,24 @@ def terrain_levels_vel(
   command_speed = torch.norm(command[env_ids, :2], dim=1)
   state = _get_velocity_curriculum_state(env)
   cmd_path = state["cmd_path"][env_ids]
+  actual_path = state["actual_path"][env_ids]
   progress = state["progress"][env_ids]
   tracking_error_path = state["tracking_error_path"][env_ids]
   active_steps = state["active_steps"][env_ids]
+  actual_path_ratio = _safe_ratio(actual_path, cmd_path)
   progress_ratio = _safe_ratio(progress, cmd_path)
   tracking_error_ratio = _safe_ratio(tracking_error_path, cmd_path)
-  progress_distance = torch.clamp(progress, min=0.0)
+  move_up_path = terrain_generator.size[0] * move_up_path_ratio
   min_command_path = terrain_generator.size[0] * min_command_path_ratio
 
-  # Robots that walked far enough progress to harder terrains.
-  move_up = (
-    (progress_distance > terrain_generator.size[0] / 2)
-    & (progress_ratio > move_up_progress_ratio)
-  )
+  # Robots that physically traveled far enough progress to harder terrains.
+  # Directional tracking quality is optimized by rewards, not by terrain exposure.
+  move_up = actual_path > move_up_path
 
-  # Robots that make poor progress along the commanded path go to simpler terrains.
+  # Robots that received enough command path but barely moved go to simpler terrains.
   move_down = (
     (cmd_path > min_command_path)
-    & (progress_ratio < move_down_progress_ratio)
+    & (actual_path < cmd_path * move_down_path_ratio)
   )
   move_down = move_down & ~move_up
 
@@ -162,6 +176,8 @@ def terrain_levels_vel(
     "distance_mean": torch.mean(distance),
     "command_speed_mean": torch.mean(command_speed),
     "cmd_path_mean": torch.mean(cmd_path),
+    "actual_path_mean": torch.mean(actual_path),
+    "actual_path_ratio_mean": torch.mean(actual_path_ratio),
     "progress_mean": torch.mean(progress),
     "progress_ratio_mean": torch.mean(progress_ratio),
     "tracking_error_ratio_mean": torch.mean(tracking_error_ratio),
@@ -192,6 +208,10 @@ def terrain_levels_vel(
           command_speed[selected_mask]
         )
         result[f"{name}_cmd_path_mean"] = torch.mean(cmd_path[selected_mask])
+        result[f"{name}_actual_path_mean"] = torch.mean(actual_path[selected_mask])
+        result[f"{name}_actual_path_ratio_mean"] = torch.mean(
+          actual_path_ratio[selected_mask]
+        )
         result[f"{name}_progress_mean"] = torch.mean(progress[selected_mask])
         result[f"{name}_progress_ratio_mean"] = torch.mean(
           progress_ratio[selected_mask]
