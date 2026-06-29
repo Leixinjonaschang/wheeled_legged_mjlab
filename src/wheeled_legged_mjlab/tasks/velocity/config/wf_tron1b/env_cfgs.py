@@ -597,7 +597,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             "wheel_radius": WHEEL_RADIUS,
             "gate_min": 0.10,
             "gate_max": 0.40,
-            "roughness_gate_threshold": 0.3,
+            "roughness_gate_threshold": 0.4,
             "grid_shape": TERRAIN_SCAN_GRID_SHAPE,
         }
         rewards.update(
@@ -704,9 +704,10 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
             func=mdp.terrain_levels_vel,
             params={
                 "command_name": COMMAND_NAME,
-                "move_up_path_ratio": 0.65,
+                "move_up_distance_ratio": 0.50,
                 "min_command_path_ratio": 0.25,
-                "move_down_path_ratio": 0.35,
+                "move_up_progress_ratio": 0.50,
+                "move_down_progress_ratio": 0.35,
             },
         )
     return curriculum

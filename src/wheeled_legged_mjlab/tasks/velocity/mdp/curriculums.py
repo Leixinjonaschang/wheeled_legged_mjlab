@@ -29,6 +29,21 @@ def _get_velocity_curriculum_state(env: ManagerBasedRlEnv) -> dict[str, torch.Te
     state = {
       "cmd_path": torch.zeros(env.num_envs, device=env.device, dtype=torch.float32),
       "actual_path": torch.zeros(env.num_envs, device=env.device, dtype=torch.float32),
+      "completed_segment_path": torch.zeros(
+        env.num_envs, device=env.device, dtype=torch.float32
+      ),
+      "segment_start_pos": torch.zeros(
+        env.num_envs, 2, device=env.device, dtype=torch.float32
+      ),
+      "last_root_pos": torch.zeros(
+        env.num_envs, 2, device=env.device, dtype=torch.float32
+      ),
+      "segment_active": torch.zeros(
+        env.num_envs, device=env.device, dtype=torch.bool
+      ),
+      "last_command_counter": torch.full(
+        (env.num_envs,), -1, device=env.device, dtype=torch.long
+      ),
       "progress": torch.zeros(env.num_envs, device=env.device, dtype=torch.float32),
       "tracking_error_path": torch.zeros(
         env.num_envs, device=env.device, dtype=torch.float32
@@ -44,7 +59,7 @@ def _safe_ratio(numerator: torch.Tensor, denominator: torch.Tensor) -> torch.Ten
 
 
 class velocity_curriculum_progress:
-  """Accumulate per-episode command, actual, and command-direction paths."""
+  """Accumulate command path, segmented displacement, and directional progress."""
 
   def __init__(self, cfg: Any, env: ManagerBasedRlEnv):
     del cfg
@@ -73,15 +88,49 @@ class velocity_curriculum_progress:
     active = command_speed > command_threshold
     active_f = active.float()
     command_dir = command_xy / torch.clamp(command_speed[:, None], min=1.0e-6)
-    actual_path_step = torch.norm(asset.data.root_link_lin_vel_w[:, :2], dim=1) * (
-      env.step_dt
-    )
     progress_step = torch.sum(actual_xy * command_dir, dim=1) * env.step_dt
     cmd_path_step = command_speed * env.step_dt
     tracking_error_step = torch.norm(actual_xy - command_xy, dim=1) * env.step_dt
 
+    # Sum the net displacement of each command segment. The command manager
+    # resamples after metrics are computed, so the previous metric position is the
+    # boundary sample between the old and new command segments.
+    root_pos_xy = asset.data.root_link_pos_w[:, :2]
+    command_counter = command_term.command_counter
+    uninitialized = self._state["last_command_counter"] < 0
+    self._state["segment_start_pos"][uninitialized] = root_pos_xy[uninitialized]
+    self._state["last_root_pos"][uninitialized] = root_pos_xy[uninitialized]
+    self._state["segment_active"][uninitialized] = active[uninitialized]
+    self._state["last_command_counter"][uninitialized] = command_counter[
+      uninitialized
+    ]
+
+    command_changed = (~uninitialized) & (
+      command_counter != self._state["last_command_counter"]
+    )
+    completed_segment = torch.norm(
+      self._state["last_root_pos"] - self._state["segment_start_pos"], dim=1
+    )
+    self._state["completed_segment_path"][command_changed] += completed_segment[
+      command_changed
+    ] * self._state["segment_active"][command_changed].float()
+    self._state["segment_start_pos"][command_changed] = self._state[
+      "last_root_pos"
+    ][command_changed]
+    self._state["segment_active"][command_changed] = active[command_changed]
+    self._state["last_command_counter"][command_changed] = command_counter[
+      command_changed
+    ]
+
+    current_segment = torch.norm(
+      root_pos_xy - self._state["segment_start_pos"], dim=1
+    ) * self._state["segment_active"].float()
+    self._state["actual_path"][:] = (
+      self._state["completed_segment_path"] + current_segment
+    )
+    self._state["last_root_pos"][:] = root_pos_xy
+
     self._state["cmd_path"] += cmd_path_step * active_f
-    self._state["actual_path"] += actual_path_step * active_f
     self._state["progress"] += progress_step * active_f
     self._state["tracking_error_path"] += tracking_error_step * active_f
     self._state["active_steps"] += active.long()
@@ -106,22 +155,24 @@ class velocity_curriculum_progress:
     log_data["Metrics/velocity_curriculum_tracking_error_ratio_mean"] = (
       tracking_error_ratio.mean()
     )
-    return actual_path_ratio
+    return progress_ratio
 
   def reset(self, env_ids: torch.Tensor | slice | None) -> None:
     if env_ids is None:
       env_ids = slice(None)
     for value in self._state.values():
       value[env_ids] = 0
+    self._state["last_command_counter"][env_ids] = -1
 
 
 def terrain_levels_vel(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor,
   command_name: str,
-  move_up_path_ratio: float = 0.65,
+  move_up_distance_ratio: float = 0.50,
   min_command_path_ratio: float = 0.25,
-  move_down_path_ratio: float = 0.35,
+  move_up_progress_ratio: float = 0.50,
+  move_down_progress_ratio: float = 0.35,
   asset_cfg: SceneEntityCfg = _DEFAULT_SCENE_CFG,
 ) -> dict[str, torch.Tensor]:
   asset: Entity = env.scene[asset_cfg.name]
@@ -134,7 +185,7 @@ def terrain_levels_vel(
   command = env.command_manager.get_command(command_name)
   assert command is not None
 
-  # Compute the distance the robot walked.
+  # Compute endpoint displacement from the terrain origin for diagnostics.
   distance = torch.norm(
     asset.data.root_link_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2],
     dim=1,
@@ -149,17 +200,19 @@ def terrain_levels_vel(
   actual_path_ratio = _safe_ratio(actual_path, cmd_path)
   progress_ratio = _safe_ratio(progress, cmd_path)
   tracking_error_ratio = _safe_ratio(tracking_error_path, cmd_path)
-  move_up_path = terrain_generator.size[0] * move_up_path_ratio
+  move_up_distance = terrain_generator.size[0] * move_up_distance_ratio
   min_command_path = terrain_generator.size[0] * min_command_path_ratio
 
-  # Robots that physically traveled far enough progress to harder terrains.
-  # Directional tracking quality is optimized by rewards, not by terrain exposure.
-  move_up = actual_path > move_up_path
+  # Progress only after both traversing enough terrain and following the command.
+  move_up = (
+    (actual_path > move_up_distance)
+    & (progress_ratio > move_up_progress_ratio)
+  )
 
-  # Robots that received enough command path but barely moved go to simpler terrains.
+  # Regress when enough command was issued but directional progress stayed poor.
   move_down = (
     (cmd_path > min_command_path)
-    & (actual_path < cmd_path * move_down_path_ratio)
+    & (progress_ratio < move_down_progress_ratio)
   )
   move_down = move_down & ~move_up
 
