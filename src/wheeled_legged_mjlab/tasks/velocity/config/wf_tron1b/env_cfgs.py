@@ -488,6 +488,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-50.0,
             params={
                 "target_height": BASE_HEIGHT_TARGET,
+                "deadband": 0.04,
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
                 "sensor_name": "terrain_scan" if rough else None,
                 "terrain_sample": "center",
@@ -520,7 +521,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "stand_still": RewardTermCfg(
             func=mdp.stand_still,
-            weight=-0.5,
+            weight=-1.0,
             params={
                 "command_name": COMMAND_NAME,
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
@@ -582,11 +583,11 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "wheel_air_time_balance": RewardTermCfg(
             func=mdp.wheel_air_time_balance,
-            weight=-4.0,
+            weight=-2.0,
             params={
                 "sensor_name": "wheels_ground_contact",
-                "tolerance": 0.12,
-                "max_time": 1.0,
+                "min_total_air_time": 1.0,
+                "balance_tolerance": 0.2,
             },
         ),
     }
@@ -619,7 +620,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                         "clearance_grid_shape": WHEEL_HEIGHT_GRID_SHAPE,
                         "contact_sensor_name": "wheels_ground_contact",
                         "command_name": COMMAND_NAME,
-                        "base_target_height": 0.04,
+                        "base_target_height": 0.03,
                         "range_scale": 0.5,
                         "max_target_height": 0.18,
                         "target_std": 0.04,
@@ -706,7 +707,7 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
                 "command_name": COMMAND_NAME,
                 "move_up_distance_ratio": 0.50,
                 "min_command_path_ratio": 0.25,
-                "move_up_progress_ratio": 0.50,
+                "move_up_progress_ratio": 0.65,
                 "move_down_progress_ratio": 0.35,
             },
         )

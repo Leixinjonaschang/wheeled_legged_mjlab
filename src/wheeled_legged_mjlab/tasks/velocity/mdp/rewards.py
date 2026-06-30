@@ -508,11 +508,13 @@ def base_height_l2(
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
   sensor_name: str | None = None,
   terrain_sample: str = "mean",
+  deadband: float = 0.0,
 ) -> torch.Tensor:
-  """Penalize base height error using an L2 kernel.
+  """Penalize base height error outside a symmetric deadband using an L2 kernel.
 
   When a terrain raycast sensor is provided, height is measured relative to the
-  local terrain under the scan instead of world z.
+  local terrain under the scan instead of world z. Errors inside the deadband
+  produce zero cost; only the excess error is penalized.
   """
   asset: Entity = env.scene[asset_cfg.name]
   base_z = asset.data.root_link_pos_w[:, 2]
@@ -543,7 +545,11 @@ def base_height_l2(
     else:
       raise ValueError(f"Unsupported terrain_sample: {terrain_sample}")
     base_height = base_z - ground_z
-  return torch.square(base_height - target_height)
+  height_error = torch.clamp(
+    torch.abs(base_height - target_height) - deadband,
+    min=0.0,
+  )
+  return torch.square(height_error)
 
 
 def joint_power_l1(
@@ -685,30 +691,74 @@ def feet_air_time(
   return reward
 
 
-def wheel_air_time_balance(
-  env: ManagerBasedRlEnv,
-  sensor_name: str,
-  tolerance: float = 0.12,
-  max_time: float = 1.0,
-) -> torch.Tensor:
-  """Penalize sustained left/right wheel air-time imbalance."""
-  sensor: ContactSensor = env.scene[sensor_name]
-  current_air_time = sensor.data.current_air_time
-  assert current_air_time is not None
-  if current_air_time.shape[1] != 2:
-    raise ValueError(
-      "wheel_air_time_balance expects exactly two contact tracks, "
-      f"got {current_air_time.shape[1]}"
+class wheel_air_time_balance:
+  """Penalize episode-level left/right wheel air-time imbalance."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self._cumulative_air_time = torch.zeros(
+      env.num_envs, 2, device=env.device, dtype=torch.float32
     )
 
-  air_time_diff = torch.abs(current_air_time[:, 0] - current_air_time[:, 1])
-  imbalance = torch.clamp(air_time_diff - tolerance, min=0.0, max=max_time)
-  cost = torch.square(imbalance)
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    min_total_air_time: float = 1.0,
+    balance_tolerance: float = 0.2,
+  ) -> torch.Tensor:
+    if min_total_air_time <= 0.0:
+      raise ValueError("min_total_air_time must be positive")
+    if not 0.0 <= balance_tolerance < 1.0:
+      raise ValueError("balance_tolerance must be in [0, 1)")
 
-  log_data = env.extras.setdefault("log", {})
-  log_data["Metrics/wheel_air_time_diff_mean"] = air_time_diff.mean()
-  log_data["Metrics/wheel_air_time_balance_cost_mean"] = cost.mean()
-  return cost
+    sensor: ContactSensor = env.scene[sensor_name]
+    found = sensor.data.found
+    assert found is not None
+    if found.shape[1] != 2:
+      raise ValueError(
+        "wheel_air_time_balance expects exactly two contact tracks, "
+        f"got {found.shape[1]}"
+      )
+
+    in_air = (found == 0).float()
+    self._cumulative_air_time += in_air * env.step_dt
+
+    total_air_time = self._cumulative_air_time.sum(dim=1)
+    air_time_diff = torch.abs(
+      self._cumulative_air_time[:, 0] - self._cumulative_air_time[:, 1]
+    )
+    imbalance_ratio = air_time_diff / torch.clamp(total_air_time, min=1.0e-6)
+
+    # Ignore small duty-factor differences and ramp the cost in only after enough
+    # swing time has been observed.  This avoids penalizing the first normal swing
+    # of an episode while preserving a persistent cost for one-legged standing.
+    excess_ratio = torch.clamp(
+      (imbalance_ratio - balance_tolerance) / (1.0 - balance_tolerance),
+      min=0.0,
+      max=1.0,
+    )
+    activation = torch.clamp(total_air_time / min_total_air_time, 0.0, 1.0)
+    cost = activation * torch.square(excess_ratio)
+
+    log_data = env.extras.setdefault("log", {})
+    log_data["Metrics/wheel_episode_air_time_left_mean"] = (
+      self._cumulative_air_time[:, 0].mean()
+    )
+    log_data["Metrics/wheel_episode_air_time_right_mean"] = (
+      self._cumulative_air_time[:, 1].mean()
+    )
+    log_data["Metrics/wheel_episode_air_time_diff_mean"] = air_time_diff.mean()
+    log_data["Metrics/wheel_episode_air_time_imbalance_ratio_mean"] = (
+      imbalance_ratio.mean()
+    )
+    log_data["Metrics/wheel_air_time_balance_cost_mean"] = cost.mean()
+    return cost
+
+  def reset(self, env_ids: torch.Tensor | slice | None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self._cumulative_air_time[env_ids] = 0.0
 
 
 def standing_forward_wheel_air_time(
