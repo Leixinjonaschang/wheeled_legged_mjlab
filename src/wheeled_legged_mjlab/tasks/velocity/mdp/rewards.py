@@ -48,6 +48,26 @@ def _roughness_gate_inactive(
   return 1.0 - _roughness_gate_active(gate, threshold)
 
 
+def _scheduled_roughness_gate_threshold(
+  env: ManagerBasedRlEnv,
+  threshold: float,
+  threshold_final: float | None,
+  ramp_steps: int,
+) -> float:
+  """Linearly interpolate the roughness activation threshold."""
+  if ramp_steps <= 0 or threshold_final is None:
+    current = threshold
+    progress = 0.0
+  else:
+    progress = min(max(float(env.common_step_counter) / ramp_steps, 0.0), 1.0)
+    current = threshold + progress * (threshold_final - threshold)
+
+  log_data = env.extras.setdefault("log", {})
+  log_data["Metrics/roughness_gate_threshold"] = current
+  log_data["Metrics/roughness_gate_threshold_schedule_progress"] = progress
+  return current
+
+
 def _resolve_grid_shape(
   num_samples: int,
   grid_shape: tuple[int, int] | None,
@@ -606,6 +626,8 @@ def non_rough_wheel_lateral_symmetry(
   gate_min: float = 0.10,
   gate_max: float = 0.40,
   roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
 ) -> torch.Tensor:
   """Reward wheel lateral symmetry only when terrain is not rough."""
@@ -616,6 +638,12 @@ def non_rough_wheel_lateral_symmetry(
     gate_min=gate_min,
     gate_max=gate_max,
     grid_shape=grid_shape,
+  )
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
   )
   non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
   return non_rough_active * wheel_lateral_symmetry(env, std, asset_cfg)
@@ -629,6 +657,8 @@ def non_rough_wheel_x_alignment(
   gate_min: float = 0.10,
   gate_max: float = 0.40,
   roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
 ) -> torch.Tensor:
   """Penalize front-back wheel misalignment only when terrain is not rough."""
@@ -639,6 +669,12 @@ def non_rough_wheel_x_alignment(
     gate_min=gate_min,
     gate_max=gate_max,
     grid_shape=grid_shape,
+  )
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
   )
   non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
   return non_rough_active * wheel_x_alignment(env, asset_cfg)
@@ -770,6 +806,8 @@ def standing_forward_wheel_air_time(
   gate_min: float = 0.10,
   gate_max: float = 0.40,
   roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
   max_time: float = 0.5,
   standing_scale: float = 2.5,
@@ -788,6 +826,12 @@ def standing_forward_wheel_air_time(
     gate_min=gate_min,
     gate_max=gate_max,
     grid_shape=grid_shape,
+  )
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
   )
   non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
 
@@ -833,6 +877,8 @@ def rough_wheel_usage(
   gate_min: float = 0.10,
   gate_max: float = 0.40,
   roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
 ) -> torch.Tensor:
   """Penalize wheel speed only when local wheel terrain is rough."""
@@ -846,6 +892,12 @@ def rough_wheel_usage(
   )
   asset: Entity = env.scene[asset_cfg.name]
   wheel_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
+  )
   rough_active = _roughness_gate_active(stats.gate, roughness_gate_threshold)
   return rough_active * torch.sum(torch.square(wheel_vel), dim=1)
 
@@ -860,6 +912,8 @@ def rough_wheel_foot_clearance(
   gate_min: float = 0.10,
   gate_max: float = 0.40,
   roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
   clearance_grid_shape: tuple[int, int] | None = None,
   base_target_height: float = 0.06,
@@ -909,6 +963,12 @@ def rough_wheel_foot_clearance(
   target = torch.clamp(target, max=max_target_height)
   error = wheel_foot_clearance - target
   reward_per_foot = torch.exp(-torch.square(error) / (target_std**2))
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
+  )
   rough_active = _roughness_gate_active(stats.gate, roughness_gate_threshold)
   reward = torch.sum(reward_per_foot * in_air, dim=1) * rough_active * active
 
@@ -934,6 +994,8 @@ def rough_contact_pattern(
   gate_min: float = 0.10,
   gate_max: float = 0.40,
   roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
   command_threshold: float = 0.05,
 ) -> torch.Tensor:
@@ -955,6 +1017,12 @@ def rough_contact_pattern(
   double_contact = contact_count == num_contacts
   no_contact = contact_count == 0
   active = _command_active(env, command_name, command_threshold)
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
+  )
   rough_active = _roughness_gate_active(stats.gate, roughness_gate_threshold)
   reward = -(double_contact.float() + no_contact.float()) * rough_active * active
 

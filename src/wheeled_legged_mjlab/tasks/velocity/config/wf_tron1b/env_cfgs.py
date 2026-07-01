@@ -72,6 +72,9 @@ WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
 WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
 TERRAIN_SCAN_GRID_SHAPE = (11, 11)
+ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.0
+ROUGHNESS_GATE_THRESHOLD_FINAL = 0.6
+ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 8_000 * 24
 
 
 def make_scene(*, rough: bool) -> SceneCfg:
@@ -263,7 +266,7 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
             params={
                 "sensor_name": "terrain_scan",
                 "wheel_radius": WHEEL_RADIUS,
-                "gate_min": 0.10,
+                "gate_min": 0.00,
                 "gate_max": 0.40,
                 "grid_shape": TERRAIN_SCAN_GRID_SHAPE,
             },
@@ -447,12 +450,12 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "track_angular_velocity": RewardTermCfg(
             func=mdp.track_angular_velocity,
-            weight=1.5,
+            weight=1.0,
             params={"command_name": COMMAND_NAME, "std": math.sqrt(0.25)},
         ),
         "base_ang_vel_xy": RewardTermCfg(
             func=mdp.base_ang_vel_xy_l2,
-            weight=-0.25,
+            weight=-0.15,
             params={"asset_cfg": SceneEntityCfg(ROBOT_ENTITY)},
         ),
         "track_heading": RewardTermCfg(
@@ -596,16 +599,20 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         roughness_params = {
             "roughness_sensor_name": "terrain_scan",
             "wheel_radius": WHEEL_RADIUS,
-            "gate_min": 0.10,
+            "gate_min": 0.00,
             "gate_max": 0.40,
-            "roughness_gate_threshold": 0.4,
+            "roughness_gate_threshold": ROUGHNESS_GATE_THRESHOLD_INITIAL,
+            "roughness_gate_threshold_final": ROUGHNESS_GATE_THRESHOLD_FINAL,
+            "roughness_gate_threshold_ramp_steps": (
+                ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS
+            ),
             "grid_shape": TERRAIN_SCAN_GRID_SHAPE,
         }
         rewards.update(
             {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
-                    weight=-4.0e-2,
+                    weight=-1.0e-2,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_joint_cfg,
@@ -629,7 +636,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "rough_contact_pattern": RewardTermCfg(
                     func=mdp.rough_contact_pattern,
-                    weight=0,
+                    weight=0.5,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
@@ -658,7 +665,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "standing_forward_wheel_air_time": RewardTermCfg(
                     func=mdp.standing_forward_wheel_air_time,
-                    weight=-4.0,
+                    weight=-2.0,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
@@ -703,13 +710,7 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
     if rough:
         curriculum["terrain_levels"] = CurriculumTermCfg(
             func=mdp.terrain_levels_vel,
-            params={
-                "command_name": COMMAND_NAME,
-                "move_up_distance_ratio": 0.50,
-                "min_command_path_ratio": 0.25,
-                "move_up_progress_ratio": 0.65,
-                "move_down_progress_ratio": 0.35,
-            },
+            params={"command_name": COMMAND_NAME},
         )
     return curriculum
 
@@ -717,14 +718,6 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
 def make_metrics() -> dict[str, MetricsTermCfg]:
     return {
         "mean_action_acc": MetricsTermCfg(func=mdp.mean_action_acc),
-        "velocity_curriculum_progress": MetricsTermCfg(
-            func=mdp.velocity_curriculum_progress,
-            params={
-                "command_name": COMMAND_NAME,
-                "command_threshold": 0.05,
-                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
-            },
-        ),
     }
 
 
@@ -789,6 +782,13 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
     twist_cmd.ranges.ang_vel_z = (-math.pi / 2, math.pi / 2)
 
     if rough:
+        for reward_term in cfg.rewards.values():
+            if "roughness_gate_threshold_ramp_steps" in reward_term.params:
+                reward_term.params["roughness_gate_threshold"] = (
+                    ROUGHNESS_GATE_THRESHOLD_FINAL
+                )
+                reward_term.params["roughness_gate_threshold_ramp_steps"] = 0
+
         cfg.terminations.pop("out_of_terrain_bounds", None)
         cfg.terminations.pop("velocity_direction_deviation", None)
         cfg.events["randomize_terrain"] = EventTermCfg(
