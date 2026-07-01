@@ -223,3 +223,6 @@ logs/
 
 # MuJoCo
 MUJOCO_LOG.TXT
+
+# Vscode
+.vscode
