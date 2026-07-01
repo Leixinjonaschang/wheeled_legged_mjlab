@@ -140,6 +140,9 @@ class DepthBuffer:
       )
 
 
+depth_buffer = DepthBuffer
+
+
 def _resolve_grid_shape(
   num_samples: int,
   grid_shape: tuple[int, int] | None,
