@@ -201,43 +201,53 @@ def terrain_roughness_indicator(
   env: ManagerBasedRlEnv,
   sensor_name: str,
   wheel_radius: float = 0.127,
-  std_weight: float = 0.3,
-  range_weight: float = 0.3,
-  jump_weight: float = 0.4,
-  gate_min: float = 0.25,
-  gate_max: float = 0.85,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
   grid_shape: tuple[int, int] | None = None,
 ) -> torch.Tensor:
   """Roughness gate from terrain clearance samples."""
   sensor = env.scene[sensor_name]
   height_samples = _terrain_clearance_samples(sensor)
+  if wheel_radius <= 0.0:
+    raise ValueError(f"wheel_radius ({wheel_radius}) must be positive")
   if gate_max <= gate_min:
-    raise ValueError(f"gate_max ({gate_max}) must be greater than gate_min ({gate_min})")
+    raise ValueError(
+      f"gate_max ({gate_max}) must be greater than gate_min ({gate_min})"
+    )
 
   height_samples = torch.nan_to_num(height_samples, nan=0.0, posinf=0.0, neginf=0.0)
-  std = torch.std(height_samples, dim=-1, unbiased=False)
-  height_range = height_samples.max(dim=-1).values - height_samples.min(dim=-1).values
-
   rows, cols = _resolve_grid_shape(height_samples.shape[-1], grid_shape)
   grid = height_samples.view(height_samples.shape[0], height_samples.shape[1], rows, cols)
+  zeros = torch.zeros_like(height_samples[..., 0])
+
   if cols > 1:
     jump_x = torch.abs(grid[..., 1:] - grid[..., :-1]).amax(dim=(-1, -2))
   else:
-    jump_x = torch.zeros_like(std)
+    jump_x = zeros
   if rows > 1:
     jump_y = torch.abs(grid[..., 1:, :] - grid[..., :-1, :]).amax(dim=(-1, -2))
   else:
-    jump_y = torch.zeros_like(std)
+    jump_y = zeros
   jump = torch.maximum(jump_x, jump_y)
 
-  inv_radius = 1.0 / wheel_radius
-  foot_roughness = (
-    std_weight * std * inv_radius
-    + range_weight * height_range * inv_radius
-    + jump_weight * jump * inv_radius
-  )
+  if cols > 2:
+    curvature_x = torch.abs(
+      grid[..., :, 2:] - 2.0 * grid[..., :, 1:-1] + grid[..., :, :-2]
+    ).amax(dim=(-1, -2))
+  else:
+    curvature_x = zeros
+  if rows > 2:
+    curvature_y = torch.abs(
+      grid[..., 2:, :] - 2.0 * grid[..., 1:-1, :] + grid[..., :-2, :]
+    ).amax(dim=(-1, -2))
+  else:
+    curvature_y = zeros
+  curvature = torch.maximum(curvature_x, curvature_y)
+
+  foot_roughness = torch.maximum(jump / wheel_radius, curvature / wheel_radius)
   robot_roughness = foot_roughness.max(dim=1).values
-  gate = torch.clamp((robot_roughness - gate_min) / (gate_max - gate_min), 0.0, 1.0)
+  u = torch.clamp((robot_roughness - gate_min) / (gate_max - gate_min), 0.0, 1.0)
+  gate = u * u * (3.0 - 2.0 * u)
   return gate.unsqueeze(-1)
 
 
