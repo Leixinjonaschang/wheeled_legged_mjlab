@@ -277,10 +277,13 @@ def track_angular_velocity(
 def base_ang_vel_xy_l2(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  roll_weight: float = 1.0,
+  pitch_weight: float = 1.0,
 ) -> torch.Tensor:
-  """Penalize base roll and pitch angular velocity."""
+  """Penalize base roll and pitch angular velocity with independent weights."""
   asset: Entity = env.scene[asset_cfg.name]
-  return torch.sum(torch.square(asset.data.root_link_ang_vel_b[:, :2]), dim=1)
+  ang_vel_xy_sq = torch.square(asset.data.root_link_ang_vel_b[:, :2])
+  return roll_weight * ang_vel_xy_sq[:, 0] + pitch_weight * ang_vel_xy_sq[:, 1]
 
 
 def track_heading(
@@ -810,6 +813,7 @@ def standing_forward_wheel_air_time(
   roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
   max_time: float = 0.5,
+  air_time_offset: float = 0.05,
   standing_scale: float = 2.5,
   forward_scale: float = 1.0,
   lin_threshold: float = 0.05,
@@ -838,7 +842,14 @@ def standing_forward_wheel_air_time(
   contact_sensor: ContactSensor = env.scene[contact_sensor_name]
   current_air_time = contact_sensor.data.current_air_time
   assert current_air_time is not None
-  air_time = torch.sum(torch.clamp(current_air_time, max=max_time), dim=1)
+  found = contact_sensor.data.found
+  assert found is not None
+  in_air = found == 0
+  air_time = torch.sum(
+    (torch.clamp(current_air_time, max=max_time) + air_time_offset)
+    * in_air.float(),
+    dim=1,
+  )
 
   command_term = env.command_manager.get_term(command_name)
   assert command_term is not None, f"Command '{command_name}' not found."

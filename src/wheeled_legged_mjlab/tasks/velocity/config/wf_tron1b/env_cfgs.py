@@ -267,7 +267,7 @@ def make_observations(*, rough: bool) -> dict[str, ObservationGroupCfg]:
                 "sensor_name": "terrain_scan",
                 "wheel_radius": WHEEL_RADIUS,
                 "gate_min": 0.00,
-                "gate_max": 0.40,
+                "gate_max": 0.50,
                 "grid_shape": TERRAIN_SCAN_GRID_SHAPE,
             },
         )
@@ -456,7 +456,11 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         "base_ang_vel_xy": RewardTermCfg(
             func=mdp.base_ang_vel_xy_l2,
             weight=-0.15,
-            params={"asset_cfg": SceneEntityCfg(ROBOT_ENTITY)},
+            params={
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "roll_weight": 1.0,
+                "pitch_weight": 2.0,
+            },
         ),
         "track_heading": RewardTermCfg(
             func=mdp.track_heading,
@@ -524,7 +528,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "stand_still": RewardTermCfg(
             func=mdp.stand_still,
-            weight=-1.0,
+            weight=-2.0,
             params={
                 "command_name": COMMAND_NAME,
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
@@ -586,7 +590,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "wheel_air_time_balance": RewardTermCfg(
             func=mdp.wheel_air_time_balance,
-            weight=-2.0,
+            weight=-4.0,
             params={
                 "sensor_name": "wheels_ground_contact",
                 "min_total_air_time": 1.0,
@@ -600,7 +604,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             "roughness_sensor_name": "terrain_scan",
             "wheel_radius": WHEEL_RADIUS,
             "gate_min": 0.00,
-            "gate_max": 0.40,
+            "gate_max": 0.50,
             "roughness_gate_threshold": ROUGHNESS_GATE_THRESHOLD_INITIAL,
             "roughness_gate_threshold_final": ROUGHNESS_GATE_THRESHOLD_FINAL,
             "roughness_gate_threshold_ramp_steps": (
@@ -636,7 +640,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "rough_contact_pattern": RewardTermCfg(
                     func=mdp.rough_contact_pattern,
-                    weight=0.5,
+                    weight=0.1,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
@@ -665,14 +669,15 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "standing_forward_wheel_air_time": RewardTermCfg(
                     func=mdp.standing_forward_wheel_air_time,
-                    weight=-2.0,
+                    weight=-4.0,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
                         "command_name": COMMAND_NAME,
                         "max_time": 0.5,
+                        "air_time_offset": 0.05,
                         "standing_scale": 2.5,
-                        "forward_scale": 1.0,
+                        "forward_scale": 2.0,
                     },
                 ),
             }
