@@ -111,8 +111,8 @@ class velocity_direction_deviation:
     self._last_command_counter = command_counter.clone()
 
     asset: Entity = env.scene[asset_cfg.name]
-    command_xy = command_term.command[:, :2]
-    actual_xy = asset.data.root_link_lin_vel_b[:, :2]
+    command_xy = command_term.command_w[:, :2]
+    actual_xy = asset.data.root_link_lin_vel_w[:, :2]
 
     command_norm = torch.norm(command_xy, dim=1)
     actual_speed = torch.norm(actual_xy, dim=1)

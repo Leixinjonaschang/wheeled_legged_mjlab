@@ -66,8 +66,8 @@ NON_WHEEL_COLLISION_GEOMS = (
     "knee_R_collision",
 )
 
-BASE_HEIGHT_TARGET = 0.80
-WHEEL_DISTANCE_RANGE = (0.25, 0.50)
+BASE_HEIGHT_TARGET = 0.82
+WHEEL_DISTANCE_RANGE = (0.25, 0.55)
 WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
@@ -79,6 +79,9 @@ DEPTH_CAMERA_WIDTH = 24
 DEPTH_CAMERA_HEIGHT = 32
 DEPTH_BUFFER_SIZE = 5
 DEPTH_BUFFER_UPDATE_PERIOD = 5
+ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.0
+ROUGHNESS_GATE_THRESHOLD_FINAL = 0.6
+ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 8_000 * 24
 
 
 def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
@@ -275,11 +278,8 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
             params={
                 "sensor_name": "terrain_scan",
                 "wheel_radius": WHEEL_RADIUS,
-                "std_weight": 0.3,
-                "range_weight": 0.3,
-                "jump_weight": 0.4,
-                "gate_min": 0.0,
-                "gate_max": 0.2,
+                "gate_min": 0.00,
+                "gate_max": 0.50,
                 "grid_shape": TERRAIN_SCAN_GRID_SHAPE,
             },
         )
@@ -340,21 +340,21 @@ def make_actions() -> dict[str, ActionTermCfg]:
 
 
 def make_commands() -> dict[str, CommandTermCfg]:
-    """Sample body-frame velocity commands with standing and heading modes."""
+    """Sample world-frame velocity commands with standing and heading modes."""
     return {
         COMMAND_NAME: UniformVelocityCommandCfg(
             entity_name=ROBOT_ENTITY,
             resampling_time_range=(3.0, 8.0),
             rel_standing_envs=0.1,
-            rel_heading_envs=0.3,
+            rel_heading_envs=1.0,
             rel_forward_envs=0.2,
             heading_command=True,
-            heading_control_stiffness=0.5,
+            heading_control_stiffness=1.0,
             debug_vis=True,
             ranges=UniformVelocityCommandCfg.Ranges(
                 lin_vel_x=(-1.0, 1.0),
-                lin_vel_y=(-0.6, 0.6),
-                ang_vel_z=(-0.5, 0.5),
+                lin_vel_y=(-1.0, 1.0),
+                ang_vel_z=(-math.pi / 2, math.pi / 2),
                 heading=(-math.pi, math.pi),
             ),
         )
@@ -485,8 +485,31 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "track_angular_velocity": RewardTermCfg(
             func=mdp.track_angular_velocity,
-            weight=2.0,
+            weight=1.0,
             params={"command_name": COMMAND_NAME, "std": math.sqrt(0.25)},
+        ),
+        "base_ang_vel_xy": RewardTermCfg(
+            func=mdp.base_ang_vel_xy_l2,
+            weight=-0.15,
+            params={
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "roll_weight": 1.0,
+                "pitch_weight": 2.0,
+            },
+        ),
+        "track_heading": RewardTermCfg(
+            func=mdp.track_heading,
+            weight=0.5,
+            params={
+                "command_name": COMMAND_NAME,
+                "std": math.sqrt(0.15),
+                "command_norm_threshold": 0.05,
+            },
+        ),
+        "heading_progress": RewardTermCfg(
+            func=mdp.heading_progress,
+            weight=0.0,
+            params={"command_name": COMMAND_NAME, "max_progress": 0.05},
         ),
         "upright": RewardTermCfg(
             func=mdp.upright,
@@ -504,9 +527,10 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "base_height": RewardTermCfg(
             func=mdp.base_height_l2,
-            weight=-5.0,
+            weight=-50.0,
             params={
                 "target_height": BASE_HEIGHT_TARGET,
+                "deadband": 0.04,
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
                 "sensor_name": "terrain_scan" if rough else None,
                 "terrain_sample": "center",
@@ -539,7 +563,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "stand_still": RewardTermCfg(
             func=mdp.stand_still,
-            weight=-0.5,
+            weight=-2.0,
             params={
                 "command_name": COMMAND_NAME,
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
@@ -604,8 +628,8 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-1.0,
             params={
                 "sensor_name": "wheels_ground_contact",
-                "tolerance": 0.12,
-                "max_time": 1.0,
+                "min_total_air_time": 1.0,
+                "balance_tolerance": 0.2,
             },
         ),
     }
@@ -614,19 +638,20 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         roughness_params = {
             "roughness_sensor_name": "terrain_scan",
             "wheel_radius": WHEEL_RADIUS,
-            "std_weight": 0.3,
-            "range_weight": 0.3,
-            "jump_weight": 0.4,
-            "gate_min": 0.0,
-            "gate_max": 0.2,
-            "roughness_gate_threshold": 0.0,
+            "gate_min": 0.00,
+            "gate_max": 0.50,
+            "roughness_gate_threshold": ROUGHNESS_GATE_THRESHOLD_INITIAL,
+            "roughness_gate_threshold_final": ROUGHNESS_GATE_THRESHOLD_FINAL,
+            "roughness_gate_threshold_ramp_steps": (
+                ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS
+            ),
             "grid_shape": TERRAIN_SCAN_GRID_SHAPE,
         }
         rewards.update(
             {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
-                    weight=-7.0e-2,
+                    weight=-1.0e-2,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_joint_cfg,
@@ -634,7 +659,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "rough_wheel_foot_clearance": RewardTermCfg(
                     func=mdp.rough_wheel_foot_clearance,
-                    weight=2,
+                    weight=2.0,
                     params={
                         **roughness_params,
                         "clearance_sensor_name": "wheel_height_scan",
@@ -650,7 +675,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "rough_contact_pattern": RewardTermCfg(
                     func=mdp.rough_contact_pattern,
-                    weight=0,
+                    weight=0.25,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
@@ -675,6 +700,19 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_body_cfg,
+                    },
+                ),
+                "standing_forward_wheel_air_time": RewardTermCfg(
+                    func=mdp.standing_forward_wheel_air_time,
+                    weight=-4.0,
+                    params={
+                        **roughness_params,
+                        "contact_sensor_name": "wheels_ground_contact",
+                        "command_name": COMMAND_NAME,
+                        "max_time": 0.5,
+                        "air_time_offset": 0.05,
+                        "standing_scale": 2.5,
+                        "forward_scale": 2.0,
                     },
                 ),
             }
@@ -702,19 +740,6 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
             func=mdp.out_of_terrain_bounds,
             params={"margin": 1.5},
             time_out=True,
-        )
-        terminations["velocity_direction_deviation"] = TerminationTermCfg(
-            func=mdp.velocity_direction_deviation,
-            params={
-                "command_name": COMMAND_NAME,
-                "activation_step": 5_000 * 24,
-                "command_norm_threshold": 0.2,
-                "actual_speed_threshold": 0.15,
-                "angle_threshold_deg": 35.0,
-                "duration_s": 0.15,
-                "command_grace_s": 0.5,
-                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
-            },
         )
     return terminations
 
@@ -794,10 +819,17 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
     twist_cmd = cfg.commands[COMMAND_NAME]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
     twist_cmd.ranges.lin_vel_x = (-1.0, 1.0)
-    twist_cmd.ranges.lin_vel_y = (-0.6, 0.6)
-    twist_cmd.ranges.ang_vel_z = (-0.5, 0.5)
+    twist_cmd.ranges.lin_vel_y = (-1.0, 1.0)
+    twist_cmd.ranges.ang_vel_z = (-math.pi / 2, math.pi / 2)
 
     if rough:
+        for reward_term in cfg.rewards.values():
+            if "roughness_gate_threshold_ramp_steps" in reward_term.params:
+                reward_term.params["roughness_gate_threshold"] = (
+                    ROUGHNESS_GATE_THRESHOLD_FINAL
+                )
+                reward_term.params["roughness_gate_threshold_ramp_steps"] = 0
+
         cfg.terminations.pop("out_of_terrain_bounds", None)
         cfg.terminations.pop("velocity_direction_deviation", None)
         cfg.events["randomize_terrain"] = EventTermCfg(
