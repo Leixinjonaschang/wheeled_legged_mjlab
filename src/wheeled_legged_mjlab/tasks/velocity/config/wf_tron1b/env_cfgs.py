@@ -603,7 +603,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-5.0e-5,
             params={"asset_cfg": all_joint_cfg},
         ),
-        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
+        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.6),
         "self_collisions": RewardTermCfg(
             func=mdp.self_collision_cost,
             weight=-0.1,
