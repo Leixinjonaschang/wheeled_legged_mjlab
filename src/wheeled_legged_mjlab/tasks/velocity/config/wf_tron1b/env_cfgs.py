@@ -227,11 +227,22 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
             params={
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
-                    joint_names=ALL_JOINT_NAMES,
+                    joint_names=LEG_JOINT_NAMES,
                 )
             },
             noise=Unoise(n_min=-1.5, n_max=1.5),
             scale=0.05,
+        ),
+        "wheel_vel": ObservationTermCfg(
+            func=mdp.joint_vel_rel,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    joint_names=WHEEL_JOINT_NAMES,
+                )
+            },
+            noise=Unoise(n_min=-0.5, n_max=0.5),
+            scale=0.5,
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
         "command": ObservationTermCfg(
@@ -242,7 +253,47 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
 
     critic_terms = {
         "base_lin_vel": ObservationTermCfg(func=mdp.base_lin_vel),
-        **actor_terms,
+        "base_ang_vel": ObservationTermCfg(
+            func=mdp.builtin_sensor,
+            params={"sensor_name": "robot/gyro"},
+        ),
+        "projected_gravity": ObservationTermCfg(
+            func=mdp.projected_gravity,
+        ),
+        "joint_pos": ObservationTermCfg(
+            func=mdp.joint_pos_rel,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    joint_names=LEG_JOINT_NAMES,
+                )
+            },
+        ),
+        "joint_vel": ObservationTermCfg(
+            func=mdp.joint_vel_rel,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    joint_names=LEG_JOINT_NAMES,
+                )
+            },
+            scale=0.05,
+        ),
+        "wheel_vel": ObservationTermCfg(
+            func=mdp.joint_vel_rel,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    joint_names=WHEEL_JOINT_NAMES,
+                )
+            },
+            scale=0.5,
+        ),
+        "actions": ObservationTermCfg(func=mdp.last_action),
+        "command": ObservationTermCfg(
+            func=mdp.generated_commands,
+            params={"command_name": COMMAND_NAME},
+        ),
         "wheel_contact": ObservationTermCfg(
             func=mdp.foot_contact,
             params={"sensor_name": "wheels_ground_contact"},
