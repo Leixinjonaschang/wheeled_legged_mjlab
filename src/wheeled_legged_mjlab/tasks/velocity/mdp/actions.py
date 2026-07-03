@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -23,7 +24,7 @@ class DelayedJointPositionActionCfg(JointPositionActionCfg):
     """Joint position action with per-env physics-frame actuator delay."""
 
     delay_range_s: tuple[float, float] = (0.0, 0.02)
-    """Range of action delays sampled per environment, in seconds."""
+    """Inclusive range of representable physics-step action delays, in seconds."""
 
     resampling_time_s: float = 5.0
     """Time between periodic per-environment delay resampling, in seconds."""
@@ -40,7 +41,7 @@ class DelayedJointVelocityActionCfg(JointVelocityActionCfg):
     """Joint velocity action with per-env physics-frame actuator delay."""
 
     delay_range_s: tuple[float, float] = (0.0, 0.02)
-    """Range of action delays sampled per environment, in seconds."""
+    """Inclusive range of representable physics-step action delays, in seconds."""
 
     resampling_time_s: float = 5.0
     """Time between periodic per-environment delay resampling, in seconds."""
@@ -87,8 +88,8 @@ class _DelayGroupState:
         self.step_dt = float(step_dt)
         self.num_envs = int(num_envs)
         self.device = device
-        self.max_delay_steps = int(
-            torch.ceil(torch.tensor(delay_max_s / physics_dt)).item()
+        self.min_delay_steps, self.max_delay_steps = _delay_step_bounds(
+            self.delay_range_s, self.physics_dt
         )
         self.resampling_steps = max(1, round(resampling_time_s / step_dt))
         self.delay_steps = torch.zeros(num_envs, dtype=torch.long, device=device)
@@ -148,13 +149,12 @@ class _DelayGroupState:
         if env_ids_tensor.numel() == 0:
             return
 
-        delay_min_steps = self.delay_range_s[0] / self.physics_dt
-        delay_max_steps = self.delay_range_s[1] / self.physics_dt
-        sampled_steps = torch.empty(
-            env_ids_tensor.numel(), device=self.device
-        ).uniform_(delay_min_steps, delay_max_steps)
-        sampled_steps = torch.round(sampled_steps).to(torch.long)
-        sampled_steps = torch.clamp(sampled_steps, min=0, max=self.max_delay_steps)
+        sampled_steps = torch.randint(
+            self.min_delay_steps,
+            self.max_delay_steps + 1,
+            (env_ids_tensor.numel(),),
+            device=self.device,
+        )
         self.delay_steps[env_ids_tensor] = sampled_steps
         self._next_resample_step[env_ids_tensor] = (
             current_policy_step + self.resampling_steps
@@ -166,7 +166,7 @@ class _DelayedActionMixin:
 
     def __init__(self, cfg, env: ManagerBasedRlEnv):
         super().__init__(cfg=cfg, env=env)
-        self._delay_state = _get_delay_group_state(
+        self._delay_state, self._owns_delay_state = _get_delay_group_state(
             env,
             delay_group=cfg.delay_group,
             delay_range_s=cfg.delay_range_s,
@@ -200,7 +200,10 @@ class _DelayedActionMixin:
         super().reset(env_ids)
         self._reset_processed_actions(env_ids)
         self._reset_delay_buffer(env_ids)
-        self._delay_state.reset(env_ids, current_policy_step=_policy_step(self._env))
+        if self._owns_delay_state:
+            self._delay_state.reset(
+                env_ids, current_policy_step=_policy_step(self._env)
+            )
 
     def _delayed_actions_for_substep(self) -> torch.Tensor:
         self._processed_action_fifo = torch.roll(
@@ -269,7 +272,7 @@ def _get_delay_group_state(
     step_dt: float,
     num_envs: int,
     device: str,
-) -> _DelayGroupState:
+) -> tuple[_DelayGroupState, bool]:
     groups = getattr(env, "_wheeled_legged_action_delay_groups", None)
     if groups is None:
         groups = {}
@@ -284,6 +287,7 @@ def _get_delay_group_state(
             num_envs=num_envs,
             device=device,
         )
+        is_owner = True
     else:
         groups[delay_group].validate(
             delay_range_s=delay_range_s,
@@ -293,7 +297,23 @@ def _get_delay_group_state(
             num_envs=num_envs,
             device=device,
         )
-    return groups[delay_group]
+        is_owner = False
+    return groups[delay_group], is_owner
+
+
+def _delay_step_bounds(
+    delay_range_s: tuple[float, float], physics_dt: float
+) -> tuple[int, int]:
+    delay_min_s, delay_max_s = delay_range_s
+    tolerance = max(abs(physics_dt) * 1.0e-9, 1.0e-12)
+    min_steps = max(0, math.ceil((delay_min_s - tolerance) / physics_dt))
+    max_steps = math.floor((delay_max_s + tolerance) / physics_dt)
+    if min_steps > max_steps:
+        raise ValueError(
+            "delay_range_s must include at least one representable physics-step "
+            f"delay, got delay_range_s={delay_range_s} and physics_dt={physics_dt}."
+        )
+    return min_steps, max_steps
 
 
 def _policy_step(env: ManagerBasedRlEnv) -> int:

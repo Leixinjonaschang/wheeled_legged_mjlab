@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from mjlab.envs.mdp.actions import JointPositionActionCfg, JointVelocityActionCfg
@@ -13,6 +14,7 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
 from wheeled_legged_mjlab.tasks.velocity.mdp.actions import (
     DelayedJointPositionActionCfg,
     DelayedJointVelocityActionCfg,
+    _delay_step_bounds,
 )
 
 
@@ -170,3 +172,104 @@ def test_delay_group_state_is_shared_across_action_terms() -> None:
     ).build(env)
 
     assert leg_term.delay_steps.data_ptr() == wheel_term.delay_steps.data_ptr()
+
+
+def test_shared_delay_group_reset_resamples_once() -> None:
+    env = DummyEnv(num_envs=3)
+    leg_term = DelayedJointPositionActionCfg(
+        entity_name="robot",
+        actuator_names=("joint_0",),
+        scale=1.0,
+        use_default_offset=True,
+        delay_range_s=(0.0, 0.02),
+        delay_group="shared",
+    ).build(env)
+    wheel_term = DelayedJointVelocityActionCfg(
+        entity_name="robot",
+        actuator_names=("joint_1",),
+        scale=1.0,
+        use_default_offset=False,
+        delay_range_s=(0.0, 0.02),
+        delay_group="shared",
+    ).build(env)
+    state = leg_term._delay_state
+    original_resample = state.resample
+    resample_calls = 0
+
+    def count_resample(env_ids, *, current_policy_step: int) -> None:
+        nonlocal resample_calls
+        resample_calls += 1
+        original_resample(env_ids, current_policy_step=current_policy_step)
+
+    state.resample = count_resample
+
+    reset_env_ids = torch.tensor([0, 2])
+    leg_term.reset(reset_env_ids)
+    wheel_term.reset(reset_env_ids)
+
+    assert resample_calls == 1
+
+
+def test_delay_step_bounds_use_representable_physics_steps() -> None:
+    assert _delay_step_bounds((0.0, 0.02), 0.005) == (0, 4)
+    assert _delay_step_bounds((0.007, 0.018), 0.005) == (2, 3)
+    assert _delay_step_bounds((0.01, 0.01), 0.005) == (2, 2)
+
+    with pytest.raises(ValueError, match="representable physics-step"):
+        _delay_step_bounds((0.006, 0.009), 0.005)
+
+
+def test_delay_resampling_samples_only_representable_steps_in_range() -> None:
+    env = DummyEnv(num_envs=128, physics_dt=0.005)
+    term = DelayedJointVelocityActionCfg(
+        entity_name="robot",
+        actuator_names=("joint_0",),
+        scale=1.0,
+        use_default_offset=False,
+        delay_range_s=(0.007, 0.018),
+        delay_group="test",
+    ).build(env)
+
+    term._delay_state.resample(slice(None), current_policy_step=0)
+
+    assert torch.all((term.delay_steps == 2) | (term.delay_steps == 3))
+
+
+def test_fixed_delay_resampling_keeps_single_step_value() -> None:
+    env = DummyEnv(num_envs=16, physics_dt=0.005)
+    term = DelayedJointVelocityActionCfg(
+        entity_name="robot",
+        actuator_names=("joint_0",),
+        scale=1.0,
+        use_default_offset=False,
+        delay_range_s=(0.01, 0.01),
+        delay_group="test",
+    ).build(env)
+
+    term._delay_state.resample(slice(None), current_policy_step=0)
+
+    assert torch.all(term.delay_steps == 2)
+
+
+def test_partial_reset_does_not_change_unreset_env_delay_or_fifo() -> None:
+    env = DummyEnv(num_envs=3, physics_dt=0.005)
+    term = DelayedJointVelocityActionCfg(
+        entity_name="robot",
+        actuator_names=("joint_0",),
+        scale=1.0,
+        use_default_offset=False,
+        delay_range_s=(0.0, 0.02),
+        delay_group="test",
+    ).build(env)
+    term._delay_state.delay_steps[:] = torch.tensor([0, 1, 2])
+    term.process_actions(torch.tensor([[1.0], [2.0], [3.0]]))
+    for _ in range(2):
+        term.apply_actions()
+
+    unreset_fifo = term._processed_action_fifo[1].clone()
+    unreset_delay = term.delay_steps[1].clone()
+
+    term.reset(torch.tensor([0, 2]))
+
+    assert torch.equal(term._processed_action_fifo[1], unreset_fifo)
+    assert torch.equal(term.delay_steps[1], unreset_delay)
