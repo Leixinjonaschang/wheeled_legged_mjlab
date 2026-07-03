@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import math
 from pathlib import Path
 from types import SimpleNamespace
 import subprocess
@@ -129,6 +130,32 @@ def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:
     assert torch.all(obs[0, 4] == 2.0)
     assert torch.all(obs[1] == 4.0)
     assert depth_calls == 3
+
+
+def test_foot_contact_forces_are_rotated_to_body_frame() -> None:
+    yaw_90_quat_w = torch.tensor(
+        [[math.cos(math.pi / 4.0), 0.0, 0.0, math.sin(math.pi / 4.0)]]
+    )
+    contact_sensor = SimpleNamespace(
+        data=SimpleNamespace(
+            force=torch.tensor([[[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]]])
+        )
+    )
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_quat_w=yaw_90_quat_w,
+        )
+    )
+    env = SimpleNamespace(
+        scene={"wheels_ground_contact": contact_sensor, "robot": robot}
+    )
+
+    obs = observation_mdp.foot_contact_forces(env, "wheels_ground_contact")
+
+    expected = torch.tensor(
+        [[0.0, -math.log1p(1.0), 0.0, math.log1p(2.0), 0.0, 0.0]]
+    )
+    assert torch.allclose(obs, expected, atol=1.0e-6)
 
 
 def _make_dummy_metadata_env():
