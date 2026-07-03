@@ -243,16 +243,6 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
     critic_terms = {
         "base_lin_vel": ObservationTermCfg(func=mdp.base_lin_vel),
         **actor_terms,
-        "wheel_vel": ObservationTermCfg(
-            func=mdp.joint_vel_rel,
-            params={
-                "asset_cfg": SceneEntityCfg(
-                    ROBOT_ENTITY,
-                    joint_names=WHEEL_JOINT_NAMES,
-                )
-            },
-            scale=0.05,
-        ),
         "wheel_contact": ObservationTermCfg(
             func=mdp.foot_contact,
             params={"sensor_name": "wheels_ground_contact"},
