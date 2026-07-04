@@ -53,6 +53,7 @@ cover/
 tests/
 !tests/
 tests/*
+!tests/test_action_delay.py
 !tests/test_representation_teacher_student_config.py
 !rsl_rl/tests/
 rsl_rl/tests/*
@@ -249,3 +250,8 @@ MUJOCO_LOG.TXT
 
 # codex
 .codex
+
+# tests
+tests/
+!tests/
+!tests/test_action_delay.py
