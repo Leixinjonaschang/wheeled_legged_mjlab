@@ -666,7 +666,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "wheel_air_time_balance": RewardTermCfg(
             func=mdp.wheel_air_time_balance,
-            weight=-1.0,
+            weight=-4.0,
             params={
                 "sensor_name": "wheels_ground_contact",
                 "min_total_air_time": 1.0,
