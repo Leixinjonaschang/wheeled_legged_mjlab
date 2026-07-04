@@ -65,7 +65,7 @@ def depth_image(env: ManagerBasedRlEnv, sensor_name: str = "depth_camera") -> to
   return camera.data.depth.squeeze(-1)
 
 
-class DepthBuffer:
+class depth_buffer:
   """Depth image buffer updated at a lower policy-step rate."""
 
   def __init__(self, cfg, env: ManagerBasedRlEnv) -> None:
