@@ -8,9 +8,12 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor, RayCastSensor
 from mjlab.sensor.camera_sensor import CameraSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
+from mjlab.utils.lab_api.math import quat_apply_inverse
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
+
+_DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
 def foot_height(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
@@ -49,12 +52,22 @@ def foot_contact(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
   return (sensor_data.found > 0).float()
 
 
-def foot_contact_forces(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+def foot_contact_forces(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Contact forces expressed in the robot body frame."""
   sensor: ContactSensor = env.scene[sensor_name]
   sensor_data = sensor.data
   assert sensor_data.force is not None
-  forces_flat = sensor_data.force.flatten(start_dim=1)  # [B, N*3]
-  forces_flat = torch.nan_to_num(forces_flat, nan=0.0, posinf=0.0, neginf=0.0)
+  forces_w = torch.nan_to_num(sensor_data.force, nan=0.0, posinf=0.0, neginf=0.0)
+  asset = env.scene[asset_cfg.name]
+  root_quat_w = asset.data.root_link_quat_w[:, None, :].expand(
+    -1, forces_w.shape[1], -1
+  )
+  forces_b = quat_apply_inverse(root_quat_w, forces_w)
+  forces_flat = forces_b.flatten(start_dim=1)  # [B, N*3]
   return torch.sign(forces_flat) * torch.log1p(torch.abs(forces_flat))
 
 
@@ -138,6 +151,9 @@ class depth_buffer:
       self._invalid_env_ids = torch.unique(
         torch.cat((self._invalid_env_ids, env_ids))
       )
+
+
+depth_buffer = DepthBuffer
 
 
 def _resolve_grid_shape(

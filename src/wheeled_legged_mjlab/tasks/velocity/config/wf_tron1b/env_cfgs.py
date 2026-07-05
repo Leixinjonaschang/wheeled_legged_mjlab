@@ -38,6 +38,10 @@ from mjlab.viewer import ViewerConfig
 
 from wheeled_legged_mjlab.assets.WF_TRON1B.wf_tron1b import WF_TRON1B_ROBOT_CFG
 from wheeled_legged_mjlab.tasks.velocity import mdp
+from wheeled_legged_mjlab.tasks.velocity.mdp.actions import (
+    DelayedJointPositionActionCfg,
+    DelayedJointVelocityActionCfg,
+)
 from wheeled_legged_mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 
 from .terrain_cfg import PLANE_ENTITY_CFG, TERRAINS_ENTITY_CFG
@@ -218,6 +222,7 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
                     joint_names=LEG_JOINT_NAMES,
+                    joint_names=LEG_JOINT_NAMES,
                 )
             },
             noise=Unoise(n_min=-0.01, n_max=0.01),
@@ -228,10 +233,22 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
                     joint_names=LEG_JOINT_NAMES,
+                    joint_names=LEG_JOINT_NAMES,
                 )
             },
             noise=Unoise(n_min=-1.5, n_max=1.5),
             scale=0.05,
+        ),
+        "wheel_vel": ObservationTermCfg(
+            func=mdp.joint_vel_rel,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    joint_names=WHEEL_JOINT_NAMES,
+                )
+            },
+            noise=Unoise(n_min=-0.5, n_max=0.5),
+            scale=0.5,
         ),
         "wheel_vel": ObservationTermCfg(
             func=mdp.joint_vel_rel,
@@ -279,6 +296,32 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
             },
             scale=0.05,
         ),
+        "base_ang_vel": ObservationTermCfg(
+            func=mdp.builtin_sensor,
+            params={"sensor_name": "robot/gyro"},
+        ),
+        "projected_gravity": ObservationTermCfg(
+            func=mdp.projected_gravity,
+        ),
+        "joint_pos": ObservationTermCfg(
+            func=mdp.joint_pos_rel,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    joint_names=LEG_JOINT_NAMES,
+                )
+            },
+        ),
+        "joint_vel": ObservationTermCfg(
+            func=mdp.joint_vel_rel,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    joint_names=LEG_JOINT_NAMES,
+                )
+            },
+            scale=0.05,
+        ),
         "wheel_vel": ObservationTermCfg(
             func=mdp.joint_vel_rel,
             params={
@@ -287,6 +330,12 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
                     joint_names=WHEEL_JOINT_NAMES,
                 )
             },
+            scale=0.5,
+        ),
+        "actions": ObservationTermCfg(func=mdp.last_action),
+        "command": ObservationTermCfg(
+            func=mdp.generated_commands,
+            params={"command_name": COMMAND_NAME},
             scale=0.5,
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
@@ -362,20 +411,42 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
     return observations
 
 
-def make_actions() -> dict[str, ActionTermCfg]:
+def make_actions(
+    *,
+    action_delay: bool = True,
+    delay_range_s: tuple[float, float] = (0.0, 0.02),
+    resampling_time_s: float = 5.0,
+) -> dict[str, ActionTermCfg]:
     """Mixed control: leg positions and wheel velocities."""
+    leg_action_cfg = (
+        DelayedJointPositionActionCfg if action_delay else JointPositionActionCfg
+    )
+    wheel_action_cfg = (
+        DelayedJointVelocityActionCfg if action_delay else JointVelocityActionCfg
+    )
+    delay_kwargs = (
+        {
+            "delay_range_s": delay_range_s,
+            "resampling_time_s": resampling_time_s,
+            "delay_group": "base_actions",
+        }
+        if action_delay
+        else {}
+    )
     return {
-        "leg_pos": JointPositionActionCfg(
+        "leg_pos": leg_action_cfg(
             entity_name=ROBOT_ENTITY,
             actuator_names=LEG_JOINT_NAMES,
             scale=0.5,
             use_default_offset=True,
+            **delay_kwargs,
         ),
-        "wheel_vel": JointVelocityActionCfg(
+        "wheel_vel": wheel_action_cfg(
             entity_name=ROBOT_ENTITY,
             actuator_names=WHEEL_JOINT_NAMES,
             scale=10.0,
             use_default_offset=False,
+            **delay_kwargs,
         ),
     }
 
@@ -667,6 +738,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         "wheel_air_time_balance": RewardTermCfg(
             func=mdp.wheel_air_time_balance,
             weight=-4.0,
+            weight=-4.0,
             params={
                 "sensor_name": "wheels_ground_contact",
                 "min_total_air_time": 1.0,
@@ -831,7 +903,7 @@ def make_env_cfg(*, rough: bool, play: bool = False, depth: bool = False) -> Man
     cfg = ManagerBasedRlEnvCfg(
         scene=make_scene(rough=rough, depth=depth),
         observations=make_observations(rough=rough, depth=depth),
-        actions=make_actions(),
+        actions=make_actions(action_delay=not play),
         commands=make_commands(),
         events=make_events(),
         rewards=make_rewards(rough=rough),
