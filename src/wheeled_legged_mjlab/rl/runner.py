@@ -60,14 +60,14 @@ def get_wheeled_legged_metadata(
         "action_scale": action_scales,
     }
     if isinstance(policy, RepresentationActorCritic):
-        actor_history_cfg = env.cfg.observations["actor_history"]
+        student_history_cfg = env.cfg.observations["actor_history"]
         metadata.update(
             {
-                "policy_input_names": ["actor_obs", "proprio_obs"],
-                "actor_observation_names": env.observation_manager.active_terms["actor"],
-                "proprio_observation_names": env.observation_manager.active_terms["actor_history"],
-                "proprio_history_length": str(actor_history_cfg.history_length),
-                "proprio_flatten_history_dim": str(actor_history_cfg.flatten_history_dim).lower(),
+                "policy_input_names": ["student_history"],
+                "student_observation_names": env.observation_manager.active_terms["actor_history"],
+                "student_history_length": str(student_history_cfg.history_length),
+                "student_history_flatten_dim": str(student_history_cfg.flatten_history_dim).lower(),
+                "student_history_order": "oldest_to_newest",
             }
         )
     return metadata

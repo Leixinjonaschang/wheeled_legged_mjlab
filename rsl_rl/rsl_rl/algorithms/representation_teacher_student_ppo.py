@@ -257,7 +257,7 @@ class RepresentationTeacherStudentPPO:
         alg_class: type[RepresentationTeacherStudentPPO] = resolve_callable(cfg["algorithm"].pop("class_name"))  # type: ignore
         model_class: type[RepresentationActorCritic] = resolve_callable(cfg["actor"].pop("class_name"))  # type: ignore
 
-        default_sets = ["actor", "critic", "proprio_encoder", "privileged_encoder"]
+        default_sets = ["teacher_actor", "critic", "student_history", "privileged_encoder"]
         cfg["obs_groups"] = resolve_obs_groups(obs, cfg["obs_groups"], default_sets)
         if cfg["algorithm"].get("rnd_cfg") is not None:
             raise ValueError("RND is not supported by RepresentationTeacherStudentPPO.")

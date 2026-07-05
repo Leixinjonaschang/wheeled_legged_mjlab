@@ -26,8 +26,8 @@ NUM_ACTIONS = 2
 def make_rep_obs() -> TensorDict:
     return TensorDict(
         {
-            "actor": torch.randn(NUM_ENVS, ACTOR_DIM),
-            "actor_history": torch.randn(NUM_ENVS, HISTORY_LENGTH * ACTOR_DIM),
+            "teacher_actor": torch.randn(NUM_ENVS, ACTOR_DIM),
+            "student_history": torch.randn(NUM_ENVS, HISTORY_LENGTH, ACTOR_DIM),
             "critic": torch.randn(NUM_ENVS, CRITIC_DIM),
         },
         batch_size=[NUM_ENVS],
@@ -38,9 +38,9 @@ def make_model(obs: TensorDict) -> RepresentationActorCritic:
     return RepresentationActorCritic(
         obs,
         {
-            "actor": ["actor"],
+            "teacher_actor": ["teacher_actor"],
             "critic": ["critic"],
-            "proprio_encoder": ["actor_history"],
+            "student_history": ["student_history"],
             "privileged_encoder": ["critic"],
         },
         NUM_ACTIONS,

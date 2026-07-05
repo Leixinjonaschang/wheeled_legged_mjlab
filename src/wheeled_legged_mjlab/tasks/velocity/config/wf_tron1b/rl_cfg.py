@@ -106,9 +106,9 @@ def wf_tron1b_rep_ts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             num_proprio_encoder_substeps=1,
         ),
         obs_groups={
-            "actor": ("actor",),
+            "teacher_actor": ("actor",),
             "critic": ("critic",),
-            "proprio_encoder": ("actor_history",),
+            "student_history": ("actor_history",),
             "privileged_encoder": ("critic",),
         },
         experiment_name="wf_tron1b_velocity_rep_ts",
