@@ -356,6 +356,12 @@ def make_observations(
             },
         )
 
+    dynamics_context_terms = {
+        "domain_randomization_delta_quantity": ObservationTermCfg(
+            func=mdp.domain_randomization_delta_quantity,
+        ),
+    }
+
     if lin_vel_representation:
         privileged_encoder_terms = deepcopy(critic_terms)
         privileged_encoder_terms.pop("base_lin_vel", None)
@@ -409,6 +415,13 @@ def make_observations(
                 enable_corruption=False,
             ),
         }
+    
+    observations["dynamics_context"] = ObservationGroupCfg(
+        terms=dynamics_context_terms,
+        concatenate_terms=True,
+        enable_corruption=False,
+    )
+
     if depth and async_depth:
         observations[DEPTH_CAMERA_NAME] = ObservationGroupCfg(
             terms={

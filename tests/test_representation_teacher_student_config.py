@@ -37,7 +37,6 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     wf_tron1b_rough_depth_env_cfg,
     wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg,
     wf_tron1b_rough_rep_ts_lin_vel_env_cfg,
-    wf_tron1b_rough_env_cfg,
 )
 from wheeled_legged_mjlab.tasks.velocity.mdp import observations as observation_mdp
 
@@ -65,9 +64,10 @@ def test_representation_teacher_student_tasks_are_registered() -> None:
         "teacher_actor": ("actor",),
         "critic": ("critic",),
         "student_history": ("actor_history",),
-        "privileged_encoder": ("critic",),
+        "privileged_encoder": ("critic", "dynamics_context"),
     }
     assert "actor_history" in flat_env.observations
+    assert "dynamics_context" in flat_env.observations
 
 
 def test_representation_velocity_tasks_are_registered() -> None:
@@ -90,10 +90,11 @@ def test_representation_velocity_tasks_are_registered() -> None:
         "actor_command": ("actor_command",),
         "lin_vel_target": ("lin_vel_target",),
         "critic": ("critic",),
-        "privileged_encoder": ("privileged_encoder",),
+        "privileged_encoder": ("privileged_encoder", "dynamics_context"),
     }
     assert "proprio_history" in flat_env.observations
     assert "actor_history" not in flat_env.observations
+    assert "dynamics_context" in flat_env.observations
     assert "latent_dynamics_command_generation" not in flat_env.observations
 
 
@@ -105,6 +106,7 @@ def test_actor_history_and_rough_privileged_observations() -> None:
     assert cfg.observations["actor_history"].enable_corruption is True
     assert cfg.observations["actor"].enable_corruption is False
     assert cfg.observations["critic"].enable_corruption is False
+    _assert_dynamics_context_group(cfg)
 
     play_cfg = wf_tron1b_rough_env_cfg(play=True)
     assert play_cfg.observations["actor_history"].enable_corruption is False
@@ -118,6 +120,7 @@ def test_actor_history_and_rough_privileged_observations() -> None:
     assert "height_scan" in critic_terms
     assert "domain_randomization_delta_quantity" not in actor_terms
     assert "domain_randomization_delta_quantity" not in actor_history_terms
+    assert "domain_randomization_delta_quantity" not in critic_terms
 
 
 def test_representation_velocity_observation_groups() -> None:
@@ -130,6 +133,7 @@ def test_representation_velocity_observation_groups() -> None:
     assert cfg.observations["lin_vel_target"].enable_corruption is False
     assert cfg.observations["critic"].enable_corruption is False
     assert cfg.observations["privileged_encoder"].enable_corruption is False
+    _assert_dynamics_context_group(cfg)
 
     play_cfg = wf_tron1b_rough_rep_ts_lin_vel_env_cfg(play=True)
     assert play_cfg.observations["proprio_history"].enable_corruption is False
@@ -145,6 +149,7 @@ def test_representation_velocity_observation_groups() -> None:
     assert list(lin_vel_target_terms) == ["base_lin_vel"]
     assert lin_vel_target_terms["base_lin_vel"].func is mdp.base_lin_vel
     assert "command" not in proprio_terms
+    assert "domain_randomization_delta_quantity" not in proprio_terms
     assert set(proprio_terms) == {
         "base_ang_vel",
         "projected_gravity",
@@ -157,6 +162,8 @@ def test_representation_velocity_observation_groups() -> None:
     assert "command" in critic_terms
     assert "base_lin_vel" not in privileged_terms
     assert "command" not in privileged_terms
+    assert "domain_randomization_delta_quantity" not in critic_terms
+    assert "domain_randomization_delta_quantity" not in privileged_terms
     assert "height_scan" in critic_terms
     assert "height_scan" in privileged_terms
 
@@ -184,11 +191,12 @@ def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
     )
     assert DEPTH_MODEL_WIDTH == DEPTH_CAMERA_WIDTH - DEPTH_LEFT_CROP == 45
     assert depth_group.enable_corruption is False
+    _assert_dynamics_context_group(cfg)
     assert agent["obs_groups"] == {
         "teacher_actor": ("actor",),
         "critic": ("critic",),
         "student_history": ("actor_history",),
-        "privileged_encoder": ("critic",),
+        "privileged_encoder": ("critic", "dynamics_context"),
     }
     training_obs_groups = {
         group for groups in agent["obs_groups"].values() for group in groups
@@ -629,6 +637,7 @@ def _make_representation_policy() -> RepresentationActorCritic:
             "actor": torch.randn(2, 3),
             "actor_history": torch.randn(2, 5, 3),
             "critic": torch.randn(2, 4),
+            "dynamics_context": torch.randn(2, 13),
         },
         batch_size=[2],
     )
@@ -638,7 +647,7 @@ def _make_representation_policy() -> RepresentationActorCritic:
             "teacher_actor": ["actor"],
             "critic": ["critic"],
             "student_history": ["actor_history"],
-            "privileged_encoder": ["critic"],
+            "privileged_encoder": ["critic", "dynamics_context"],
         },
         output_dim=2,
         hidden_dims=[8],
@@ -667,6 +676,7 @@ def _make_velocity_representation_policy() -> RepresentationVelocityActorCritic:
             "lin_vel_target": torch.randn(2, 3),
             "critic": torch.randn(2, 5),
             "privileged_encoder": torch.randn(2, 4),
+            "dynamics_context": torch.randn(2, 13),
         },
         batch_size=[2],
     )
@@ -677,7 +687,7 @@ def _make_velocity_representation_policy() -> RepresentationVelocityActorCritic:
             "actor_command": ["actor_command"],
             "lin_vel_target": ["lin_vel_target"],
             "critic": ["critic"],
-            "privileged_encoder": ["privileged_encoder"],
+            "privileged_encoder": ["privileged_encoder", "dynamics_context"],
         },
         output_dim=2,
         hidden_dims=[8],
@@ -692,6 +702,8 @@ def test_representation_metadata_describes_single_history_input() -> None:
     assert metadata["observation_names"] == ["base_ang_vel", "projected_gravity"]
     assert metadata["policy_input_names"] == ["student_history"]
     assert metadata["student_observation_names"] == ["base_ang_vel", "projected_gravity"]
+    assert "dynamics_context" not in metadata["policy_input_names"]
+    assert "domain_randomization_delta_quantity" not in metadata["student_observation_names"]
     assert metadata["student_history_length"] == "5"
     assert metadata["student_history_flatten_dim"] == "false"
     assert metadata["student_history_order"] == "oldest_to_newest"
@@ -709,6 +721,8 @@ def test_velocity_representation_metadata_describes_history_and_command_inputs()
     assert metadata["policy_output_names"] == ["actions", "predicted_lin_vel"]
     assert metadata["student_observation_names"] == ["base_ang_vel", "projected_gravity"]
     assert metadata["command_observation_names"] == ["command"]
+    assert "dynamics_context" not in metadata["policy_input_names"]
+    assert "domain_randomization_delta_quantity" not in metadata["student_observation_names"]
     assert metadata["student_history_length"] == "5"
     assert metadata["student_history_flatten_dim"] == "false"
     assert metadata["student_history_order"] == "oldest_to_newest"
