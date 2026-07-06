@@ -71,7 +71,7 @@ NON_WHEEL_COLLISION_GEOMS = (
 )
 
 BASE_HEIGHT_TARGET = 0.82
-WHEEL_DISTANCE_RANGE = (0.25, 0.55)
+WHEEL_DISTANCE_RANGE = (0.28, 0.55)
 WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
@@ -673,7 +673,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-5.0e-5,
             params={"asset_cfg": all_joint_cfg},
         ),
-        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.2),
+        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
         "self_collisions": RewardTermCfg(
             func=mdp.self_collision_cost,
             weight=-0.1,
