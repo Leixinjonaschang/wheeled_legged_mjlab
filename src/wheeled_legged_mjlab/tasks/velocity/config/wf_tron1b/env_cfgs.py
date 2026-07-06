@@ -488,7 +488,7 @@ def make_events() -> dict[str, EventTermCfg]:
                     "yaw": (-math.pi, math.pi),
                 },
                 "velocity_range": {
-                    "x": (-0.2, 0.2),
+                    "x": (-0.3, 0.3),
                     "y": (-0.2, 0.2),
                     "yaw": (-0.2, 0.2),
                 },
@@ -499,8 +499,8 @@ def make_events() -> dict[str, EventTermCfg]:
             func=mdp.reset_joints_by_offset,
             mode="reset",
             params={
-                "position_range": (-0.2, 0.2),
-                "velocity_range": (-0.1, 0.1),
+                "position_range": (-0.3, 0.5),
+                "velocity_range": (-0.2, 0.2),
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
                     joint_names=LEG_JOINT_NAMES,
@@ -512,7 +512,7 @@ def make_events() -> dict[str, EventTermCfg]:
             mode="reset",
             params={
                 "position_range": (0.0, 0.0),
-                "velocity_range": (-0.01, 0.01),
+                "velocity_range": (-0.1, 0.1),
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
                     joint_names=WHEEL_JOINT_NAMES,
