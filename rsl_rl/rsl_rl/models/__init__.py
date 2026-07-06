@@ -8,11 +8,13 @@
 from .cnn_model import CNNModel
 from .mlp_model import MLPModel
 from .representation_actor_critic import RepresentationActorCritic
+from .representation_velocity_actor_critic import RepresentationVelocityActorCritic
 from .rnn_model import RNNModel
 
 __all__ = [
     "CNNModel",
     "MLPModel",
-    "RepresentationActorCritic",
     "RNNModel",
+    "RepresentationActorCritic",
+    "RepresentationVelocityActorCritic",
 ]
