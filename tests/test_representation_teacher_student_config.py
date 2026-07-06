@@ -38,9 +38,9 @@ def test_representation_teacher_student_tasks_are_registered() -> None:
     assert rough_agent["algorithm"]["class_name"] == "RepresentationTeacherStudentPPO"
     assert rough_agent["actor"]["class_name"] == "RepresentationActorCritic"
     assert rough_agent["obs_groups"] == {
-        "actor": ("actor",),
+        "teacher_actor": ("actor",),
         "critic": ("critic",),
-        "proprio_encoder": ("actor_history",),
+        "student_history": ("actor_history",),
         "privileged_encoder": ("critic",),
     }
     assert "actor_history" in flat_env.observations
@@ -50,7 +50,13 @@ def test_actor_history_and_rough_privileged_observations() -> None:
     cfg = wf_tron1b_rough_env_cfg()
 
     assert cfg.observations["actor_history"].history_length == 5
-    assert cfg.observations["actor_history"].flatten_history_dim is True
+    assert cfg.observations["actor_history"].flatten_history_dim is False
+    assert cfg.observations["actor_history"].enable_corruption is True
+    assert cfg.observations["actor"].enable_corruption is False
+    assert cfg.observations["critic"].enable_corruption is False
+
+    play_cfg = wf_tron1b_rough_env_cfg(play=True)
+    assert play_cfg.observations["actor_history"].enable_corruption is False
 
     actor_terms = cfg.observations["actor"].terms
     actor_history_terms = cfg.observations["actor_history"].terms
@@ -78,9 +84,9 @@ def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
     }
     assert depth_group.enable_corruption is False
     assert agent["obs_groups"] == {
-        "actor": ("actor",),
+        "teacher_actor": ("actor",),
         "critic": ("critic",),
-        "proprio_encoder": ("actor_history",),
+        "student_history": ("actor_history",),
         "privileged_encoder": ("critic",),
     }
     training_obs_groups = {
@@ -196,7 +202,7 @@ def _make_dummy_metadata_env():
         ),
         cfg=SimpleNamespace(
             observations={
-                "actor_history": SimpleNamespace(history_length=5, flatten_history_dim=True),
+                "actor_history": SimpleNamespace(history_length=5, flatten_history_dim=False),
             }
         ),
     )
@@ -206,7 +212,7 @@ def _make_representation_policy() -> RepresentationActorCritic:
     obs = TensorDict(
         {
             "actor": torch.randn(2, 3),
-            "actor_history": torch.randn(2, 15),
+            "actor_history": torch.randn(2, 5, 3),
             "critic": torch.randn(2, 4),
         },
         batch_size=[2],
@@ -214,9 +220,9 @@ def _make_representation_policy() -> RepresentationActorCritic:
     return RepresentationActorCritic(
         obs,
         {
-            "actor": ["actor"],
+            "teacher_actor": ["actor"],
             "critic": ["critic"],
-            "proprio_encoder": ["actor_history"],
+            "student_history": ["actor_history"],
             "privileged_encoder": ["critic"],
         },
         output_dim=2,
@@ -226,15 +232,15 @@ def _make_representation_policy() -> RepresentationActorCritic:
     )
 
 
-def test_representation_metadata_describes_two_policy_inputs() -> None:
+def test_representation_metadata_describes_single_history_input() -> None:
     metadata = get_wheeled_legged_metadata(_make_dummy_metadata_env(), "local", _make_representation_policy())
 
     assert metadata["observation_names"] == ["base_ang_vel", "projected_gravity"]
-    assert metadata["policy_input_names"] == ["actor_obs", "proprio_obs"]
-    assert metadata["actor_observation_names"] == ["base_ang_vel", "projected_gravity"]
-    assert metadata["proprio_observation_names"] == ["base_ang_vel", "projected_gravity"]
-    assert metadata["proprio_history_length"] == "5"
-    assert metadata["proprio_flatten_history_dim"] == "true"
+    assert metadata["policy_input_names"] == ["student_history"]
+    assert metadata["student_observation_names"] == ["base_ang_vel", "projected_gravity"]
+    assert metadata["student_history_length"] == "5"
+    assert metadata["student_history_flatten_dim"] == "false"
+    assert metadata["student_history_order"] == "oldest_to_newest"
 
 
 def test_non_representation_metadata_stays_legacy_shape() -> None:
@@ -242,7 +248,7 @@ def test_non_representation_metadata_stays_legacy_shape() -> None:
 
     assert metadata["observation_names"] == ["base_ang_vel", "projected_gravity"]
     assert "policy_input_names" not in metadata
-    assert "proprio_observation_names" not in metadata
+    assert "student_observation_names" not in metadata
 
 
 def test_representation_tests_are_not_git_ignored() -> None:

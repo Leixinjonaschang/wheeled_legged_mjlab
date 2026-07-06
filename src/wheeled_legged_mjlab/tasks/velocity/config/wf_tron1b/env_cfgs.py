@@ -71,7 +71,7 @@ NON_WHEEL_COLLISION_GEOMS = (
 )
 
 BASE_HEIGHT_TARGET = 0.82
-WHEEL_DISTANCE_RANGE = (0.25, 0.55)
+WHEEL_DISTANCE_RANGE = (0.28, 0.55)
 WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
@@ -85,7 +85,10 @@ DEPTH_BUFFER_SIZE = 5
 DEPTH_BUFFER_UPDATE_PERIOD = 5
 ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.0
 ROUGHNESS_GATE_THRESHOLD_FINAL = 0.6
-ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 8_000 * 24
+ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 5_000 * 24
+FELL_OVER_LIMIT_ANGLE_INITIAL = math.radians(65.0)
+FELL_OVER_LIMIT_ANGLE_FINAL = math.radians(85.0)
+FELL_OVER_LIMIT_ANGLE_RAMP_STEPS = 5_000 * 24
 
 
 def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
@@ -205,7 +208,7 @@ def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
 
 
 def make_observations(*, rough: bool, depth: bool = False) -> dict[str, ObservationGroupCfg]:
-    """Actor uses deployable proprioception; critic keeps privileged state."""
+    """Student history uses noisy proprioception; teacher and critic stay clean."""
     actor_terms = {
         "base_ang_vel": ObservationTermCfg(
             func=mdp.builtin_sensor,
@@ -338,9 +341,9 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
         "actor_history": ObservationGroupCfg(
             terms=dict(actor_terms),
             concatenate_terms=True,
-            enable_corruption=False,
+            enable_corruption=True,
             history_length=5,
-            flatten_history_dim=True,
+            flatten_history_dim=False,
         ),
         "critic": ObservationGroupCfg(
             terms=critic_terms,
@@ -670,7 +673,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-5.0e-5,
             params={"asset_cfg": all_joint_cfg},
         ),
-        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.6),
+        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
         "self_collisions": RewardTermCfg(
             func=mdp.self_collision_cost,
             weight=-0.1,
@@ -795,7 +798,7 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
         "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
         "fell_over": TerminationTermCfg(
             func=mdp.bad_orientation,
-            params={"limit_angle": math.radians(70.0)},
+            params={"limit_angle": FELL_OVER_LIMIT_ANGLE_INITIAL},
         ),
         "illegal_contact": TerminationTermCfg(
             func=mdp.illegal_contact,
@@ -812,8 +815,18 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
 
 
 def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
-    """Terrain curriculum for rough training."""
-    curriculum = {}
+    """Training curricula for recovery tolerance and rough terrain."""
+    curriculum = {
+        "fell_over_limit_angle": CurriculumTermCfg(
+            func=mdp.fell_over_limit_angle,
+            params={
+                "termination_term_name": "fell_over",
+                "initial_limit_angle": FELL_OVER_LIMIT_ANGLE_INITIAL,
+                "final_limit_angle": FELL_OVER_LIMIT_ANGLE_FINAL,
+                "ramp_steps": FELL_OVER_LIMIT_ANGLE_RAMP_STEPS,
+            },
+        )
+    }
     if rough:
         curriculum["terrain_levels"] = CurriculumTermCfg(
             func=mdp.terrain_levels_vel,
@@ -882,6 +895,9 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
     cfg.observations["actor_history"].enable_corruption = False
     cfg.events.pop("push_robot", None)
     cfg.curriculum = {}
+    cfg.terminations["fell_over"].params["limit_angle"] = (
+        FELL_OVER_LIMIT_ANGLE_FINAL
+    )
 
     twist_cmd = cfg.commands[COMMAND_NAME]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)

@@ -20,12 +20,12 @@ LATENT_DIM = 3
 NUM_ACTIONS = 2
 
 
-def make_rep_obs(include_critic: bool = True) -> TensorDict:
+def make_rep_obs(include_privileged: bool = True) -> TensorDict:
     data = {
-        "actor": torch.randn(NUM_ENVS, ACTOR_DIM),
-        "actor_history": torch.randn(NUM_ENVS, HISTORY_LENGTH * ACTOR_DIM),
+        "student_history": torch.randn(NUM_ENVS, HISTORY_LENGTH, ACTOR_DIM),
     }
-    if include_critic:
+    if include_privileged:
+        data["teacher_actor"] = torch.randn(NUM_ENVS, ACTOR_DIM)
         data["critic"] = torch.randn(NUM_ENVS, CRITIC_DIM)
     return TensorDict(data, batch_size=[NUM_ENVS])
 
@@ -33,9 +33,9 @@ def make_rep_obs(include_critic: bool = True) -> TensorDict:
 def make_model(obs: TensorDict | None = None) -> RepresentationActorCritic:
     obs = make_rep_obs() if obs is None else obs
     obs_groups = {
-        "actor": ["actor"],
+        "teacher_actor": ["teacher_actor"],
         "critic": ["critic"],
-        "proprio_encoder": ["actor_history"],
+        "student_history": ["student_history"],
         "privileged_encoder": ["critic"],
     }
     return RepresentationActorCritic(
@@ -70,13 +70,36 @@ def test_actor_history_dim_is_five_frames_of_actor_dim() -> None:
     obs = make_rep_obs()
     model = make_model(obs)
 
-    assert model.proprio_encoder_obs_dim == HISTORY_LENGTH * model.actor_obs_dim
+    assert model.proprio_encoder_obs_dim == HISTORY_LENGTH * model.student_actor_obs_dim
+
+
+def test_student_actor_is_the_latest_frame_of_student_history() -> None:
+    obs = make_rep_obs()
+    model = make_model(obs)
+
+    assert torch.equal(model.get_student_actor_obs(obs), obs["student_history"][:, -1, :])
+    assert torch.equal(model.get_proprio_obs(obs), obs["student_history"].flatten(start_dim=1))
 
 
 def test_student_inference_does_not_require_critic_observations() -> None:
     model = make_model(make_rep_obs())
-    inference_obs = make_rep_obs(include_critic=False)
+    inference_obs = make_rep_obs(include_privileged=False)
 
     actions = model(inference_obs)
 
     assert actions.shape == (NUM_ENVS, NUM_ACTIONS)
+
+
+def test_exported_student_policy_uses_one_history_input() -> None:
+    model = make_model(make_rep_obs())
+    student_history = torch.randn(NUM_ENVS, HISTORY_LENGTH, ACTOR_DIM)
+    inference_obs = TensorDict({"student_history": student_history}, batch_size=[NUM_ENVS])
+    expected_actions = model(inference_obs)
+
+    jit_policy = model.as_jit()
+    onnx_policy = model.as_onnx(verbose=False)
+
+    assert torch.allclose(jit_policy(student_history), expected_actions)
+    assert torch.allclose(onnx_policy(student_history), expected_actions)
+    assert onnx_policy.input_names == ["student_history"]
+    assert onnx_policy.get_dummy_inputs()[0].shape == (1, HISTORY_LENGTH, ACTOR_DIM)

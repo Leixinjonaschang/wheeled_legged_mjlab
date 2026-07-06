@@ -35,27 +35,39 @@ class RepresentationActorCritic(nn.Module):
         distribution_cfg: dict | None = None,
     ) -> None:
         super().__init__()
-        self.actor_obs_groups, self.actor_obs_dim = self._get_obs_dim(obs, obs_groups, "actor")
-        self.critic_obs_groups, self.critic_obs_dim = self._get_obs_dim(obs, obs_groups, "critic")
-        self.proprio_encoder_obs_groups, self.proprio_encoder_obs_dim = self._get_obs_dim(
-            obs, obs_groups, "proprio_encoder"
+        self.teacher_actor_obs_groups, self.teacher_actor_obs_dim = self._get_obs_dim(
+            obs, obs_groups, "teacher_actor"
         )
+        self.critic_obs_groups, self.critic_obs_dim = self._get_obs_dim(obs, obs_groups, "critic")
+        (
+            self.student_history_obs_groups,
+            self.student_history_length,
+            self.student_actor_obs_dim,
+        ) = self._get_history_shape(obs, obs_groups, "student_history")
+        self.proprio_encoder_obs_dim = self.student_history_length * self.student_actor_obs_dim
+        if self.student_actor_obs_dim != self.teacher_actor_obs_dim:
+            raise ValueError(
+                "Student history frame dimension must match the teacher actor observation dimension, "
+                f"got {self.student_actor_obs_dim} and {self.teacher_actor_obs_dim}."
+            )
         self.privileged_encoder_obs_groups, self.privileged_encoder_obs_dim = self._get_obs_dim(
             obs, obs_groups, "privileged_encoder"
         )
-        self.obs_groups = self.actor_obs_groups
-        self.obs_dim = self.actor_obs_dim
+        self.obs_groups = self.student_history_obs_groups
+        self.obs_dim = self.proprio_encoder_obs_dim
         self.latent_dim = latent_dim
         self.normalize_latent = normalize_latent
 
         self.obs_normalization = obs_normalization
         if obs_normalization:
-            self.actor_obs_normalizer = EmpiricalNormalization(self.actor_obs_dim)
+            self.teacher_actor_obs_normalizer = EmpiricalNormalization(self.teacher_actor_obs_dim)
+            self.student_actor_obs_normalizer = EmpiricalNormalization(self.student_actor_obs_dim)
             self.critic_obs_normalizer = EmpiricalNormalization(self.critic_obs_dim)
             self.proprio_obs_normalizer = EmpiricalNormalization(self.proprio_encoder_obs_dim)
             self.privileged_obs_normalizer = EmpiricalNormalization(self.privileged_encoder_obs_dim)
         else:
-            self.actor_obs_normalizer = nn.Identity()
+            self.teacher_actor_obs_normalizer = nn.Identity()
+            self.student_actor_obs_normalizer = nn.Identity()
             self.critic_obs_normalizer = nn.Identity()
             self.proprio_obs_normalizer = nn.Identity()
             self.privileged_obs_normalizer = nn.Identity()
@@ -72,7 +84,7 @@ class RepresentationActorCritic(nn.Module):
         encoder_hidden_dims = hidden_dims if encoder_hidden_dims is None else encoder_hidden_dims
         self.privileged_encoder = MLP(self.privileged_encoder_obs_dim, latent_dim, encoder_hidden_dims, activation)
         self.proprio_encoder = MLP(self.proprio_encoder_obs_dim, latent_dim, encoder_hidden_dims, activation)
-        self.actor_head = MLP(self.actor_obs_dim + latent_dim, actor_output_dim, hidden_dims, activation)
+        self.actor_head = MLP(self.teacher_actor_obs_dim + latent_dim, actor_output_dim, hidden_dims, activation)
         self.critic_head = MLP(self.critic_obs_dim + latent_dim, 1, hidden_dims, activation)
 
         if self.distribution is not None:
@@ -88,7 +100,7 @@ class RepresentationActorCritic(nn.Module):
         """Run the deployable student policy path."""
         del hidden_state
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
-        actor_obs = self.get_actor_obs(obs)
+        actor_obs = self.get_student_actor_obs(obs)
         latent = self.get_proprio_latent(obs)
         return self._actor(actor_obs, latent, stochastic_output=stochastic_output)
 
@@ -102,7 +114,7 @@ class RepresentationActorCritic(nn.Module):
         """Run the privileged policy path used for rollout collection and PPO updates."""
         del hidden_state
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
-        actor_obs = self.get_actor_obs(obs)
+        actor_obs = self.get_teacher_actor_obs(obs)
         latent = self.get_privileged_latent(obs)
         return self._actor(actor_obs, latent, stochastic_output=stochastic_output)
 
@@ -138,14 +150,19 @@ class RepresentationActorCritic(nn.Module):
         """Yield parameters optimized by representation alignment."""
         yield from self.proprio_encoder.parameters()
 
-    def get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
-        return self.actor_obs_normalizer(self._cat_obs(obs, self.actor_obs_groups))
+    def get_teacher_actor_obs(self, obs: TensorDict) -> torch.Tensor:
+        return self.teacher_actor_obs_normalizer(self._cat_obs(obs, self.teacher_actor_obs_groups))
+
+    def get_student_actor_obs(self, obs: TensorDict) -> torch.Tensor:
+        student_history = self._cat_obs(obs, self.student_history_obs_groups)
+        return self.student_actor_obs_normalizer(student_history[:, -1, :])
 
     def get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
         return self.critic_obs_normalizer(self._cat_obs(obs, self.critic_obs_groups))
 
     def get_proprio_obs(self, obs: TensorDict) -> torch.Tensor:
-        return self.proprio_obs_normalizer(self._cat_obs(obs, self.proprio_encoder_obs_groups))
+        student_history = self._cat_obs(obs, self.student_history_obs_groups)
+        return self.proprio_obs_normalizer(student_history.flatten(start_dim=1))
 
     def get_privileged_obs(self, obs: TensorDict) -> torch.Tensor:
         return self.privileged_obs_normalizer(self._cat_obs(obs, self.privileged_encoder_obs_groups))
@@ -199,9 +216,13 @@ class RepresentationActorCritic(nn.Module):
 
     def update_normalization(self, obs: TensorDict) -> None:
         if self.obs_normalization:
-            self.actor_obs_normalizer.update(self._cat_obs(obs, self.actor_obs_groups))  # type: ignore
+            student_history = self._cat_obs(obs, self.student_history_obs_groups)
+            self.teacher_actor_obs_normalizer.update(  # type: ignore
+                self._cat_obs(obs, self.teacher_actor_obs_groups)
+            )
+            self.student_actor_obs_normalizer.update(student_history[:, -1, :])  # type: ignore
             self.critic_obs_normalizer.update(self._cat_obs(obs, self.critic_obs_groups))  # type: ignore
-            self.proprio_obs_normalizer.update(self._cat_obs(obs, self.proprio_encoder_obs_groups))  # type: ignore
+            self.proprio_obs_normalizer.update(student_history.flatten(start_dim=1))  # type: ignore
             self.privileged_obs_normalizer.update(self._cat_obs(obs, self.privileged_encoder_obs_groups))  # type: ignore
 
     def _actor(self, actor_obs: torch.Tensor, latent: torch.Tensor, stochastic_output: bool) -> torch.Tensor:
@@ -231,13 +252,38 @@ class RepresentationActorCritic(nn.Module):
             obs_dim += obs[obs_group].shape[-1]
         return active_obs_groups, obs_dim
 
+    def _get_history_shape(
+        self, obs: TensorDict, obs_groups: dict[str, list[str]], obs_set: str
+    ) -> tuple[list[str], int, int]:
+        active_obs_groups = obs_groups[obs_set]
+        history_length: int | None = None
+        frame_dim = 0
+        for obs_group in active_obs_groups:
+            group_obs = obs[obs_group]
+            if len(group_obs.shape) != 3:
+                raise ValueError(
+                    "Student history observations must have shape (batch, history, features), "
+                    f"got {group_obs.shape} for '{obs_group}'."
+                )
+            if history_length is None:
+                history_length = group_obs.shape[-2]
+            elif group_obs.shape[-2] != history_length:
+                raise ValueError(
+                    "All student history groups must use the same history length, "
+                    f"got {history_length} and {group_obs.shape[-2]}."
+                )
+            frame_dim += group_obs.shape[-1]
+        if history_length is None:
+            raise ValueError("At least one student history observation group is required.")
+        return active_obs_groups, history_length, frame_dim
+
 
 class _TorchRepresentationActorCritic(nn.Module):
     """TorchScript wrapper for student policy inference."""
 
     def __init__(self, model: RepresentationActorCritic) -> None:
         super().__init__()
-        self.actor_obs_normalizer = copy.deepcopy(model.actor_obs_normalizer)
+        self.student_actor_obs_normalizer = copy.deepcopy(model.student_actor_obs_normalizer)
         self.proprio_obs_normalizer = copy.deepcopy(model.proprio_obs_normalizer)
         self.proprio_encoder = copy.deepcopy(model.proprio_encoder)
         self.actor_head = copy.deepcopy(model.actor_head)
@@ -247,9 +293,9 @@ class _TorchRepresentationActorCritic(nn.Module):
         else:
             self.deterministic_output = nn.Identity()
 
-    def forward(self, actor_obs: torch.Tensor, proprio_obs: torch.Tensor) -> torch.Tensor:
-        actor_obs = self.actor_obs_normalizer(actor_obs)
-        proprio_obs = self.proprio_obs_normalizer(proprio_obs)
+    def forward(self, student_history: torch.Tensor) -> torch.Tensor:
+        actor_obs = self.student_actor_obs_normalizer(student_history[:, -1, :])
+        proprio_obs = self.proprio_obs_normalizer(student_history.flatten(start_dim=1))
         latent = self.proprio_encoder(proprio_obs)
         if self.normalize_latent:
             latent = F.normalize(latent, p=2.0, dim=-1)
@@ -269,7 +315,7 @@ class _OnnxRepresentationActorCritic(nn.Module):
     def __init__(self, model: RepresentationActorCritic, verbose: bool) -> None:
         super().__init__()
         self.verbose = verbose
-        self.actor_obs_normalizer = copy.deepcopy(model.actor_obs_normalizer)
+        self.student_actor_obs_normalizer = copy.deepcopy(model.student_actor_obs_normalizer)
         self.proprio_obs_normalizer = copy.deepcopy(model.proprio_obs_normalizer)
         self.proprio_encoder = copy.deepcopy(model.proprio_encoder)
         self.actor_head = copy.deepcopy(model.actor_head)
@@ -278,24 +324,24 @@ class _OnnxRepresentationActorCritic(nn.Module):
             self.deterministic_output = model.distribution.as_deterministic_output_module()
         else:
             self.deterministic_output = nn.Identity()
-        self.actor_input_size = model.actor_obs_dim
-        self.proprio_input_size = model.proprio_encoder_obs_dim
+        self.history_length = model.student_history_length
+        self.actor_input_size = model.student_actor_obs_dim
 
-    def forward(self, actor_obs: torch.Tensor, proprio_obs: torch.Tensor) -> torch.Tensor:
-        actor_obs = self.actor_obs_normalizer(actor_obs)
-        proprio_obs = self.proprio_obs_normalizer(proprio_obs)
+    def forward(self, student_history: torch.Tensor) -> torch.Tensor:
+        actor_obs = self.student_actor_obs_normalizer(student_history[:, -1, :])
+        proprio_obs = self.proprio_obs_normalizer(student_history.flatten(start_dim=1))
         latent = self.proprio_encoder(proprio_obs)
         if self.normalize_latent:
             latent = F.normalize(latent, p=2.0, dim=-1)
         out = self.actor_head(torch.cat((actor_obs, latent), dim=-1))
         return self.deterministic_output(out)
 
-    def get_dummy_inputs(self) -> tuple[torch.Tensor, torch.Tensor]:
-        return (torch.zeros(1, self.actor_input_size), torch.zeros(1, self.proprio_input_size))
+    def get_dummy_inputs(self) -> tuple[torch.Tensor]:
+        return (torch.zeros(1, self.history_length, self.actor_input_size),)
 
     @property
     def input_names(self) -> list[str]:
-        return ["actor_obs", "proprio_obs"]
+        return ["student_history"]
 
     @property
     def output_names(self) -> list[str]:

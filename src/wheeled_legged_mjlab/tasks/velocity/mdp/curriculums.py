@@ -80,6 +80,26 @@ def terrain_levels_vel(
   return result
 
 
+def fell_over_limit_angle(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor,
+  termination_term_name: str,
+  initial_limit_angle: float,
+  final_limit_angle: float,
+  ramp_steps: int,
+) -> dict[str, torch.Tensor]:
+  """Linearly relax the fall-over angle limit over global policy steps."""
+  del env_ids  # The termination threshold is shared by all environments.
+  progress = min(max(float(env.common_step_counter) / max(ramp_steps, 1), 0.0), 1.0)
+  limit_angle = initial_limit_angle + progress * (
+    final_limit_angle - initial_limit_angle
+  )
+
+  termination_cfg = env.termination_manager.get_term_cfg(termination_term_name)
+  termination_cfg.params["limit_angle"] = limit_angle
+  return {"limit_angle": torch.tensor(limit_angle, device=env.device)}
+
+
 def commands_vel(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor,
