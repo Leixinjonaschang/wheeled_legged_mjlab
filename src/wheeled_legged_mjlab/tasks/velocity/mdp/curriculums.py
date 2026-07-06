@@ -90,7 +90,7 @@ def fell_over_limit_angle(
 ) -> dict[str, torch.Tensor]:
   """Linearly relax the fall-over angle limit over global policy steps."""
   del env_ids  # The termination threshold is shared by all environments.
-  progress = min(env.common_step_counter / max(ramp_steps, 1), 1.0)
+  progress = min(max(float(env.common_step_counter) / max(ramp_steps, 1), 0.0), 1.0)
   limit_angle = initial_limit_angle + progress * (
     final_limit_angle - initial_limit_angle
   )
