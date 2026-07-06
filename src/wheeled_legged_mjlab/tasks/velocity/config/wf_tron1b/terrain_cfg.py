@@ -13,13 +13,13 @@ from mjlab.terrains import (
 TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=35.0,
-    num_rows=30,
+    num_rows=50,
     num_cols=10,
     sub_terrains={
         "discrete_obstacles": HfDiscreteObstaclesTerrainCfg(
             proportion=0.2,
             obstacle_width_range=(0.3, 1.5),
-            obstacle_height_range=(0.03, 0.20),
+            obstacle_height_range=(0.01, 0.15),
             num_obstacles=200,
             platform_width=2.0,
             border_width=0.25,
@@ -71,7 +71,7 @@ TERRAINS_CFG = TerrainGeneratorCfg(
 TERRAINS_ENTITY_CFG = TerrainEntityCfg(
     terrain_type="generator",
     terrain_generator=TERRAINS_CFG,
-    max_init_terrain_level=5,
+    max_init_terrain_level=8,
     env_spacing=2.5,
 )
 
