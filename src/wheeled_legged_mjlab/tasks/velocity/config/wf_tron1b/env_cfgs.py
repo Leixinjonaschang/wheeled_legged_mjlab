@@ -550,7 +550,7 @@ def make_events() -> dict[str, EventTermCfg]:
                 ),
                 "operation": "abs",
                 "ranges": (0.3, 1.2),
-                "shared_random": True,
+                "shared_random": False,
             },
         ),
         "encoder_bias": EventTermCfg(
