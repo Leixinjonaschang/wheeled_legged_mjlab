@@ -527,7 +527,7 @@ def make_events() -> dict[str, EventTermCfg]:
         "push_robot": EventTermCfg(
             func=mdp.push_by_setting_velocity,
             mode="interval",
-            interval_range_s=(1.0, 3.0),
+            interval_range_s=(15.0, 15.5),
             params={
                 "velocity_range": {
                     "x": (-0.5, 0.5),
