@@ -81,6 +81,33 @@ def test_student_actor_is_the_latest_frame_of_student_history() -> None:
     assert torch.equal(model.get_proprio_obs(obs), obs["student_history"].flatten(start_dim=1))
 
 
+def test_teacher_action_uses_student_current_obs_and_privileged_latent() -> None:
+    obs = make_rep_obs()
+    obs["teacher_actor"] = torch.full((NUM_ENVS, ACTOR_DIM), 100.0)
+    obs["student_history"][:, -1, :] = torch.arange(
+        NUM_ENVS * ACTOR_DIM,
+        dtype=obs["student_history"].dtype,
+    ).reshape(NUM_ENVS, ACTOR_DIM)
+    model = make_model(obs)
+    captured: dict[str, torch.Tensor] = {}
+
+    def capture_actor(actor_obs: torch.Tensor, latent: torch.Tensor, stochastic_output: bool) -> torch.Tensor:
+        captured["actor_obs"] = actor_obs.detach().clone()
+        captured["latent"] = latent.detach().clone()
+        captured["stochastic_output"] = torch.tensor(stochastic_output)
+        return torch.zeros(NUM_ENVS, NUM_ACTIONS)
+
+    model._actor = capture_actor  # type: ignore[method-assign]
+
+    actions = model.act_teacher(obs, stochastic_output=True)
+
+    assert actions.shape == (NUM_ENVS, NUM_ACTIONS)
+    assert torch.equal(captured["actor_obs"], model.get_student_actor_obs(obs))
+    assert not torch.equal(captured["actor_obs"], model.get_teacher_actor_obs(obs))
+    assert torch.equal(captured["latent"], model.get_privileged_latent(obs))
+    assert captured["stochastic_output"].item() is True
+
+
 def test_student_inference_does_not_require_critic_observations() -> None:
     model = make_model(make_rep_obs())
     inference_obs = make_rep_obs(include_privileged=False)

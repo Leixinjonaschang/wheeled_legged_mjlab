@@ -111,10 +111,10 @@ class RepresentationActorCritic(nn.Module):
         hidden_state: HiddenState = None,
         stochastic_output: bool = False,
     ) -> torch.Tensor:
-        """Run the privileged policy path used for rollout collection and PPO updates."""
+        """Run PPO updates with deployable actor observations and privileged latent."""
         del hidden_state
         obs = unpad_trajectories(obs, masks) if masks is not None and not self.is_recurrent else obs
-        actor_obs = self.get_teacher_actor_obs(obs)
+        actor_obs = self.get_student_actor_obs(obs)
         latent = self.get_privileged_latent(obs)
         return self._actor(actor_obs, latent, stochastic_output=stochastic_output)
 
