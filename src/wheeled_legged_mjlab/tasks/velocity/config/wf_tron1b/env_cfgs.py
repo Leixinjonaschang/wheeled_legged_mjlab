@@ -207,7 +207,9 @@ def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
     return tuple(sensors)
 
 
-def make_observations(*, rough: bool, depth: bool = False) -> dict[str, ObservationGroupCfg]:
+def make_observations(
+    *, rough: bool, depth: bool = False, lin_vel_representation: bool = False
+) -> dict[str, ObservationGroupCfg]:
     """Student history uses noisy proprioception; teacher and critic stay clean."""
     actor_terms = {
         "base_ang_vel": ObservationTermCfg(
@@ -257,6 +259,8 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
             params={"command_name": COMMAND_NAME},
         ),
     }
+    proprio_terms = dict(actor_terms)
+    command_term = proprio_terms.pop("command")
 
     critic_terms = {
         "base_lin_vel": ObservationTermCfg(func=mdp.base_lin_vel),
@@ -332,25 +336,59 @@ def make_observations(*, rough: bool, depth: bool = False) -> dict[str, Observat
             },
         )
 
-    observations = {
-        "actor": ObservationGroupCfg(
-            terms=dict(actor_terms),
-            concatenate_terms=True,
-            enable_corruption=False,
-        ),
-        "actor_history": ObservationGroupCfg(
-            terms=dict(actor_terms),
-            concatenate_terms=True,
-            enable_corruption=True,
-            history_length=5,
-            flatten_history_dim=False,
-        ),
-        "critic": ObservationGroupCfg(
-            terms=critic_terms,
-            concatenate_terms=True,
-            enable_corruption=False,
-        ),
-    }
+    if lin_vel_representation:
+        privileged_encoder_terms = deepcopy(critic_terms)
+        privileged_encoder_terms.pop("base_lin_vel", None)
+        privileged_encoder_terms.pop("command", None)
+        observations = {
+            "proprio_history": ObservationGroupCfg(
+                terms=dict(proprio_terms),
+                concatenate_terms=True,
+                enable_corruption=True,
+                history_length=5,
+                flatten_history_dim=False,
+            ),
+            "actor_command": ObservationGroupCfg(
+                terms={"command": deepcopy(command_term)},
+                concatenate_terms=True,
+                enable_corruption=False,
+            ),
+            "lin_vel_target": ObservationGroupCfg(
+                terms={"base_lin_vel": deepcopy(critic_terms["base_lin_vel"])},
+                concatenate_terms=True,
+                enable_corruption=False,
+            ),
+            "critic": ObservationGroupCfg(
+                terms=critic_terms,
+                concatenate_terms=True,
+                enable_corruption=False,
+            ),
+            "privileged_encoder": ObservationGroupCfg(
+                terms=privileged_encoder_terms,
+                concatenate_terms=True,
+                enable_corruption=False,
+            ),
+        }
+    else:
+        observations = {
+            "actor": ObservationGroupCfg(
+                terms=dict(actor_terms),
+                concatenate_terms=True,
+                enable_corruption=False,
+            ),
+            "actor_history": ObservationGroupCfg(
+                terms=dict(actor_terms),
+                concatenate_terms=True,
+                enable_corruption=True,
+                history_length=5,
+                flatten_history_dim=False,
+            ),
+            "critic": ObservationGroupCfg(
+                terms=critic_terms,
+                concatenate_terms=True,
+                enable_corruption=False,
+            ),
+        }
     if depth:
         observations[DEPTH_CAMERA_NAME] = ObservationGroupCfg(
             terms={
@@ -866,10 +904,12 @@ def make_viewer() -> ViewerConfig:
     )
 
 
-def make_env_cfg(*, rough: bool, play: bool = False, depth: bool = False) -> ManagerBasedRlEnvCfg:
+def make_env_cfg(
+    *, rough: bool, play: bool = False, depth: bool = False, lin_vel_representation: bool = False
+) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
         scene=make_scene(rough=rough, depth=depth),
-        observations=make_observations(rough=rough, depth=depth),
+        observations=make_observations(rough=rough, depth=depth, lin_vel_representation=lin_vel_representation),
         actions=make_actions(action_delay=not play),
         commands=make_commands(),
         events=make_events(),
@@ -891,8 +931,12 @@ def make_env_cfg(*, rough: bool, play: bool = False, depth: bool = False) -> Man
 def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
     """Make rollout/play deterministic enough to inspect behavior."""
     cfg.episode_length_s = int(1e9)
-    cfg.observations["actor"].enable_corruption = False
-    cfg.observations["actor_history"].enable_corruption = False
+    if "actor" in cfg.observations:
+        cfg.observations["actor"].enable_corruption = False
+    if "actor_history" in cfg.observations:
+        cfg.observations["actor_history"].enable_corruption = False
+    if "proprio_history" in cfg.observations:
+        cfg.observations["proprio_history"].enable_corruption = False
     cfg.events.pop("push_robot", None)
     cfg.curriculum = {}
     cfg.terminations["fell_over"].params["limit_angle"] = (
@@ -941,3 +985,13 @@ def wf_tron1b_rough_depth_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def wf_tron1b_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create WF-TRON1B flat-ground velocity tracking configuration."""
     return make_env_cfg(rough=False, play=play)
+
+
+def wf_tron1b_rough_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create WF-TRON1B rough-terrain velocity representation configuration."""
+    return make_env_cfg(rough=True, play=play, lin_vel_representation=True)
+
+
+def wf_tron1b_flat_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create WF-TRON1B flat-ground velocity representation configuration."""
+    return make_env_cfg(rough=False, play=play, lin_vel_representation=True)

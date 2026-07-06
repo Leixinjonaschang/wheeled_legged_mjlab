@@ -32,6 +32,27 @@ class RslRlRepresentationTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     class_name: str = "RepresentationTeacherStudentPPO"
 
 
+@dataclass
+class RslRlRepresentationVelocityModelCfg(RslRlModelCfg):
+    """Config for velocity representation teacher-student actor-critic."""
+
+    encoder_hidden_dims: Tuple[int, ...] = (512, 256, 128)
+    latent_dim: int = 32
+    normalize_latent: bool = True
+    class_name: str = "RepresentationVelocityActorCritic"
+
+
+@dataclass
+class RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """Config for velocity representation teacher-student PPO."""
+
+    student_learning_rate: float = 1.0e-3
+    num_student_substeps: int = 1
+    representation_loss_coef: float = 1.0
+    lin_vel_loss_coef: float = 1.0
+    class_name: str = "RepresentationVelocityTeacherStudentPPO"
+
+
 def wf_tron1b_ppo_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
     """Create RL runner configuration for WF-TRON1B velocity task."""
     return WFTRON1BRslRlOnPolicyRunnerCfg(
@@ -65,6 +86,56 @@ def wf_tron1b_ppo_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             max_grad_norm=1.0,
         ),
         experiment_name="wf_tron1b_velocity",
+        save_interval=200,
+        num_steps_per_env=24,
+        max_iterations=30_000,
+        clip_actions=2.0,
+        upload_model=False,
+    )
+
+
+def wf_tron1b_rep_ts_lin_vel_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
+    """Create velocity representation teacher-student runner configuration."""
+    return WFTRON1BRslRlOnPolicyRunnerCfg(
+        actor=RslRlRepresentationVelocityModelCfg(
+            hidden_dims=(512, 256, 128),
+            encoder_hidden_dims=(512, 256, 128),
+            activation="elu",
+            obs_normalization=True,
+            latent_dim=32,
+            normalize_latent=True,
+            distribution_cfg={
+                "class_name": "GaussianDistribution",
+                "init_std": 1.0,
+                "std_type": "scalar",
+            },
+        ),
+        algorithm=RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg(
+            value_loss_coef=1.0,
+            use_clipped_value_loss=True,
+            clip_param=0.2,
+            entropy_coef=0.01,
+            num_learning_epochs=5,
+            num_mini_batches=4,
+            learning_rate=1.0e-3,
+            schedule="adaptive",
+            gamma=0.99,
+            lam=0.95,
+            desired_kl=0.01,
+            max_grad_norm=1.0,
+            student_learning_rate=1.0e-3,
+            num_student_substeps=1,
+            representation_loss_coef=1.0,
+            lin_vel_loss_coef=1.0,
+        ),
+        obs_groups={
+            "proprio_history": ("proprio_history",),
+            "actor_command": ("actor_command",),
+            "lin_vel_target": ("lin_vel_target",),
+            "critic": ("critic",),
+            "privileged_encoder": ("privileged_encoder",),
+        },
+        experiment_name="wf_tron1b_velocity_rep_ts_lin_vel",
         save_interval=200,
         num_steps_per_env=24,
         max_iterations=30_000,

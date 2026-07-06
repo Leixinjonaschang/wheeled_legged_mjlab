@@ -61,9 +61,11 @@ rsl_rl/tests/*
 !rsl_rl/tests/algorithms/
 rsl_rl/tests/algorithms/*
 !rsl_rl/tests/algorithms/test_representation_teacher_student_ppo.py
+!rsl_rl/tests/algorithms/test_representation_velocity_teacher_student_ppo.py
 !rsl_rl/tests/models/
 rsl_rl/tests/models/*
 !rsl_rl/tests/models/test_representation_actor_critic.py
+!rsl_rl/tests/models/test_representation_velocity_actor_critic.py
 
 # Translations
 *.mo

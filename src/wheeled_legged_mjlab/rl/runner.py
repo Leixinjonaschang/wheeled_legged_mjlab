@@ -8,7 +8,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
-from rsl_rl.models import RepresentationActorCritic
+from rsl_rl.models import RepresentationActorCritic, RepresentationVelocityActorCritic
 
 
 def _action_scale_values(action_term) -> list[float]:
@@ -46,6 +46,7 @@ def get_wheeled_legged_metadata(
     ]
     joint_stiffness = env.sim.mj_model.actuator_gainprm[ctrl_ids_natural, 0]
     joint_damping = -env.sim.mj_model.actuator_biasprm[ctrl_ids_natural, 2]
+    observation_group = "actor" if "actor" in env.observation_manager.active_terms else "proprio_history"
 
     metadata = {
         "run_path": run_path,
@@ -54,7 +55,7 @@ def get_wheeled_legged_metadata(
         "joint_damping": joint_damping.tolist(),
         "default_joint_pos": robot.data.default_joint_pos[0].cpu().tolist(),
         "command_names": list(env.command_manager.active_terms),
-        "observation_names": env.observation_manager.active_terms["actor"],
+        "observation_names": env.observation_manager.active_terms[observation_group],
         "action_names": action_names,
         "action_target_names": action_target_names,
         "action_scale": action_scales,
@@ -67,6 +68,19 @@ def get_wheeled_legged_metadata(
                 "student_observation_names": env.observation_manager.active_terms["actor_history"],
                 "student_history_length": str(student_history_cfg.history_length),
                 "student_history_flatten_dim": str(student_history_cfg.flatten_history_dim).lower(),
+                "student_history_order": "oldest_to_newest",
+            }
+        )
+    if isinstance(policy, RepresentationVelocityActorCritic):
+        proprio_history_cfg = env.cfg.observations["proprio_history"]
+        metadata.update(
+            {
+                "policy_input_names": ["proprio_history", "actor_command"],
+                "policy_output_names": ["actions", "predicted_lin_vel"],
+                "student_observation_names": env.observation_manager.active_terms["proprio_history"],
+                "command_observation_names": env.observation_manager.active_terms["actor_command"],
+                "student_history_length": str(proprio_history_cfg.history_length),
+                "student_history_flatten_dim": str(proprio_history_cfg.flatten_history_dim).lower(),
                 "student_history_order": "oldest_to_newest",
             }
         )
