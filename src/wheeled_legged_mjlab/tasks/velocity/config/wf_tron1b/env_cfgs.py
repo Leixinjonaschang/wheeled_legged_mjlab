@@ -83,6 +83,7 @@ DEPTH_CAMERA_WIDTH = 24
 DEPTH_CAMERA_HEIGHT = 32
 DEPTH_BUFFER_SIZE = 5
 DEPTH_BUFFER_UPDATE_PERIOD = 5
+DEPTH_CAPTURE_FREQUENCY_HZ = 25.0
 ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.0
 ROUGHNESS_GATE_THRESHOLD_FINAL = 0.25
 ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 5_000 * 24
@@ -208,7 +209,11 @@ def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
 
 
 def make_observations(
-    *, rough: bool, depth: bool = False, lin_vel_representation: bool = False
+    *,
+    rough: bool,
+    depth: bool = False,
+    lin_vel_representation: bool = False,
+    async_depth: bool = False,
 ) -> dict[str, ObservationGroupCfg]:
     """Student history uses noisy proprioception; teacher and critic stay clean."""
     actor_terms = {
@@ -389,7 +394,21 @@ def make_observations(
                 enable_corruption=False,
             ),
         }
-    if depth:
+    if depth and async_depth:
+        observations[DEPTH_CAMERA_NAME] = ObservationGroupCfg(
+            terms={
+                DEPTH_CAMERA_NAME: ObservationTermCfg(
+                    func=mdp.async_depth_buffer,
+                    params={
+                        "sensor_name": DEPTH_CAMERA_NAME,
+                        "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
+                    },
+                )
+            },
+            concatenate_terms=True,
+            enable_corruption=False,
+        )
+    elif depth:
         observations[DEPTH_CAMERA_NAME] = ObservationGroupCfg(
             terms={
                 DEPTH_CAMERA_NAME: ObservationTermCfg(
@@ -905,11 +924,21 @@ def make_viewer() -> ViewerConfig:
 
 
 def make_env_cfg(
-    *, rough: bool, play: bool = False, depth: bool = False, lin_vel_representation: bool = False
+    *,
+    rough: bool,
+    play: bool = False,
+    depth: bool = False,
+    lin_vel_representation: bool = False,
+    async_depth: bool = False,
 ) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
         scene=make_scene(rough=rough, depth=depth),
-        observations=make_observations(rough=rough, depth=depth, lin_vel_representation=lin_vel_representation),
+        observations=make_observations(
+            rough=rough,
+            depth=depth,
+            lin_vel_representation=lin_vel_representation,
+            async_depth=async_depth,
+        ),
         actions=make_actions(action_delay=not play),
         commands=make_commands(),
         events=make_events(),
@@ -990,6 +1019,17 @@ def wf_tron1b_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def wf_tron1b_rough_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create WF-TRON1B rough-terrain velocity representation configuration."""
     return make_env_cfg(rough=True, play=play, lin_vel_representation=True)
+
+
+def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create rough-terrain velocity representation configuration with async depth."""
+    return make_env_cfg(
+        rough=True,
+        play=play,
+        depth=True,
+        lin_vel_representation=True,
+        async_depth=True,
+    )
 
 
 def wf_tron1b_flat_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:

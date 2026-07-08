@@ -12,7 +12,7 @@ from __future__ import annotations
 import torch
 from tensordict import TensorDict
 
-from rsl_rl.models import RepresentationVelocityActorCritic
+from rsl_rl.models import DepthRepresentationVelocityActorCritic, RepresentationVelocityActorCritic
 
 NUM_ENVS = 4
 PROPRIO_DIM = 28
@@ -23,6 +23,7 @@ PRIVILEGED_DIM = 11
 HISTORY_LENGTH = 5
 LATENT_DIM = 4
 NUM_ACTIONS = 2
+DEPTH_SHAPE = (1, 32, 24)
 
 
 def make_rep_obs(include_privileged: bool = True) -> TensorDict:
@@ -58,6 +59,48 @@ def make_model(obs: TensorDict | None = None, *, obs_normalization: bool = False
         encoder_hidden_dims=[16],
         latent_dim=LATENT_DIM,
         obs_normalization=obs_normalization,
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+
+def make_depth_rep_obs(include_privileged: bool = True, include_depth: bool = True) -> TensorDict:
+    data = {
+        "proprio_history": torch.randn(NUM_ENVS, HISTORY_LENGTH, PROPRIO_DIM),
+        "actor_command": torch.randn(NUM_ENVS, COMMAND_DIM),
+    }
+    if include_depth:
+        data["depth_camera"] = torch.randn(NUM_ENVS, *DEPTH_SHAPE)
+    if include_privileged:
+        data.update(
+            {
+                "lin_vel_target": torch.randn(NUM_ENVS, LIN_VEL_DIM),
+                "critic": torch.randn(NUM_ENVS, CRITIC_DIM),
+                "privileged_encoder": torch.randn(NUM_ENVS, PRIVILEGED_DIM),
+            }
+        )
+    return TensorDict(data, batch_size=[NUM_ENVS])
+
+
+def make_depth_model(obs: TensorDict | None = None) -> DepthRepresentationVelocityActorCritic:
+    obs = make_depth_rep_obs() if obs is None else obs
+    obs_groups = {
+        "proprio_history": ["proprio_history"],
+        "actor_command": ["actor_command"],
+        "lin_vel_target": ["lin_vel_target"],
+        "critic": ["critic"],
+        "privileged_encoder": ["privileged_encoder"],
+        "depth_encoder": ["depth_camera"],
+    }
+    return DepthRepresentationVelocityActorCritic(
+        obs,
+        obs_groups,
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        encoder_hidden_dims=[16],
+        latent_dim=LATENT_DIM,
+        depth_feature_dim=8,
+        depth_gru_hidden_dim=8,
+        depth_channels=(4, 4),
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
     )
 
@@ -183,3 +226,140 @@ def test_exported_student_policy_uses_history_and_command_inputs() -> None:
     assert onnx_policy.output_names == ["actions", "predicted_lin_vel"]
     assert onnx_policy.get_dummy_inputs()[0].shape == (1, HISTORY_LENGTH, PROPRIO_DIM)
     assert onnx_policy.get_dummy_inputs()[1].shape == (1, COMMAND_DIM)
+
+
+def test_depth_teacher_student_value_and_velocity_paths_have_expected_shapes() -> None:
+    obs = make_depth_rep_obs()
+    model = make_depth_model(obs)
+
+    teacher_actions = model.act_teacher(obs, stochastic_output=True)
+    student_actions = model(obs)
+    values = model.evaluate_teacher(obs)
+    privileged_latent = model.get_privileged_latent(obs)
+    proprio_latent, predicted_lin_vel = model.get_proprio_outputs(obs)
+
+    assert teacher_actions.shape == (NUM_ENVS, NUM_ACTIONS)
+    assert student_actions.shape == (NUM_ENVS, NUM_ACTIONS)
+    assert values.shape == (NUM_ENVS, 1)
+    assert privileged_latent.shape == (NUM_ENVS, LATENT_DIM)
+    assert proprio_latent.shape == (NUM_ENVS, LATENT_DIM)
+    assert predicted_lin_vel.shape == (NUM_ENVS, LIN_VEL_DIM)
+
+
+def test_depth_student_hidden_state_persists_and_resets_per_environment() -> None:
+    obs = make_depth_rep_obs()
+    model = make_depth_model(obs)
+
+    model(obs)
+    first_state = model.get_hidden_state().clone()
+    model(obs)
+    second_state = model.get_hidden_state().clone()
+    assert not torch.equal(first_state, second_state)
+
+    model.reset(torch.tensor([True, False, False, True]))
+    reset_state = model.get_hidden_state()
+    assert torch.equal(reset_state[[0, 3]], torch.zeros_like(reset_state[[0, 3]]))
+    assert torch.equal(reset_state[[1, 2]], second_state[[1, 2]])
+
+    model.reset()
+    assert model.get_hidden_state() is None
+
+
+def test_depth_student_losses_update_depth_and_student_encoder_side() -> None:
+    obs = make_depth_rep_obs()
+    model = make_depth_model(obs)
+
+    student_loss, representation_loss, lin_vel_loss = model.compute_student_losses(obs)
+    model.zero_grad()
+    student_loss.backward()
+
+    assert torch.allclose(student_loss, representation_loss + lin_vel_loss)
+    assert any(param.grad is not None for param in model.depth_encoder.parameters())
+    assert any(param.grad is not None for param in model.depth_gru.parameters())
+    assert any(param.grad is not None for param in model.proprio_encoder.parameters())
+    assert any(param.grad is not None for param in model.student_latent_head.parameters())
+    assert any(param.grad is not None for param in model.lin_vel_head.parameters())
+    assert all(param.grad is None for param in model.privileged_encoder.parameters())
+
+
+def test_depth_sequence_student_losses_use_continuous_depth_state() -> None:
+    model = make_depth_model()
+    time_steps = 3
+    step_observations = [make_depth_rep_obs() for _ in range(time_steps)]
+    obs = TensorDict(
+        {
+            key: torch.stack([step_obs[key] for step_obs in step_observations])
+            for key in step_observations[0].keys()
+        },
+        batch_size=[time_steps, NUM_ENVS],
+    )
+    dones = torch.zeros(time_steps, NUM_ENVS, 1)
+    dones[1, 0] = 1.0
+    hidden_state = torch.zeros(NUM_ENVS, model.depth_gru_hidden_dim)
+
+    model.zero_grad()
+    student_loss, representation_loss, lin_vel_loss = model.compute_student_losses_sequence(
+        obs,
+        dones,
+        hidden_state,
+    )
+    student_loss.backward()
+
+    assert torch.allclose(student_loss, representation_loss + lin_vel_loss)
+    assert any(param.grad is not None for param in model.depth_gru.parameters())
+    assert all(param.grad is None for param in model.actor_head.parameters())
+    assert all(param.grad is None for param in model.critic_head.parameters())
+    assert all(param.grad is None for param in model.privileged_encoder.parameters())
+
+
+def test_depth_student_inference_requires_depth_observations() -> None:
+    model = make_depth_model()
+    inference_obs = make_depth_rep_obs(include_privileged=False, include_depth=False)
+
+    try:
+        model(inference_obs)
+    except ValueError as exc:
+        assert "depth observation group" in str(exc)
+    else:
+        raise AssertionError("student inference without depth should fail")
+
+
+def test_depth_onnx_wrapper_matches_policy_outputs() -> None:
+    model = make_depth_model()
+    model.eval()
+    obs = make_depth_rep_obs()
+    hidden_state = torch.zeros(NUM_ENVS, model.depth_gru_hidden_dim)
+    onnx_model = model.as_onnx(verbose=False)
+    onnx_model.eval()
+
+    with torch.inference_mode():
+        expected_actions = model(obs, hidden_state=hidden_state)
+        expected_predicted_lin_vel = model.get_proprio_outputs(obs, hidden_state=hidden_state)[1]
+        actions, predicted_lin_vel, hidden_state_out = onnx_model(
+            obs["proprio_history"],
+            obs["actor_command"],
+            obs["depth_camera"],
+            hidden_state,
+        )
+
+    assert torch.allclose(actions, expected_actions, atol=1e-6)
+    assert torch.allclose(predicted_lin_vel, expected_predicted_lin_vel, atol=1e-6)
+    assert hidden_state_out.shape == hidden_state.shape
+    assert onnx_model.input_names == ["proprio_history", "actor_command", "depth", "hidden_state_in"]
+    assert onnx_model.output_names == ["actions", "predicted_lin_vel", "hidden_state_out"]
+    assert onnx_model.get_dummy_inputs()[2].shape == (1, *DEPTH_SHAPE)
+
+
+def test_depth_jit_wrapper_scripts_and_runs_single_robot_policy() -> None:
+    model = make_depth_model()
+    obs = make_depth_rep_obs()
+
+    jit_model = torch.jit.script(model.as_jit())
+    actions, predicted_lin_vel = jit_model(
+        obs["proprio_history"][:1],
+        obs["actor_command"][:1],
+        obs["depth_camera"][:1],
+    )
+
+    assert actions.shape == (1, NUM_ACTIONS)
+    assert predicted_lin_vel.shape == (1, LIN_VEL_DIM)

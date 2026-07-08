@@ -15,7 +15,7 @@ from tensordict import TensorDict
 import pytest
 
 from rsl_rl.algorithms import RepresentationVelocityTeacherStudentPPO
-from rsl_rl.models import RepresentationVelocityActorCritic
+from rsl_rl.models import DepthRepresentationVelocityActorCritic, RepresentationVelocityActorCritic
 from rsl_rl.storage import RolloutStorage
 
 NUM_ENVS = 4
@@ -27,6 +27,7 @@ CRITIC_DIM = 16
 PRIVILEGED_DIM = 11
 HISTORY_LENGTH = 5
 NUM_ACTIONS = 2
+DEPTH_SHAPE = (1, 32, 24)
 
 
 def make_rep_obs() -> TensorDict:
@@ -40,6 +41,12 @@ def make_rep_obs() -> TensorDict:
         },
         batch_size=[NUM_ENVS],
     )
+
+
+def make_depth_rep_obs() -> TensorDict:
+    obs = make_rep_obs()
+    obs["depth_camera"] = torch.randn(NUM_ENVS, *DEPTH_SHAPE)
+    return obs
 
 
 def make_model(obs: TensorDict) -> RepresentationVelocityActorCritic:
@@ -56,6 +63,28 @@ def make_model(obs: TensorDict) -> RepresentationVelocityActorCritic:
         hidden_dims=[16, 16],
         encoder_hidden_dims=[16],
         latent_dim=4,
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+
+def make_depth_model(obs: TensorDict) -> DepthRepresentationVelocityActorCritic:
+    return DepthRepresentationVelocityActorCritic(
+        obs,
+        {
+            "proprio_history": ["proprio_history"],
+            "actor_command": ["actor_command"],
+            "lin_vel_target": ["lin_vel_target"],
+            "critic": ["critic"],
+            "privileged_encoder": ["privileged_encoder"],
+            "depth_encoder": ["depth_camera"],
+        },
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        encoder_hidden_dims=[16],
+        latent_dim=4,
+        depth_feature_dim=8,
+        depth_gru_hidden_dim=8,
+        depth_channels=(4, 4),
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
     )
 
@@ -78,10 +107,31 @@ def build_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, TensorDi
     return alg, obs
 
 
+def build_depth_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, TensorDict]:
+    torch.manual_seed(12)
+    obs = make_depth_rep_obs()
+    model = make_depth_model(obs)
+    storage = RolloutStorage("rl", NUM_ENVS, NUM_STEPS, obs, [NUM_ACTIONS])
+    alg = RepresentationVelocityTeacherStudentPPO(
+        model,
+        storage,
+        num_learning_epochs=1,
+        num_mini_batches=2,
+        learning_rate=1.0e-3,
+        student_learning_rate=1.0e-3,
+        schedule="fixed",
+        desired_kl=0.01,
+        num_representation_epochs=1,
+        num_representation_mini_batches=2,
+        representation_chunk_length=2,
+    )
+    return alg, obs
+
+
 def fill_rollout(alg: RepresentationVelocityTeacherStudentPPO, obs: TensorDict) -> TensorDict:
     for _ in range(NUM_STEPS):
         alg.act(obs)
-        next_obs = make_rep_obs()
+        next_obs = make_depth_rep_obs() if "depth_camera" in obs else make_rep_obs()
         rewards = torch.randn(NUM_ENVS)
         dones = torch.zeros(NUM_ENVS)
         alg.process_env_step(next_obs, rewards, dones, {})
@@ -139,6 +189,31 @@ def test_student_update_runs_after_all_ppo_minibatches() -> None:
     alg.update()
 
     assert calls == {"ppo": expected_ppo_calls, "student": expected_ppo_calls}
+
+
+def test_depth_student_update_uses_sequence_chunks() -> None:
+    alg, obs = build_depth_algorithm()
+    fill_rollout(alg, obs)
+    calls = {"flat": 0, "sequence": 0}
+    original_compute_student_losses = alg.actor.compute_student_losses
+    original_compute_student_losses_sequence = alg.actor.compute_student_losses_sequence
+
+    def counted_compute_student_losses(*args, **kwargs):
+        calls["flat"] += 1
+        return original_compute_student_losses(*args, **kwargs)
+
+    def counted_compute_student_losses_sequence(*args, **kwargs):
+        calls["sequence"] += 1
+        return original_compute_student_losses_sequence(*args, **kwargs)
+
+    alg.actor.compute_student_losses = counted_compute_student_losses  # type: ignore[method-assign]
+    alg.actor.compute_student_losses_sequence = counted_compute_student_losses_sequence  # type: ignore[method-assign]
+
+    losses = alg.update()
+
+    assert {"student", "representation", "lin_vel"} <= set(losses)
+    assert calls["flat"] == 0
+    assert calls["sequence"] > 0
 
 
 def test_student_loss_detaches_privileged_encoder_target() -> None:

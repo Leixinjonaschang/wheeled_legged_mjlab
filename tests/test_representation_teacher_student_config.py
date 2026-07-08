@@ -20,7 +20,9 @@ from wheeled_legged_mjlab.tasks.velocity import mdp
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     DEPTH_BUFFER_SIZE,
     DEPTH_BUFFER_UPDATE_PERIOD,
+    DEPTH_CAPTURE_FREQUENCY_HZ,
     DEPTH_CAMERA_NAME,
+    wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg,
     wf_tron1b_rough_rep_ts_lin_vel_env_cfg,
     wf_tron1b_rough_env_cfg,
 )
@@ -161,6 +163,33 @@ def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
     assert DEPTH_CAMERA_NAME not in training_obs_groups
 
 
+def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
+    tasks = set(list_tasks())
+
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth" in tasks
+
+    cfg = wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg()
+    agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth"))
+    depth_group = cfg.observations[DEPTH_CAMERA_NAME]
+    depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
+
+    assert depth_term.func is mdp.async_depth_buffer
+    assert depth_term.params == {
+        "sensor_name": DEPTH_CAMERA_NAME,
+        "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
+    }
+    assert agent["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
+    assert agent["algorithm"]["representation_chunk_length"] == 12
+    assert agent["obs_groups"] == {
+        "proprio_history": ("proprio_history",),
+        "actor_command": ("actor_command",),
+        "lin_vel_target": ("lin_vel_target",),
+        "critic": ("critic",),
+        "privileged_encoder": ("privileged_encoder",),
+        "depth_encoder": (DEPTH_CAMERA_NAME,),
+    }
+
+
 def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:
     env = SimpleNamespace(common_step_counter=0, frame=torch.ones(2, 2, 3))
     term = observation_mdp.depth_buffer(cfg=None, env=env)
@@ -200,6 +229,47 @@ def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:
     obs = term(env, buffer_size=5, update_period=5)
     assert torch.all(obs[0, :4] == 1.0)
     assert torch.all(obs[0, 4] == 2.0)
+    assert torch.all(obs[1] == 4.0)
+    assert depth_calls == 3
+
+
+def test_async_depth_buffer_updates_on_capture_clock(monkeypatch) -> None:
+    env = SimpleNamespace(common_step_counter=0, step_dt=0.02, frame=torch.ones(2, 2, 3))
+    term = observation_mdp.async_depth_buffer(cfg=None, env=env)
+    depth_calls = 0
+
+    def get_depth(env, sensor_name):
+        nonlocal depth_calls
+        depth_calls += 1
+        return env.frame
+
+    monkeypatch.setattr(
+        observation_mdp,
+        "depth_image",
+        get_depth,
+    )
+
+    obs = term(env, capture_frequency_hz=25.0)
+    assert obs.shape == (2, 1, 2, 3)
+    assert torch.all(obs == 1.0)
+    assert depth_calls == 1
+
+    env.common_step_counter = 1
+    env.frame = torch.full((2, 2, 3), 2.0)
+    obs = term(env, capture_frequency_hz=25.0)
+    assert torch.all(obs == 1.0)
+    assert depth_calls == 1
+
+    env.common_step_counter = 2
+    obs = term(env, capture_frequency_hz=25.0)
+    assert torch.all(obs == 2.0)
+    assert depth_calls == 2
+
+    env.common_step_counter = 3
+    env.frame = torch.stack((torch.full((2, 3), 3.0), torch.full((2, 3), 4.0)))
+    term.reset(torch.tensor([1]))
+    obs = term(env, capture_frequency_hz=25.0)
+    assert torch.all(obs[0] == 2.0)
     assert torch.all(obs[1] == 4.0)
     assert depth_calls == 3
 

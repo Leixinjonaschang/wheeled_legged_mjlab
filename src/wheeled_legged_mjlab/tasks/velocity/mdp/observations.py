@@ -156,6 +156,93 @@ class DepthBuffer:
 depth_buffer = DepthBuffer
 
 
+class AsyncDepthBuffer:
+  """Latest depth frame captured on a clock independent of the policy rate."""
+
+  def __init__(self, cfg, env: ManagerBasedRlEnv) -> None:
+    del cfg, env
+    self._latest_frame: torch.Tensor | None = None
+    self._next_capture_time_s: float | None = None
+    self._invalid_env_ids: torch.Tensor | None = None
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str = "depth_camera",
+    capture_frequency_hz: float = 25.0,
+  ) -> torch.Tensor:
+    if capture_frequency_hz <= 0.0:
+      raise ValueError(
+        f"capture_frequency_hz must be positive, got {capture_frequency_hz}"
+      )
+    step_dt = float(env.step_dt)
+    if step_dt <= 0.0:
+      raise ValueError(f"env.step_dt must be positive, got {step_dt}")
+
+    current_time_s = int(getattr(env, "common_step_counter", 0)) * step_dt
+    capture_period_s = 1.0 / capture_frequency_hz
+    needs_init = self._latest_frame is None
+    capture_due = (
+      self._next_capture_time_s is None
+      or current_time_s + 1.0e-9 >= self._next_capture_time_s
+    )
+    needs_reset_fill = self._invalid_env_ids is not None
+
+    if not (needs_init or capture_due or needs_reset_fill):
+      assert self._latest_frame is not None
+      return self._latest_frame
+
+    frame = depth_image(env, sensor_name=sensor_name).unsqueeze(1)
+
+    if needs_init:
+      self._latest_frame = frame.clone()
+      self._next_capture_time_s = current_time_s + capture_period_s
+      self._invalid_env_ids = None
+      return self._latest_frame
+
+    if capture_due:
+      assert self._latest_frame is not None
+      self._latest_frame.copy_(frame)
+      assert self._next_capture_time_s is not None
+      periods_elapsed = max(
+        1,
+        int(
+          (current_time_s - self._next_capture_time_s + 1.0e-9)
+          // capture_period_s
+        )
+        + 1,
+      )
+      self._next_capture_time_s += periods_elapsed * capture_period_s
+      self._invalid_env_ids = None
+    elif needs_reset_fill:
+      assert self._invalid_env_ids is not None
+      env_ids = self._invalid_env_ids.to(device=frame.device, dtype=torch.long)
+      assert self._latest_frame is not None
+      self._latest_frame[env_ids] = frame[env_ids]
+      self._invalid_env_ids = None
+
+    return self._latest_frame
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None or isinstance(env_ids, slice):
+      self._latest_frame = None
+      self._next_capture_time_s = None
+      self._invalid_env_ids = None
+      return
+    if self._latest_frame is None or env_ids.numel() == 0:
+      return
+    env_ids = env_ids.to(device=self._latest_frame.device, dtype=torch.long)
+    if self._invalid_env_ids is None:
+      self._invalid_env_ids = env_ids
+    else:
+      self._invalid_env_ids = torch.unique(
+        torch.cat((self._invalid_env_ids, env_ids))
+      )
+
+
+async_depth_buffer = AsyncDepthBuffer
+
+
 def _resolve_grid_shape(
   num_samples: int,
   grid_shape: tuple[int, int] | None,

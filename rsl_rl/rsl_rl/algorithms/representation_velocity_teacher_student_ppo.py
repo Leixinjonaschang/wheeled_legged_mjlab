@@ -36,6 +36,9 @@ class RepresentationVelocityTeacherStudentPPO:
         learning_rate: float = 0.001,
         student_learning_rate: float = 0.001,
         num_student_substeps: int = 1,
+        num_representation_epochs: int | None = None,
+        num_representation_mini_batches: int | None = None,
+        representation_chunk_length: int = 12,
         representation_loss_coef: float = 1.0,
         lin_vel_loss_coef: float = 1.0,
         max_grad_norm: float = 1.0,
@@ -72,7 +75,10 @@ class RepresentationVelocityTeacherStudentPPO:
 
         optimizer_cls = resolve_optimizer(optimizer)
         self.optimizer = optimizer_cls(self.actor.ppo_parameters(), lr=learning_rate)  # type: ignore
-        self.student_optimizer = optimizer_cls(self.actor.student_parameters(), lr=student_learning_rate)  # type: ignore
+        self.student_optimizer = optimizer_cls(  # type: ignore
+            self.actor.student_parameters(),
+            lr=student_learning_rate,
+        )
 
         self.storage = storage
         self.transition = RolloutStorage.Transition()
@@ -91,6 +97,13 @@ class RepresentationVelocityTeacherStudentPPO:
         self.learning_rate = learning_rate
         self.student_learning_rate = student_learning_rate
         self.num_student_substeps = num_student_substeps
+        self.num_representation_epochs = (
+            num_student_substeps if num_representation_epochs is None else num_representation_epochs
+        )
+        self.num_representation_mini_batches = (
+            num_mini_batches if num_representation_mini_batches is None else num_representation_mini_batches
+        )
+        self.representation_chunk_length = representation_chunk_length
         self.representation_loss_coef = representation_loss_coef
         self.lin_vel_loss_coef = lin_vel_loss_coef
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
@@ -147,9 +160,16 @@ class RepresentationVelocityTeacherStudentPPO:
                 with torch.no_grad():
                     batch.advantages = (batch.advantages - batch.advantages.mean()) / (batch.advantages.std() + 1e-8)
 
-            self.actor.act_teacher(batch.observations, stochastic_output=True)
+            self.actor.act_teacher(
+                batch.observations,
+                hidden_state=batch.hidden_states[0],
+                stochastic_output=True,
+            )
             actions_log_prob = self.actor.get_output_log_prob(batch.actions)
-            values = self.actor.evaluate_teacher(batch.observations)
+            values = self.actor.evaluate_teacher(
+                batch.observations,
+                hidden_state=batch.hidden_states[0],
+            )
             distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
             entropy = self.actor.output_entropy[:original_batch_size]
 
@@ -204,24 +224,52 @@ class RepresentationVelocityTeacherStudentPPO:
         mean_representation_loss = 0.0
         mean_lin_vel_loss = 0.0
         student_updates = 0
-        generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for batch in generator:
-            for _ in range(self.num_student_substeps):
-                _, representation_loss, lin_vel_loss = self.actor.compute_student_losses(batch.observations)
-                student_loss = (
-                    self.representation_loss_coef * representation_loss + self.lin_vel_loss_coef * lin_vel_loss
-                )
-                self.student_optimizer.zero_grad()
-                student_loss.backward()
-                if self.is_multi_gpu:
-                    self.reduce_parameters(self.actor.student_parameters())
-                nn.utils.clip_grad_norm_(self.actor.student_parameters(), self.max_grad_norm)
-                self.student_optimizer.step()
+        if hasattr(self.actor, "compute_student_losses_sequence"):
+            generator = self.storage.representation_chunk_generator(
+                self.num_representation_mini_batches,
+                self.num_representation_epochs,
+                self.representation_chunk_length,
+            )
+            for batch in generator:
+                for _ in range(self.num_student_substeps):
+                    _, representation_loss, lin_vel_loss = self.actor.compute_student_losses_sequence(
+                        batch.observations,
+                        batch.dones,
+                        hidden_state=batch.hidden_states[0],
+                    )
+                    student_loss = (
+                        self.representation_loss_coef * representation_loss + self.lin_vel_loss_coef * lin_vel_loss
+                    )
+                    self.student_optimizer.zero_grad()
+                    student_loss.backward()
+                    if self.is_multi_gpu:
+                        self.reduce_parameters(self.actor.student_parameters())
+                    nn.utils.clip_grad_norm_(self.actor.student_parameters(), self.max_grad_norm)
+                    self.student_optimizer.step()
 
-                mean_student_loss += student_loss.item()
-                mean_representation_loss += representation_loss.item()
-                mean_lin_vel_loss += lin_vel_loss.item()
-                student_updates += 1
+                    mean_student_loss += student_loss.item()
+                    mean_representation_loss += representation_loss.item()
+                    mean_lin_vel_loss += lin_vel_loss.item()
+                    student_updates += 1
+        else:
+            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+            for batch in generator:
+                for _ in range(self.num_student_substeps):
+                    _, representation_loss, lin_vel_loss = self.actor.compute_student_losses(batch.observations)
+                    student_loss = (
+                        self.representation_loss_coef * representation_loss + self.lin_vel_loss_coef * lin_vel_loss
+                    )
+                    self.student_optimizer.zero_grad()
+                    student_loss.backward()
+                    if self.is_multi_gpu:
+                        self.reduce_parameters(self.actor.student_parameters())
+                    nn.utils.clip_grad_norm_(self.actor.student_parameters(), self.max_grad_norm)
+                    self.student_optimizer.step()
+
+                    mean_student_loss += student_loss.item()
+                    mean_representation_loss += representation_loss.item()
+                    mean_lin_vel_loss += lin_vel_loss.item()
+                    student_updates += 1
 
         num_ppo_updates = self.num_learning_epochs * self.num_mini_batches
         loss_dict = {
@@ -277,7 +325,9 @@ class RepresentationVelocityTeacherStudentPPO:
         alg_class: type[RepresentationVelocityTeacherStudentPPO] = resolve_callable(  # type: ignore
             cfg["algorithm"].pop("class_name")
         )
-        model_class: type[RepresentationVelocityActorCritic] = resolve_callable(cfg["actor"].pop("class_name"))  # type: ignore
+        model_class: type[RepresentationVelocityActorCritic] = resolve_callable(  # type: ignore
+            cfg["actor"].pop("class_name")
+        )
 
         default_sets = ["proprio_history", "actor_command", "lin_vel_target", "critic", "privileged_encoder"]
         cfg["obs_groups"] = resolve_obs_groups(obs, cfg["obs_groups"], default_sets)

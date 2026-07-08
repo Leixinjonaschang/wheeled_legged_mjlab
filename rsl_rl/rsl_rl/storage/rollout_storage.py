@@ -235,6 +235,8 @@ class RolloutStorage:
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
         old_distribution_params = tuple(p.flatten(0, 1) for p in self.distribution_params)  # type: ignore
+        saved_hidden_state_a = self._flatten_saved_hidden_states(self.saved_hidden_state_a)
+        saved_hidden_state_c = self._flatten_saved_hidden_states(self.saved_hidden_state_c)
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -252,6 +254,67 @@ class RolloutStorage:
                     returns=returns[batch_idx],
                     old_actions_log_prob=old_actions_log_prob[batch_idx],
                     old_distribution_params=tuple(p[batch_idx] for p in old_distribution_params),
+                    hidden_states=(
+                        self._select_hidden_states(saved_hidden_state_a, batch_idx),
+                        self._select_hidden_states(saved_hidden_state_c, batch_idx),
+                    ),
+                )
+
+    def representation_chunk_generator(
+        self,
+        num_mini_batches: int,
+        num_epochs: int,
+        chunk_length: int,
+    ) -> Generator[Batch, None, None]:
+        """Yield continuous trajectory chunks for representation learning."""
+        if self.training_type != "rl":
+            raise ValueError("This function is only available for reinforcement learning training.")
+        if chunk_length <= 0:
+            raise ValueError(f"chunk_length must be positive, got {chunk_length}")
+
+        chunk_length = min(chunk_length, self.num_transitions_per_env)
+        chunk_starts = torch.arange(
+            0,
+            self.num_transitions_per_env - chunk_length + 1,
+            chunk_length,
+            device=self.device,
+        )
+        env_ids = torch.arange(self.num_envs, device=self.device)
+        chunk_envs = env_ids.repeat_interleave(chunk_starts.numel())
+        chunk_times = chunk_starts.repeat(env_ids.numel())
+        num_chunks = chunk_envs.numel()
+        effective_num_mini_batches = min(num_mini_batches, num_chunks)
+
+        for _ in range(num_epochs):
+            permutation = torch.randperm(num_chunks, device=self.device)
+            for chunk_indices in torch.tensor_split(permutation, effective_num_mini_batches):
+                starts = chunk_times[chunk_indices]
+                envs = chunk_envs[chunk_indices]
+                time_indices = starts.unsqueeze(0) + torch.arange(chunk_length, device=self.device).unsqueeze(1)
+                env_indices = envs.unsqueeze(0).expand(chunk_length, -1)
+                observations = TensorDict(
+                    {
+                        key: value[time_indices, env_indices]
+                        for key, value in self.observations.items()
+                    },
+                    batch_size=[chunk_length, chunk_indices.numel()],
+                    device=self.device,
+                )
+                yield RolloutStorage.Batch(
+                    observations=observations,
+                    dones=self.dones[time_indices, env_indices],
+                    hidden_states=(
+                        self._select_chunk_initial_states(
+                            self.saved_hidden_state_a,
+                            starts,
+                            envs,
+                        ),
+                        self._select_chunk_initial_states(
+                            self.saved_hidden_state_c,
+                            starts,
+                            envs,
+                        ),
+                    ),
                 )
 
     # For reinforcement learning with recurrent networks
@@ -352,3 +415,29 @@ class RolloutStorage:
         if hidden_states[1] is not None:
             for i in range(len(hidden_state_c)):
                 self.saved_hidden_state_c[i][self.step].copy_(hidden_state_c[i])  # type: ignore
+
+    @staticmethod
+    def _flatten_saved_hidden_states(saved_hidden_states):
+        if saved_hidden_states is None:
+            return None
+        flattened = tuple(state.flatten(0, 1) for state in saved_hidden_states)
+        return flattened[0] if len(flattened) == 1 else flattened
+
+    @staticmethod
+    def _select_hidden_states(hidden_states: HiddenState, batch_idx: torch.Tensor) -> HiddenState:
+        if hidden_states is None:
+            return None
+        if isinstance(hidden_states, tuple):
+            return tuple(state[batch_idx] for state in hidden_states)
+        return hidden_states[batch_idx]
+
+    @staticmethod
+    def _select_chunk_initial_states(
+        saved_hidden_states,
+        starts: torch.Tensor,
+        envs: torch.Tensor,
+    ) -> HiddenState:
+        if saved_hidden_states is None:
+            return None
+        selected = tuple(state[starts, envs] for state in saved_hidden_states)
+        return selected[0] if len(selected) == 1 else selected
