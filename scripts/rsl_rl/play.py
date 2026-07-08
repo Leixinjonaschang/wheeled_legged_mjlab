@@ -238,7 +238,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       assert log_dir is not None
       runner.export_policy_to_onnx(str(log_dir), "policy.onnx")
       print(f"[INFO]: Exported student policy to {log_dir / 'policy.onnx'}")
-    policy = runner.get_inference_policy(device=device)
+    policy = _select_play_policy(runner.get_inference_policy(device=device), cfg.policy_role)
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
   ckpt_manager: CheckpointManager | None = None
