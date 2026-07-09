@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
 import torch
 
 from wheeled_legged_mjlab.tasks.velocity.mdp.observations import (
@@ -67,4 +68,55 @@ def draw_roughness_gate_marker(
       radius=marker_radius,
       color=color,
       label="roughness_gate_marker",
+    )
+
+
+def draw_predicted_lin_vel(
+  env: ManagerBasedRlEnv,
+  visualizer: DebugVisualizer,
+  *,
+  asset_name: str = "robot",
+  z_offset: float = 0.42,
+  scale: float = 0.5,
+) -> None:
+  """Draw the representation policy's predicted base linear velocity."""
+  predicted_lin_vel_b = getattr(env, "predicted_lin_vel_b", None)
+  if predicted_lin_vel_b is None or asset_name not in env.scene.entities:
+    return
+
+  env_indices = list(visualizer.get_env_indices(env.num_envs))
+  if not env_indices:
+    return
+
+  predicted_lin_vel_b = predicted_lin_vel_b.detach()
+  if predicted_lin_vel_b.ndim != 2 or predicted_lin_vel_b.shape[1] < 2:
+    return
+
+  asset = env.scene[asset_name]
+  headings = asset.data.heading_w
+  cos_h = torch.cos(headings)
+  sin_h = torch.sin(headings)
+
+  pred_x_b = predicted_lin_vel_b[:, 0]
+  pred_y_b = predicted_lin_vel_b[:, 1]
+  pred_x_w = cos_h * pred_x_b - sin_h * pred_y_b
+  pred_y_w = sin_h * pred_x_b + cos_h * pred_y_b
+
+  base_pos_ws = asset.data.root_link_pos_w.detach().cpu().numpy()
+  pred_lin_vel_ws = torch.stack((pred_x_w, pred_y_w), dim=1).cpu().numpy()
+
+  for env_id in env_indices:
+    base_pos_w = base_pos_ws[env_id]
+    if np.linalg.norm(base_pos_w) < 1.0e-6:
+      continue
+
+    origin = base_pos_w + np.array([0.0, 0.0, z_offset])
+    target = origin + np.array(
+      [pred_lin_vel_ws[env_id, 0], pred_lin_vel_ws[env_id, 1], 0.0]
+    ) * scale
+    visualizer.add_arrow(
+      origin,
+      target,
+      color=(1.0, 0.45, 0.0, 0.85),
+      width=0.018,
     )

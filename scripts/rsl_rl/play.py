@@ -6,7 +6,7 @@ import time as _time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 import tyro
@@ -81,6 +81,47 @@ def _select_play_policy(policy, policy_role: Literal["student", "teacher"]):
       return None
 
   return TeacherPolicy(policy)
+
+
+class _PredictedLinVelPolicy:
+  def __init__(self, policy, env):
+    self.policy = policy
+    self.env = env
+
+  def __getattr__(self, name: str):
+    return getattr(self.policy, name)
+
+  def __call__(self, obs) -> torch.Tensor:
+    predictor = self._get_predictor()
+    if predictor is not None:
+      with torch.no_grad():
+        self.env.predicted_lin_vel_b = predictor(obs).detach()
+    return self.policy(obs)
+
+  def _get_predictor(self) -> Any | None:
+    if hasattr(self.policy, "get_predicted_lin_vel"):
+      return self.policy.get_predicted_lin_vel
+    model = getattr(self.policy, "model", None)
+    if hasattr(model, "get_predicted_lin_vel"):
+      return model.get_predicted_lin_vel
+    return None
+
+  def reset(self, *args, **kwargs):
+    if hasattr(self.policy, "reset"):
+      return self.policy.reset(*args, **kwargs)
+    return None
+
+
+def _wrap_predicted_lin_vel_policy(policy, env):
+  predictor = getattr(policy, "get_predicted_lin_vel", None)
+  model_predictor = getattr(
+    getattr(policy, "model", None), "get_predicted_lin_vel", None
+  )
+  if predictor is None and model_predictor is None:
+    if hasattr(env, "predicted_lin_vel_b"):
+      delattr(env, "predicted_lin_vel_b")
+    return policy
+  return _PredictedLinVelPolicy(policy, env)
 
 
 def run_play(task_id: str, cfg: PlayConfig):
@@ -238,7 +279,10 @@ def run_play(task_id: str, cfg: PlayConfig):
       assert log_dir is not None
       runner.export_policy_to_onnx(str(log_dir), "policy.onnx")
       print(f"[INFO]: Exported student policy to {log_dir / 'policy.onnx'}")
-    policy = _select_play_policy(runner.get_inference_policy(device=device), cfg.policy_role)
+    policy = _select_play_policy(
+      runner.get_inference_policy(device=device), cfg.policy_role
+    )
+  policy = _wrap_predicted_lin_vel_policy(policy, env.unwrapped)
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
   ckpt_manager: CheckpointManager | None = None
@@ -275,7 +319,9 @@ def run_play(task_id: str, cfg: PlayConfig):
       ckpt_manager = CheckpointManager(
         current_name=resume_path.name,
         fetch_available=fetch_available_local,
-        load_checkpoint=lambda name: _reload_policy(str(ckpt_dir / name)),
+        load_checkpoint=lambda name: _wrap_predicted_lin_vel_policy(
+          _reload_policy(str(ckpt_dir / name)), env.unwrapped
+        ),
       )
     else:
       import wandb
@@ -306,8 +352,11 @@ def run_play(task_id: str, cfg: PlayConfig):
       ckpt_manager = CheckpointManager(
         current_name=resume_path.name,
         fetch_available=fetch_available_wandb,
-        load_checkpoint=lambda name: _reload_policy(
-          str(get_wandb_checkpoint_path(_log_root, Path(run_path), name)[0])
+        load_checkpoint=lambda name: _wrap_predicted_lin_vel_policy(
+          _reload_policy(
+            str(get_wandb_checkpoint_path(_log_root, Path(run_path), name)[0])
+          ),
+          env.unwrapped,
         ),
         run_name=_parse_wandb_dt(wandb_run.created_at).strftime("%Y-%m-%d_%H-%M-%S"),
         run_url=wandb_run.url,
