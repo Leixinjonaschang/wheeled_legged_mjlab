@@ -18,7 +18,7 @@ class RslRlRepresentationModelCfg(RslRlModelCfg):
     """Config for representation-level teacher-student actor-critic."""
 
     encoder_hidden_dims: Tuple[int, ...] = (512, 256, 128)
-    latent_dim: int = 32
+    latent_dim: int = 64
     normalize_latent: bool = True
     class_name: str = "RepresentationActorCritic"
 
@@ -37,7 +37,7 @@ class RslRlRepresentationVelocityModelCfg(RslRlModelCfg):
     """Config for velocity representation teacher-student actor-critic."""
 
     encoder_hidden_dims: Tuple[int, ...] = (512, 256, 128)
-    latent_dim: int = 32
+    latent_dim: int = 64
     normalize_latent: bool = True
     class_name: str = "RepresentationVelocityActorCritic"
 
@@ -115,7 +115,7 @@ def wf_tron1b_rep_ts_lin_vel_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             encoder_hidden_dims=(512, 256, 128),
             activation="elu",
             obs_normalization=True,
-            latent_dim=32,
+            latent_dim=64,
             normalize_latent=True,
             distribution_cfg={
                 "class_name": "GaussianDistribution",
@@ -148,7 +148,7 @@ def wf_tron1b_rep_ts_lin_vel_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             "critic": ("critic",),
             "privileged_encoder": ("privileged_encoder",),
         },
-        experiment_name="wf_tron1b_velocity_rep_ts_lin_vel",
+        experiment_name="wf_tron1b_velocity_rep_ts_lin_vel_latent64",
         save_interval=200,
         num_steps_per_env=24,
         max_iterations=30_000,
@@ -165,7 +165,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             encoder_hidden_dims=(512, 256, 128),
             activation="elu",
             obs_normalization=True,
-            latent_dim=32,
+            latent_dim=64,
             normalize_latent=True,
             depth_feature_dim=64,
             depth_gru_hidden_dim=64,
@@ -205,7 +205,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             "privileged_encoder": ("privileged_encoder",),
             "depth_encoder": ("depth_camera",),
         },
-        experiment_name="wf_tron1b_velocity_rep_ts_lin_vel_depth",
+        experiment_name="wf_tron1b_velocity_rep_ts_lin_vel_depth_latent64",
         save_interval=200,
         num_steps_per_env=24,
         max_iterations=30_000,
@@ -222,7 +222,7 @@ def wf_tron1b_rep_ts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             encoder_hidden_dims=(512, 256, 128),
             activation="elu",
             obs_normalization=True,
-            latent_dim=32,
+            latent_dim=64,
             normalize_latent=True,
             distribution_cfg={
                 "class_name": "GaussianDistribution",
@@ -252,7 +252,7 @@ def wf_tron1b_rep_ts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
             "student_history": ("actor_history",),
             "privileged_encoder": ("critic",),
         },
-        experiment_name="wf_tron1b_velocity_rep_ts",
+        experiment_name="wf_tron1b_velocity_rep_ts_latent64",
         save_interval=200,
         num_steps_per_env=24,
         max_iterations=30_000,
