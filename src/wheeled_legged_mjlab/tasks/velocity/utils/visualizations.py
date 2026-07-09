@@ -76,7 +76,7 @@ def draw_predicted_lin_vel(
   visualizer: DebugVisualizer,
   *,
   asset_name: str = "robot",
-  z_offset: float = 0.42,
+  z_offset: float = 0.1,
   scale: float = 0.5,
 ) -> None:
   """Draw the representation policy's predicted base linear velocity."""
