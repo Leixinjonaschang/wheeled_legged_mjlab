@@ -141,7 +141,7 @@ def test_representation_velocity_observation_groups() -> None:
     assert "base_lin_vel" in critic_terms
     assert "command" in critic_terms
     assert "base_lin_vel" not in privileged_terms
-    assert "command" not in privileged_terms
+    assert "command" in privileged_terms
     assert "height_scan" in critic_terms
     assert "height_scan" in privileged_terms
 
@@ -407,7 +407,7 @@ def _make_velocity_representation_policy() -> RepresentationVelocityActorCritic:
             "actor_command": ["actor_command"],
             "lin_vel_target": ["lin_vel_target"],
             "critic": ["critic"],
-            "privileged_encoder": ["privileged_encoder"],
+            "privileged_encoder": ["privileged_encoder", "actor_command"],
         },
         output_dim=2,
         hidden_dims=[8],

@@ -69,7 +69,8 @@ class RepresentationVelocityActorCritic(nn.Module):
         if self.lin_vel_dim != 3:
             raise ValueError(f"lin_vel_target must have dimension 3, got {self.lin_vel_dim}.")
 
-        self.proprio_encoder_obs_dim = self.proprio_history_length * self.current_proprio_dim
+        self.proprio_history_obs_dim = self.proprio_history_length * self.current_proprio_dim
+        self.proprio_encoder_obs_dim = self.proprio_history_obs_dim + self.command_dim
         self.actor_obs_dim = self.lin_vel_dim + self.current_proprio_dim + self.command_dim
         self.obs_groups = self.proprio_history_obs_groups
         self.obs_dim = self.proprio_encoder_obs_dim
@@ -78,7 +79,7 @@ class RepresentationVelocityActorCritic(nn.Module):
 
         self.obs_normalization = obs_normalization
         if obs_normalization:
-            self.proprio_history_obs_normalizer = EmpiricalNormalization(self.proprio_encoder_obs_dim)
+            self.proprio_history_obs_normalizer = EmpiricalNormalization(self.proprio_history_obs_dim)
             self.current_proprio_obs_normalizer = EmpiricalNormalization(self.current_proprio_dim)
             self.command_obs_normalizer = EmpiricalNormalization(self.command_dim)
             self.lin_vel_normalizer = EmpiricalNormalization(self.lin_vel_dim)
@@ -214,7 +215,8 @@ class RepresentationVelocityActorCritic(nn.Module):
 
     def get_proprio_obs(self, obs: TensorDict) -> torch.Tensor:
         proprio_history = self._cat_obs(obs, self.proprio_history_obs_groups)
-        return self.proprio_history_obs_normalizer(proprio_history.flatten(start_dim=1))
+        proprio_obs = self.proprio_history_obs_normalizer(proprio_history.flatten(start_dim=1))
+        return torch.cat((proprio_obs, self.command_obs_normalizer(self.get_command(obs))), dim=-1)
 
     def get_privileged_obs(self, obs: TensorDict) -> torch.Tensor:
         return self.privileged_obs_normalizer(self._cat_obs(obs, self.privileged_encoder_obs_groups))
@@ -364,7 +366,8 @@ class _TorchRepresentationVelocityActorCritic(nn.Module):
 
     def forward(self, proprio_history: torch.Tensor, actor_command: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         proprio_obs = self.proprio_history_obs_normalizer(proprio_history.flatten(start_dim=1))
-        features = self.proprio_encoder(proprio_obs)
+        student_obs = torch.cat((proprio_obs, self.command_obs_normalizer(actor_command)), dim=-1)
+        features = self.proprio_encoder(student_obs)
         latent = self.student_latent_head(features)
         predicted_lin_vel = self.lin_vel_head(features)
         if self.normalize_latent:
@@ -412,7 +415,8 @@ class _OnnxRepresentationVelocityActorCritic(nn.Module):
 
     def forward(self, proprio_history: torch.Tensor, actor_command: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         proprio_obs = self.proprio_history_obs_normalizer(proprio_history.flatten(start_dim=1))
-        features = self.proprio_encoder(proprio_obs)
+        student_obs = torch.cat((proprio_obs, self.command_obs_normalizer(actor_command)), dim=-1)
+        features = self.proprio_encoder(student_obs)
         latent = self.student_latent_head(features)
         predicted_lin_vel = self.lin_vel_head(features)
         if self.normalize_latent:

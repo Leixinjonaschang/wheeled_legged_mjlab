@@ -344,7 +344,6 @@ def make_observations(
     if lin_vel_representation:
         privileged_encoder_terms = deepcopy(critic_terms)
         privileged_encoder_terms.pop("base_lin_vel", None)
-        privileged_encoder_terms.pop("command", None)
         observations = {
             "proprio_history": ObservationGroupCfg(
                 terms=dict(proprio_terms),
