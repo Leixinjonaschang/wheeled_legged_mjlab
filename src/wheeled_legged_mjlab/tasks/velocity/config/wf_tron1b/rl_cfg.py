@@ -161,7 +161,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
     """Create velocity representation teacher-student runner configuration with depth."""
     return WFTRON1BRslRlOnPolicyRunnerCfg(
         actor=RslRlDepthRepresentationVelocityModelCfg(
-            hidden_dims=(512, 256, 128),
+            hidden_dims=(512, 256, 256, 128),
             encoder_hidden_dims=(512, 256, 128),
             activation="elu",
             obs_normalization=True,
