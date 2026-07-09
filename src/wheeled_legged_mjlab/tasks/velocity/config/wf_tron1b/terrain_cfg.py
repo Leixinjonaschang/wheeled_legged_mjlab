@@ -43,7 +43,7 @@ TERRAINS_CFG = TerrainGeneratorCfg(
             vertical_scale=0.005,
         ),
         "pyramid_stair_inv": BoxInvertedPyramidStairsTerrainCfg(
-            proportion=0.1,
+            proportion=0.2,
             step_height_range=(0.01, 0.12),
             step_width=0.3,
             border_width =0.5,
@@ -63,7 +63,7 @@ TERRAINS_CFG = TerrainGeneratorCfg(
         #     platform_width=2.0,
         # ),
         "flat": BoxFlatTerrainCfg(
-            proportion=0.4,
+            proportion=0.3,
         ),
     }
 )
