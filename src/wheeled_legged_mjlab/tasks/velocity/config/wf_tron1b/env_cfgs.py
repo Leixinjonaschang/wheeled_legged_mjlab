@@ -255,7 +255,7 @@ def make_observations(
                     joint_names=WHEEL_JOINT_NAMES,
                 )
             },
-            noise=Unoise(n_min=-0.5, n_max=0.5),
+            noise=Unoise(n_min=-0.2, n_max=0.2),
             scale=0.5,
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
