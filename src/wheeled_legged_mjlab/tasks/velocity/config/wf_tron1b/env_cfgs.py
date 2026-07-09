@@ -626,7 +626,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "track_heading": RewardTermCfg(
             func=mdp.track_heading,
-            weight=1.0,
+            weight=0.5,
             params={
                 "command_name": COMMAND_NAME,
                 "std": math.sqrt(0.20),
@@ -778,7 +778,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
-                    weight=-1.0e-2,
+                    weight=-2.0e-2,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_joint_cfg,
