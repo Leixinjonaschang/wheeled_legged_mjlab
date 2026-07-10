@@ -13,6 +13,12 @@ if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
 
 _DEFAULT_SCENE_CFG = SceneEntityCfg("robot")
+_TERRAIN_COLUMN_ALIAS_SEPARATOR = "__"
+
+
+def _logical_terrain_name(name: str) -> str:
+  """Map a repeated terrain-column name back to its logical terrain type."""
+  return name.split(_TERRAIN_COLUMN_ALIAS_SEPARATOR, maxsplit=1)[0]
 
 
 class VelocityStage(TypedDict):
@@ -64,16 +70,23 @@ def terrain_levels_vel(
     "max": torch.max(levels),
   }
 
-  # In curriculum mode num_cols == num_terrains (one column per type),
-  # so the column index directly maps to the sub-terrain name.
+  # In curriculum mode num_cols == num_terrains (one column per config entry).
+  # Repeated columns use a ``logical_name__index`` suffix and share metrics.
   sub_terrain_names = list(terrain_generator.sub_terrains.keys())
   terrain_origins = terrain.terrain_origins
   assert terrain_origins is not None
   num_cols = terrain_origins.shape[1]
   if num_cols == len(sub_terrain_names):
     types = terrain.terrain_types
+    type_indices_by_name: dict[str, list[int]] = {}
     for i, name in enumerate(sub_terrain_names):
-      mask = types == i
+      logical_name = _logical_terrain_name(name)
+      type_indices_by_name.setdefault(logical_name, []).append(i)
+
+    for name, type_indices in type_indices_by_name.items():
+      mask = torch.zeros_like(types, dtype=torch.bool)
+      for i in type_indices:
+        mask |= types == i
       if mask.any():
         result[name] = torch.mean(levels[mask])
 

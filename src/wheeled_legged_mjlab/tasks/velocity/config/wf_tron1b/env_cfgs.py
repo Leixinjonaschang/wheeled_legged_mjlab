@@ -995,7 +995,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
         terrain = cfg.scene.terrain
         if terrain is not None and terrain.terrain_generator is not None:
             terrain.terrain_generator.curriculum = True
-            terrain.terrain_generator.num_cols = 5
+            terrain.terrain_generator.num_cols = len(terrain.terrain_generator.sub_terrains)
             terrain.terrain_generator.num_rows = 5
             terrain.terrain_generator.border_width = 10.0
 
