@@ -71,7 +71,7 @@ NON_WHEEL_COLLISION_GEOMS = (
 )
 
 BASE_HEIGHT_TARGET = 0.82
-WHEEL_DISTANCE_RANGE = (0.32, 0.55)
+WHEEL_DISTANCE_RANGE = (0.28, 0.55)
 WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
@@ -697,7 +697,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "wheel_distance": RewardTermCfg(
             func=mdp.wheel_distance,
-            weight=-1.0,
+            weight=-5.0,
             params={
                 "asset_cfg": wheel_body_cfg,
                 "min_distance": WHEEL_DISTANCE_RANGE[0],
