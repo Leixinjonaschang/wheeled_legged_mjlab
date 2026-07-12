@@ -14,8 +14,13 @@ TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=35.0,
     num_rows=50,
-    num_cols=10,
+    num_cols=13,
     sub_terrains={
+        # Alternate flat and non-flat columns so world-y straight-line commands
+        # encounter terrain transitions at a fixed difficulty level.
+        "flat__0": BoxFlatTerrainCfg(
+            proportion=0.3 / 7,
+        ),
         "discrete_obstacles": HfDiscreteObstaclesTerrainCfg(
             proportion=0.2,
             obstacle_width_range=(0.3, 1.5),
@@ -26,6 +31,9 @@ TERRAINS_CFG = TerrainGeneratorCfg(
             horizontal_scale=0.15,
             vertical_scale=0.005,
         ),
+        "flat__1": BoxFlatTerrainCfg(
+            proportion=0.3 / 7,
+        ),
         "random_rough": HfRandomUniformTerrainCfg(
             proportion=0.2,
             noise_range=(0.02, 0.10),
@@ -34,20 +42,41 @@ TERRAINS_CFG = TerrainGeneratorCfg(
             horizontal_scale=0.15,  # Increase resolution spacing to reduce collision points
             vertical_scale=0.005,
         ),
+        "flat__2": BoxFlatTerrainCfg(
+            proportion=0.3 / 7,
+        ),
         "hf_pyramid_slope": HfPyramidSlopedTerrainCfg(
-            proportion=0.2,
+            proportion=0.1,
             slope_range=(0.0, 0.4),
             platform_width=2.0,
             border_width=0.25,
             horizontal_scale=0.15,  # Increase resolution spacing to reduce collision points
             vertical_scale=0.005,
         ),
-        "pyramid_stair_inv": BoxInvertedPyramidStairsTerrainCfg(
+        "flat__3": BoxFlatTerrainCfg(
+            proportion=0.3 / 7,
+        ),
+        "hf_pyramid_slope_inv": HfPyramidSlopedTerrainCfg(
             proportion=0.1,
+            slope_range=(0.0, 0.4),
+            platform_width=2.0,
+            border_width=0.25,
+            horizontal_scale=0.15,  # Increase resolution spacing to reduce collision points
+            vertical_scale=0.005,
+            inverted=True,
+        ),
+        "flat__4": BoxFlatTerrainCfg(
+            proportion=0.3 / 7,
+        ),
+        "pyramid_stair_inv": BoxInvertedPyramidStairsTerrainCfg(
+            proportion=0.2,
             step_height_range=(0.01, 0.12),
             step_width=0.3,
             border_width =0.5,
             platform_width=2.0,
+        ),
+        "flat__5": BoxFlatTerrainCfg(
+            proportion=0.3 / 7,
         ),
         "pyramid_stair": BoxPyramidStairsTerrainCfg(
             proportion=0.1,
@@ -62,8 +91,8 @@ TERRAINS_CFG = TerrainGeneratorCfg(
         #     border_width = 0.5,
         #     platform_width=2.0,
         # ),
-        "flat": BoxFlatTerrainCfg(
-            proportion=0.4,
+        "flat__6": BoxFlatTerrainCfg(
+            proportion=0.3 / 7,
         ),
     }
 )

@@ -79,10 +79,11 @@ WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
 TERRAIN_SCAN_GRID_SHAPE = (11, 11)
 DEPTH_CAMERA_NAME = "depth_camera"
 DEPTH_CAMERA_MUJOCO_NAME = f"{ROBOT_ENTITY}/d435"
-DEPTH_CAMERA_WIDTH = 24
-DEPTH_CAMERA_HEIGHT = 32
+DEPTH_CAMERA_WIDTH = 48
+DEPTH_CAMERA_HEIGHT = 28
 DEPTH_BUFFER_SIZE = 5
 DEPTH_BUFFER_UPDATE_PERIOD = 5
+DEPTH_CAPTURE_FREQUENCY_HZ = 25.0
 ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.0
 ROUGHNESS_GATE_THRESHOLD_FINAL = 0.25
 ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 5_000 * 24
@@ -208,7 +209,11 @@ def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
 
 
 def make_observations(
-    *, rough: bool, depth: bool = False, lin_vel_representation: bool = False
+    *,
+    rough: bool,
+    depth: bool = False,
+    lin_vel_representation: bool = False,
+    async_depth: bool = False,
 ) -> dict[str, ObservationGroupCfg]:
     """Student history uses noisy proprioception; teacher and critic stay clean."""
     actor_terms = {
@@ -250,7 +255,7 @@ def make_observations(
                     joint_names=WHEEL_JOINT_NAMES,
                 )
             },
-            noise=Unoise(n_min=-0.5, n_max=0.5),
+            noise=Unoise(n_min=-0.2, n_max=0.2),
             scale=0.5,
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
@@ -339,7 +344,6 @@ def make_observations(
     if lin_vel_representation:
         privileged_encoder_terms = deepcopy(critic_terms)
         privileged_encoder_terms.pop("base_lin_vel", None)
-        privileged_encoder_terms.pop("command", None)
         observations = {
             "proprio_history": ObservationGroupCfg(
                 terms=dict(proprio_terms),
@@ -389,7 +393,21 @@ def make_observations(
                 enable_corruption=False,
             ),
         }
-    if depth:
+    if depth and async_depth:
+        observations[DEPTH_CAMERA_NAME] = ObservationGroupCfg(
+            terms={
+                DEPTH_CAMERA_NAME: ObservationTermCfg(
+                    func=mdp.async_depth_buffer,
+                    params={
+                        "sensor_name": DEPTH_CAMERA_NAME,
+                        "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
+                    },
+                )
+            },
+            concatenate_terms=True,
+            enable_corruption=False,
+        )
+    elif depth:
         observations[DEPTH_CAMERA_NAME] = ObservationGroupCfg(
             terms={
                 DEPTH_CAMERA_NAME: ObservationTermCfg(
@@ -610,7 +628,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=0.5,
             params={
                 "command_name": COMMAND_NAME,
-                "std": math.sqrt(0.15),
+                "std": math.sqrt(0.20),
                 "command_norm_threshold": 0.05,
             },
         ),
@@ -679,7 +697,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "wheel_distance": RewardTermCfg(
             func=mdp.wheel_distance,
-            weight=-1.0,
+            weight=-5.0,
             params={
                 "asset_cfg": wheel_body_cfg,
                 "min_distance": WHEEL_DISTANCE_RANGE[0],
@@ -759,7 +777,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
-                    weight=-1.0e-2,
+                    weight=-2.0e-2,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_joint_cfg,
@@ -905,11 +923,21 @@ def make_viewer() -> ViewerConfig:
 
 
 def make_env_cfg(
-    *, rough: bool, play: bool = False, depth: bool = False, lin_vel_representation: bool = False
+    *,
+    rough: bool,
+    play: bool = False,
+    depth: bool = False,
+    lin_vel_representation: bool = False,
+    async_depth: bool = False,
 ) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
         scene=make_scene(rough=rough, depth=depth),
-        observations=make_observations(rough=rough, depth=depth, lin_vel_representation=lin_vel_representation),
+        observations=make_observations(
+            rough=rough,
+            depth=depth,
+            lin_vel_representation=lin_vel_representation,
+            async_depth=async_depth,
+        ),
         actions=make_actions(action_delay=not play),
         commands=make_commands(),
         events=make_events(),
@@ -967,7 +995,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
         terrain = cfg.scene.terrain
         if terrain is not None and terrain.terrain_generator is not None:
             terrain.terrain_generator.curriculum = True
-            terrain.terrain_generator.num_cols = 5
+            terrain.terrain_generator.num_cols = len(terrain.terrain_generator.sub_terrains)
             terrain.terrain_generator.num_rows = 5
             terrain.terrain_generator.border_width = 10.0
 
@@ -990,6 +1018,17 @@ def wf_tron1b_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def wf_tron1b_rough_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create WF-TRON1B rough-terrain velocity representation configuration."""
     return make_env_cfg(rough=True, play=play, lin_vel_representation=True)
+
+
+def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+    """Create rough-terrain velocity representation configuration with async depth."""
+    return make_env_cfg(
+        rough=True,
+        play=play,
+        depth=True,
+        lin_vel_representation=True,
+        async_depth=True,
+    )
 
 
 def wf_tron1b_flat_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:

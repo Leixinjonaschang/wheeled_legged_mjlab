@@ -99,17 +99,28 @@ class UniformVelocityCommand(CommandTerm):
       self.is_heading_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_heading_envs
     self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_standing_envs
 
-    # Forward-only envs: positive world-x velocity, zero lateral and angular.
+    # Straight-line envs: +x (50%), +y (25%), or -y (25%) in the world frame.
     self.is_forward_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_forward_envs
     fwd_ids = env_ids[self.is_forward_env[env_ids]]
     if len(fwd_ids) > 0:
-      self.vel_command_w[fwd_ids, 0] = (
+      speed = (
         self.vel_command_w[fwd_ids, 0].abs().clamp(min=0.3)
       )
-      self.vel_command_w[fwd_ids, 1] = 0.0
+      direction = torch.empty(len(fwd_ids), device=self.device).uniform_(0.0, 1.0)
+      positive_x = direction < 0.5
+      positive_y = (direction >= 0.5) & (direction < 0.75)
+
+      self.vel_command_w[fwd_ids, 0] = torch.where(positive_x, speed, 0.0)
+      self.vel_command_w[fwd_ids, 1] = torch.where(
+        positive_y, speed, torch.where(positive_x, 0.0, -speed)
+      )
       self.vel_command_w[fwd_ids, 2] = 0.0
       if self.cfg.heading_command:
-        self.heading_target[fwd_ids] = 0.0
+        self.heading_target[fwd_ids] = torch.where(
+          positive_x,
+          0.0,
+          torch.where(positive_y, np.pi / 2, -np.pi / 2),
+        )
 
     self._update_command()
 
@@ -313,9 +324,8 @@ class UniformVelocityCommandCfg(CommandTermCfg):
   rel_standing_envs: float = 0.0
   rel_heading_envs: float = 1.0
   rel_forward_envs: float = 0.0
-  """Fraction of environments that receive forward-only commands (positive
-  world lin_vel_x, zero lin_vel_y and ang_vel_z). Increases training coverage for
-  straight-line walking, which is important for stair climbing."""
+  """Fraction of environments that receive axis-aligned straight-line commands:
+  +world-x with 50% probability, +world-y with 25%, and -world-y with 25%."""
   init_velocity_prob: float = 0.0
 
   @dataclass
