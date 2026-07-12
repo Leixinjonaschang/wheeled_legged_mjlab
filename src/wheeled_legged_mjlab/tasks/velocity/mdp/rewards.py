@@ -1191,10 +1191,10 @@ def soft_landing(
 
 
 class variable_posture:
-  """Penalize deviation from default pose with speed-dependent tolerance.
+  """Penalize deviation from a reference pose with speed-dependent tolerance.
 
   Uses per-joint standard deviations to control how much each joint can deviate
-  from default pose. Smaller std = stricter (less deviation allowed), larger
+  from the reference pose. Smaller std = stricter (less deviation allowed), larger
   std = more forgiving. The reward is: exp(-mean(error² / std²))
 
   Three speed regimes (based on linear + angular command velocity):
@@ -1208,11 +1208,21 @@ class variable_posture:
 
   def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
     asset: Entity = env.scene[cfg.params["asset_cfg"].name]
-    default_joint_pos = asset.data.default_joint_pos
-    assert default_joint_pos is not None
-    self.default_joint_pos = default_joint_pos
-
     _, joint_names = asset.find_joints(cfg.params["asset_cfg"].joint_names)
+
+    target_joint_pos = cfg.params.get("target_joint_pos")
+    if target_joint_pos is None:
+      default_joint_pos = asset.data.default_joint_pos
+      assert default_joint_pos is not None
+      self.target_joint_pos = default_joint_pos
+    else:
+      _, _, target_joint_pos_values = resolve_matching_names_values(
+        data=target_joint_pos,
+        list_of_strings=joint_names,
+      )
+      self.target_joint_pos = torch.tensor(
+        target_joint_pos_values, device=env.device, dtype=torch.float32
+      ).unsqueeze(0)
 
     _, _, std_standing = resolve_matching_names_values(
       data=cfg.params["std_standing"],
@@ -1242,10 +1252,11 @@ class variable_posture:
     std_running,
     asset_cfg: SceneEntityCfg,
     command_name: str,
+    target_joint_pos: dict[str, float] | None = None,
     walking_threshold: float = 0.5,
     running_threshold: float = 1.5,
   ) -> torch.Tensor:
-    del std_standing, std_walking, std_running  # Unused.
+    del std_standing, std_walking, std_running, target_joint_pos  # Unused.
 
     asset: Entity = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
@@ -1268,7 +1279,10 @@ class variable_posture:
     )
 
     current_joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
-    desired_joint_pos = self.default_joint_pos[:, asset_cfg.joint_ids]
+    if self.target_joint_pos.shape[1] == asset.data.joint_pos.shape[1]:
+      desired_joint_pos = self.target_joint_pos[:, asset_cfg.joint_ids]
+    else:
+      desired_joint_pos = self.target_joint_pos
     error_squared = torch.square(current_joint_pos - desired_joint_pos)
 
     return torch.exp(-torch.mean(error_squared / (std**2), dim=1))

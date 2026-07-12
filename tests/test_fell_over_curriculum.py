@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
+import mujoco
+import numpy as np
 import torch
 
+from wheeled_legged_mjlab.assets.WF_TRON1B.wf_tron1b import (
+    WF_TRON1B_INIT_STATE,
+    WF_TRON1B_XML,
+)
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
+    BASE_HEIGHT_TARGET,
     FELL_OVER_LIMIT_ANGLE_FINAL,
     FELL_OVER_LIMIT_ANGLE_INITIAL,
     FELL_OVER_LIMIT_ANGLE_RAMP_STEPS,
+    POSE_TARGET_JOINT_POS,
+    WHEEL_DISTANCE_RANGE,
+    WHEEL_RADIUS,
     wf_tron1b_flat_env_cfg,
     wf_tron1b_rough_env_cfg,
 )
@@ -20,6 +31,7 @@ from wheeled_legged_mjlab.tasks.velocity.mdp.curriculums import (
     fell_over_limit_angle,
     terrain_levels_vel,
 )
+from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import variable_posture
 
 
 @dataclass
@@ -136,6 +148,139 @@ def test_play_config_uses_all_interleaved_terrain_columns() -> None:
     assert terrain_generator is not None
     assert terrain_generator.num_cols == len(EXPECTED_TERRAIN_COLUMNS)
     assert terrain_generator.num_rows == 5
+
+
+def _resolved_wf_tron1b_joint_positions(
+    model: mujoco.MjModel, joint_pos_expr: dict[str, float]
+) -> dict[str, float]:
+    patterns = [(re.compile(pattern), value) for pattern, value in joint_pos_expr.items()]
+    joint_pos = {}
+    for joint_id in range(model.njnt):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+        if name is None:
+            continue
+        value = 0.0
+        for pattern, candidate in patterns:
+            if pattern.match(name):
+                value = candidate
+                break
+        joint_pos[name] = value
+    return joint_pos
+
+
+def _wf_tron1b_wheel_geometry(joint_pos: dict[str, float]):
+    model = mujoco.MjModel.from_xml_path(str(WF_TRON1B_XML))
+    data = mujoco.MjData(model)
+    data.qpos[:] = model.qpos0
+
+    for joint_name, value in joint_pos.items():
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+        data.qpos[model.jnt_qposadr[joint_id]] = value
+
+    mujoco.mj_forward(model, data)
+
+    base_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base_Link")
+    wheel_ids = [
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "wheel_L_Link"),
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "wheel_R_Link"),
+    ]
+    base_pos = data.xpos[base_id].copy()
+    wheel_pos = torch.tensor(
+        np.array([data.xpos[wheel_id].copy() for wheel_id in wheel_ids])
+    )
+    wheel_pos_b = wheel_pos - torch.tensor(base_pos)
+
+    base_height = float(-wheel_pos_b[:, 2].mean() + WHEEL_RADIUS)
+    wheel_distance = float(
+        torch.linalg.norm(wheel_pos_b[0, :2] - wheel_pos_b[1, :2])
+    )
+    return base_height, wheel_distance, wheel_pos_b
+
+
+def test_wf_tron1b_initial_state_keeps_reset_clearance() -> None:
+    model = mujoco.MjModel.from_xml_path(str(WF_TRON1B_XML))
+    initial_joint_pos = _resolved_wf_tron1b_joint_positions(
+        model, WF_TRON1B_INIT_STATE.joint_pos
+    )
+
+    assert WF_TRON1B_INIT_STATE.joint_pos == {".*": 0.0}
+    assert math.isclose(WF_TRON1B_INIT_STATE.pos[2], 0.8 + 0.166)
+    assert all(value == 0.0 for value in initial_joint_pos.values())
+
+
+def test_wf_tron1b_pose_target_matches_base_height_target() -> None:
+    model = mujoco.MjModel.from_xml_path(str(WF_TRON1B_XML))
+    pose_target_joint_pos = _resolved_wf_tron1b_joint_positions(
+        model, POSE_TARGET_JOINT_POS
+    )
+    pose_target_height, wheel_distance, wheel_pos_b = _wf_tron1b_wheel_geometry(
+        pose_target_joint_pos
+    )
+    initial_height, _, _ = _wf_tron1b_wheel_geometry(
+        _resolved_wf_tron1b_joint_positions(model, WF_TRON1B_INIT_STATE.joint_pos)
+    )
+    cfg = wf_tron1b_flat_env_cfg()
+
+    assert cfg.rewards["pose"].params["target_joint_pos"] == POSE_TARGET_JOINT_POS
+    assert math.isclose(pose_target_height, BASE_HEIGHT_TARGET, abs_tol=2.0e-3)
+    assert initial_height - pose_target_height > 0.08
+    assert WHEEL_DISTANCE_RANGE[0] <= wheel_distance <= WHEEL_DISTANCE_RANGE[1]
+    assert math.isclose(
+        float(wheel_pos_b[0, 0]), float(wheel_pos_b[1, 0]), abs_tol=1.0e-6
+    )
+    assert math.isclose(
+        float(wheel_pos_b[0, 2]), float(wheel_pos_b[1, 2]), abs_tol=1.0e-6
+    )
+
+
+class DummyPostureAsset:
+    def __init__(self) -> None:
+        self.data = SimpleNamespace(
+            default_joint_pos=torch.zeros(1, 2),
+            joint_pos=torch.tensor([[0.2, -0.2]]),
+        )
+
+    def find_joints(self, joint_names):
+        assert joint_names == ("joint_a", "joint_b")
+        return [0, 1], ["joint_a", "joint_b"]
+
+
+def test_variable_posture_uses_configured_target_pose() -> None:
+    asset_cfg = SimpleNamespace(
+        name="robot",
+        joint_names=("joint_a", "joint_b"),
+        joint_ids=[0, 1],
+    )
+    cfg = SimpleNamespace(
+        params={
+            "asset_cfg": asset_cfg,
+            "target_joint_pos": {"joint_a": 0.2, "joint_b": -0.2},
+            "std_standing": {".*": 0.1},
+            "std_walking": {".*": 0.1},
+            "std_running": {".*": 0.1},
+        }
+    )
+    env = SimpleNamespace(
+        device="cpu",
+        scene={"robot": DummyPostureAsset()},
+        command_manager=SimpleNamespace(
+            get_command=lambda name: torch.zeros(1, 3),
+        ),
+    )
+
+    reward = variable_posture(cfg, env)(
+        env,
+        std_standing=None,
+        std_walking=None,
+        std_running=None,
+        asset_cfg=asset_cfg,
+        command_name="twist",
+        target_joint_pos=cfg.params["target_joint_pos"],
+        walking_threshold=0.05,
+        running_threshold=1.5,
+    )
+
+    assert torch.allclose(reward, torch.ones(1))
 
 
 class DummyTerrain:
