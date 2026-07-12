@@ -777,7 +777,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
-                    weight=-2.0e-2,
+                    weight=-3.0e-2,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_joint_cfg,
@@ -801,7 +801,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "rough_contact_pattern": RewardTermCfg(
                     func=mdp.rough_contact_pattern,
-                    weight=0.25,
+                    weight=0.5,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
