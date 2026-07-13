@@ -70,6 +70,7 @@ def test_representation_velocity_tasks_are_registered() -> None:
     assert rough_agent["algorithm"]["class_name"] == "RepresentationVelocityTeacherStudentPPO"
     assert rough_agent["algorithm"]["representation_loss_coef"] == 1.0
     assert rough_agent["algorithm"]["lin_vel_loss_coef"] == 1.0
+    assert rough_agent["algorithm"]["latent_dynamics_loss_coef"] == 0.0
     assert rough_agent["actor"]["class_name"] == "RepresentationVelocityActorCritic"
     assert rough_agent["obs_groups"] == {
         "proprio_history": ("proprio_history",),
@@ -80,6 +81,7 @@ def test_representation_velocity_tasks_are_registered() -> None:
     }
     assert "proprio_history" in flat_env.observations
     assert "actor_history" not in flat_env.observations
+    assert "latent_dynamics_command_generation" not in flat_env.observations
 
 
 def test_actor_history_and_rough_privileged_observations() -> None:
@@ -188,7 +190,18 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
     }
     assert agent["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
+    assert agent["actor"]["latent_dynamics_hidden_dims"] == (128, 128)
     assert agent["algorithm"]["representation_chunk_length"] == 12
+    assert agent["algorithm"]["latent_dynamics_loss_coef"] == 1.0
+    assert agent["algorithm"]["num_latent_dynamics_epochs"] == 1
+    assert agent["algorithm"]["num_latent_dynamics_mini_batches"] == 4
+    command_generation_group = cfg.observations[
+        "latent_dynamics_command_generation"
+    ]
+    command_generation_term = command_generation_group.terms["command_generation"]
+    assert command_generation_group.enable_corruption is False
+    assert command_generation_term.func is mdp.command_generation
+    assert command_generation_term.noise is None
     assert agent["obs_groups"] == {
         "proprio_history": ("proprio_history",),
         "actor_command": ("actor_command",),
@@ -196,7 +209,57 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "critic": ("critic",),
         "privileged_encoder": ("privileged_encoder",),
         "depth_encoder": (DEPTH_CAMERA_NAME,),
+        "latent_dynamics_command_generation": (
+            "latent_dynamics_command_generation",
+        ),
     }
+
+
+def test_command_generation_observation_reads_counter_without_corruption() -> None:
+    from wheeled_legged_mjlab.tasks.velocity.mdp.commands import UniformVelocityCommand
+
+    command_term = object.__new__(UniformVelocityCommand)
+    command_term.command_generation = torch.tensor([2, 5])
+    command_manager = SimpleNamespace(get_term=lambda _name: command_term)
+    env = SimpleNamespace(command_manager=command_manager)
+
+    generation = observation_mdp.command_generation(env, "twist")
+
+    assert generation.dtype == torch.float32
+    assert torch.equal(generation, torch.tensor([[2.0], [5.0]]))
+
+
+def test_uniform_velocity_command_increments_generation_only_for_resampled_envs() -> None:
+    from wheeled_legged_mjlab.tasks.velocity.mdp.commands import UniformVelocityCommand
+
+    command = object.__new__(UniformVelocityCommand)
+    command._env = SimpleNamespace(num_envs=2, device="cpu")
+    command.cfg = SimpleNamespace(
+        heading_command=False,
+        rel_standing_envs=0.0,
+        rel_forward_envs=0.0,
+        init_velocity_prob=0.0,
+        ranges=SimpleNamespace(
+            lin_vel_x=(-1.0, 1.0),
+            lin_vel_y=(-1.0, 1.0),
+            ang_vel_z=(-1.0, 1.0),
+        ),
+    )
+    command.vel_command_w = torch.zeros(2, 3)
+    command.vel_command_b = torch.zeros(2, 3)
+    command.heading_target = torch.zeros(2)
+    command.is_heading_env = torch.zeros(2, dtype=torch.bool)
+    command.is_standing_env = torch.zeros(2, dtype=torch.bool)
+    command.is_forward_env = torch.zeros(2, dtype=torch.bool)
+    command.command_generation = torch.zeros(2, dtype=torch.long)
+    command.robot = SimpleNamespace(
+        data=SimpleNamespace(heading_w=torch.zeros(2)),
+    )
+
+    command._resample_command(torch.tensor([1]))
+    command._resample_command(torch.tensor([0]))
+
+    assert torch.equal(command.command_generation, torch.tensor([1, 1]))
 
 
 def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:

@@ -430,6 +430,17 @@ def make_observations(
             concatenate_terms=True,
             enable_corruption=False,
         )
+    if depth and lin_vel_representation:
+        observations["latent_dynamics_command_generation"] = ObservationGroupCfg(
+            terms={
+                "command_generation": ObservationTermCfg(
+                    func=mdp.command_generation,
+                    params={"command_name": COMMAND_NAME},
+                )
+            },
+            concatenate_terms=True,
+            enable_corruption=False,
+        )
     return observations
 
 

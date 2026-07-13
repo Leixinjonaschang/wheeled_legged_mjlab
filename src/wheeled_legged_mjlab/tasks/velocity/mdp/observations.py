@@ -13,7 +13,19 @@ from mjlab.utils.lab_api.math import quat_apply_inverse
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
 
+from .commands import UniformVelocityCommand
+
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
+
+def command_generation(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+) -> torch.Tensor:
+  """Generation ID of the active high-level command, as rollout metadata."""
+  command_term = env.command_manager.get_term(command_name)
+  assert isinstance(command_term, UniformVelocityCommand)
+  return command_term.command_generation.unsqueeze(-1).float()
 
 
 def foot_height(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:

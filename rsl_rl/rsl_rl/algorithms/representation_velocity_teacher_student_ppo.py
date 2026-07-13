@@ -18,6 +18,8 @@ from rsl_rl.models import RepresentationVelocityActorCritic
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import compile_model, resolve_callable, resolve_obs_groups, resolve_optimizer
 
+LATENT_DYNAMICS_COMMAND_GENERATION_GROUP = "latent_dynamics_command_generation"
+
 
 class RepresentationVelocityTeacherStudentPPO:
     """PPO on privileged latents plus delayed student velocity representation learning."""
@@ -41,6 +43,9 @@ class RepresentationVelocityTeacherStudentPPO:
         representation_chunk_length: int = 12,
         representation_loss_coef: float = 1.0,
         lin_vel_loss_coef: float = 1.0,
+        latent_dynamics_loss_coef: float = 0.0,
+        num_latent_dynamics_epochs: int = 1,
+        num_latent_dynamics_mini_batches: int = 4,
         max_grad_norm: float = 1.0,
         optimizer: str = "adam",
         use_clipped_value_loss: bool = True,
@@ -52,6 +57,7 @@ class RepresentationVelocityTeacherStudentPPO:
         symmetry_cfg: dict | None = None,
         multi_gpu_cfg: dict | None = None,
         share_cnn_encoders: bool = False,
+        commanded_action_clip: float | None = None,
     ) -> None:
         if rnd_cfg is not None:
             raise ValueError("RND is not supported by RepresentationVelocityTeacherStudentPPO.")
@@ -72,6 +78,15 @@ class RepresentationVelocityTeacherStudentPPO:
         self.critic = self.actor
         self._raw_actor = self.actor
         self._raw_critic = self.actor
+        if latent_dynamics_loss_coef < 0.0:
+            raise ValueError("latent_dynamics_loss_coef must be non-negative.")
+        self.latent_dynamics_enabled = latent_dynamics_loss_coef > 0.0
+        if self.latent_dynamics_enabled and not hasattr(self.actor, "compute_latent_dynamics_loss"):
+            raise ValueError("Latent dynamics is only supported by a model with a latent dynamics predictor.")
+        if self.latent_dynamics_enabled and (
+            num_latent_dynamics_epochs <= 0 or num_latent_dynamics_mini_batches <= 0
+        ):
+            raise ValueError("Latent dynamics epochs and mini-batches must be positive.")
 
         optimizer_cls = resolve_optimizer(optimizer)
         self.optimizer = optimizer_cls(self.actor.ppo_parameters(), lr=learning_rate)  # type: ignore
@@ -106,6 +121,10 @@ class RepresentationVelocityTeacherStudentPPO:
         self.representation_chunk_length = representation_chunk_length
         self.representation_loss_coef = representation_loss_coef
         self.lin_vel_loss_coef = lin_vel_loss_coef
+        self.latent_dynamics_loss_coef = latent_dynamics_loss_coef
+        self.num_latent_dynamics_epochs = num_latent_dynamics_epochs
+        self.num_latent_dynamics_mini_batches = num_latent_dynamics_mini_batches
+        self.commanded_action_clip = commanded_action_clip
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
         self.rnd = None
 
@@ -116,6 +135,15 @@ class RepresentationVelocityTeacherStudentPPO:
         self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()
         self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
         self.transition.observations = obs
+        if self.latent_dynamics_enabled:
+            commanded_actions = self.transition.actions
+            if self.commanded_action_clip is not None:
+                commanded_actions = torch.clamp(
+                    commanded_actions,
+                    -self.commanded_action_clip,
+                    self.commanded_action_clip,
+                )
+            self.transition.commanded_actions = commanded_actions.detach()
         return self.transition.actions
 
     def process_env_step(
@@ -220,6 +248,45 @@ class RepresentationVelocityTeacherStudentPPO:
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy.mean().item()
 
+        mean_latent_dynamics_loss = 0.0
+        mean_latent_identity_loss = 0.0
+        latent_dynamics_samples = 0
+        if self.latent_dynamics_enabled:
+            self.student_optimizer.zero_grad()
+            generator = self.storage.latent_dynamics_mini_batch_generator(
+                self.num_latent_dynamics_mini_batches,
+                self.num_latent_dynamics_epochs,
+                LATENT_DYNAMICS_COMMAND_GENERATION_GROUP,
+            )
+            for batch in generator:
+                observations_t = batch.observations
+                observations_tp1 = batch.next_observations
+                commanded_actions = batch.commanded_actions
+                dynamics_loss = self.actor.compute_latent_dynamics_loss(
+                    observations_t,
+                    commanded_actions,
+                    observations_tp1,
+                )
+                with torch.no_grad():
+                    latent_t = self.actor.get_privileged_latent(observations_t)
+                    latent_tp1 = self.actor.get_privileged_latent(observations_tp1)
+                    identity_loss = (latent_t - latent_tp1).pow(2).mean()
+
+                self.optimizer.zero_grad()
+                weighted_loss = self.latent_dynamics_loss_coef * dynamics_loss
+                weighted_loss.backward()
+                if self.is_multi_gpu:
+                    self.reduce_parameters(self.actor.latent_dynamics_parameters())
+                nn.utils.clip_grad_norm_(self.actor.latent_dynamics_parameters(), self.max_grad_norm)
+                self.optimizer.step()
+
+                batch_size = observations_t.batch_size[0]
+                mean_latent_dynamics_loss += dynamics_loss.item() * batch_size
+                mean_latent_identity_loss += identity_loss.item() * batch_size
+                latent_dynamics_samples += batch_size
+
+            self.optimizer.zero_grad()
+
         mean_student_loss = 0.0
         mean_representation_loss = 0.0
         mean_lin_vel_loss = 0.0
@@ -280,6 +347,19 @@ class RepresentationVelocityTeacherStudentPPO:
             "representation": mean_representation_loss / student_updates,
             "lin_vel": mean_lin_vel_loss / student_updates,
         }
+        if self.latent_dynamics_enabled:
+            if latent_dynamics_samples > 0:
+                mean_latent_dynamics_loss /= latent_dynamics_samples
+                mean_latent_identity_loss /= latent_dynamics_samples
+            loss_dict.update(
+                {
+                    "latent_dynamics_loss": mean_latent_dynamics_loss,
+                    "latent_identity_loss": mean_latent_identity_loss,
+                    "latent_prediction_identity_ratio": mean_latent_dynamics_loss
+                    / (mean_latent_identity_loss + 1.0e-8),
+                    "latent_dynamics_valid_fraction": self.storage.latent_dynamics_valid_fraction,
+                }
+            )
         self.storage.clear()
         return loss_dict
 
@@ -330,6 +410,8 @@ class RepresentationVelocityTeacherStudentPPO:
         )
 
         default_sets = ["proprio_history", "actor_command", "lin_vel_target", "critic", "privileged_encoder"]
+        if cfg["algorithm"].get("latent_dynamics_loss_coef", 0.0) > 0.0:
+            default_sets.append(LATENT_DYNAMICS_COMMAND_GENERATION_GROUP)
         cfg["obs_groups"] = resolve_obs_groups(obs, cfg["obs_groups"], default_sets)
         if cfg["algorithm"].get("rnd_cfg") is not None:
             raise ValueError("RND is not supported by RepresentationVelocityTeacherStudentPPO.")
@@ -345,7 +427,14 @@ class RepresentationVelocityTeacherStudentPPO:
         print(f"Representation Velocity Actor-Critic Model: {model}")
 
         storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
-        alg = alg_class(model, storage, device=device, **cfg["algorithm"], multi_gpu_cfg=cfg["multi_gpu"])
+        alg = alg_class(
+            model,
+            storage,
+            device=device,
+            **cfg["algorithm"],
+            multi_gpu_cfg=cfg["multi_gpu"],
+            commanded_action_clip=getattr(env, "clip_actions", None),
+        )
         alg.compile(cfg.get("torch_compile_mode"))
         return alg
 

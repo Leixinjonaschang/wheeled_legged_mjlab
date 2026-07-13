@@ -286,6 +286,55 @@ def test_depth_student_losses_update_depth_and_student_encoder_side() -> None:
     assert all(param.grad is None for param in model.privileged_encoder.parameters())
 
 
+def test_depth_latent_dynamics_prediction_is_normalized_and_has_isolated_gradients() -> None:
+    obs_t = make_depth_rep_obs()
+    obs_tp1 = make_depth_rep_obs()
+    model = make_depth_model(obs_t)
+    commanded_action = torch.randn(NUM_ENVS, NUM_ACTIONS)
+
+    latent_t = model.get_privileged_latent(obs_t)
+    prediction = model.predict_next_privileged_latent(latent_t, commanded_action)
+    assert torch.allclose(prediction.norm(dim=-1), torch.ones(NUM_ENVS), atol=1.0e-6)
+
+    captured_latents: list[torch.Tensor] = []
+    original_get_privileged_latent = model.get_privileged_latent
+
+    def capture_latent(obs: TensorDict) -> torch.Tensor:
+        latent = original_get_privileged_latent(obs)
+        captured_latents.append(latent)
+        return latent
+
+    model.get_privileged_latent = capture_latent  # type: ignore[method-assign]
+    model.zero_grad()
+    dynamics_loss = model.compute_latent_dynamics_loss(obs_t, commanded_action, obs_tp1)
+    dynamics_loss.backward()
+
+    assert captured_latents[0].requires_grad
+    assert not captured_latents[1].requires_grad
+    assert any(param.grad is not None for param in model.latent_dynamics_predictor.parameters())
+    assert any(param.grad is not None for param in model.privileged_encoder.parameters())
+    assert all(param.grad is None for param in model.actor_head.parameters())
+    assert all(param.grad is None for param in model.critic_head.parameters())
+    assert all(param.grad is None for param in model.depth_encoder.parameters())
+    assert all(param.grad is None for param in model.depth_gru.parameters())
+    assert all(param.grad is None for param in model.proprio_encoder.parameters())
+    assert all(param.grad is None for param in model.student_latent_head.parameters())
+    assert all(param.grad is None for param in model.lin_vel_head.parameters())
+
+
+def test_depth_ppo_path_does_not_backpropagate_into_dynamics_predictor() -> None:
+    obs = make_depth_rep_obs()
+    model = make_depth_model(obs)
+
+    model.zero_grad()
+    actions = model.act_teacher(obs, stochastic_output=True)
+    ppo_path_loss = actions.square().mean() + model.evaluate_teacher(obs).square().mean()
+    ppo_path_loss.backward()
+
+    assert any(param.grad is not None for param in model.privileged_encoder.parameters())
+    assert all(param.grad is None for param in model.latent_dynamics_predictor.parameters())
+
+
 def test_depth_sequence_student_losses_use_continuous_depth_state() -> None:
     model = make_depth_model()
     time_steps = 3
@@ -358,7 +407,9 @@ def test_depth_jit_wrapper_scripts_and_runs_single_robot_policy() -> None:
     model = make_depth_model()
     obs = make_depth_rep_obs()
 
-    jit_model = torch.jit.script(model.as_jit())
+    export_model = model.as_jit()
+    assert all("latent_dynamics" not in name for name, _ in export_model.named_parameters())
+    jit_model = torch.jit.script(export_model)
     actions, predicted_lin_vel = jit_model(
         obs["proprio_history"][:1],
         obs["actor_command"][:1],

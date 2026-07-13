@@ -36,6 +36,9 @@ class RolloutStorage:
             self.actions: torch.Tensor | None = None
             """Actions taken at the current step."""
 
+            self.commanded_actions: torch.Tensor | None = None
+            """Globally clipped policy-space actions sent to the environment."""
+
             self.rewards: torch.Tensor | None = None
             """Rewards received after the action."""
 
@@ -84,6 +87,8 @@ class RolloutStorage:
             masks: torch.Tensor | None = None,
             privileged_actions: torch.Tensor | None = None,
             dones: torch.Tensor | None = None,
+            next_observations: TensorDict | None = None,
+            commanded_actions: torch.Tensor | None = None,
         ) -> None:
             """Initialize a batch container over rollout data."""
             self.observations: TensorDict | None = observations
@@ -92,6 +97,12 @@ class RolloutStorage:
             # For reinforcement learning
             self.actions: torch.Tensor | None = actions
             """Batch of actions."""
+
+            self.commanded_actions: torch.Tensor | None = commanded_actions
+            """Batch of globally clipped policy-space actions."""
+
+            self.next_observations: TensorDict | None = next_observations
+            """Observations one environment step after ``observations``."""
 
             self.values: torch.Tensor | None = values
             """Batch of value estimates (RL only)."""
@@ -146,7 +157,9 @@ class RolloutStorage:
         )
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+        self.commanded_actions: torch.Tensor | None = None
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
+        self.latent_dynamics_valid_fraction = 0.0
 
         # For distillation
         if training_type == "distillation":
@@ -176,6 +189,10 @@ class RolloutStorage:
         # Core
         self.observations[self.step].copy_(transition.observations)
         self.actions[self.step].copy_(transition.actions)  # type: ignore
+        if transition.commanded_actions is not None:
+            if self.commanded_actions is None:
+                self.commanded_actions = torch.zeros_like(self.actions)
+            self.commanded_actions[self.step].copy_(transition.commanded_actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
 
@@ -315,6 +332,62 @@ class RolloutStorage:
                             envs,
                         ),
                     ),
+                )
+
+    def latent_dynamics_mini_batch_generator(
+        self,
+        num_mini_batches: int,
+        num_epochs: int,
+        command_generation_obs_group: str = "latent_dynamics_command_generation",
+    ) -> Generator[Batch, None, None]:
+        """Yield valid shuffled one-step transition pairs for latent dynamics learning."""
+        if self.training_type != "rl":
+            raise ValueError("This function is only available for reinforcement learning training.")
+        if self.commanded_actions is None:
+            raise ValueError("Commanded actions were not recorded in rollout storage.")
+        if command_generation_obs_group not in self.observations:
+            raise ValueError(
+                f"Missing command generation observation group '{command_generation_obs_group}'."
+            )
+        if num_mini_batches <= 0 or num_epochs <= 0:
+            raise ValueError("Latent dynamics epochs and mini-batches must be positive.")
+
+        num_pair_steps = self.num_transitions_per_env - 1
+        if num_pair_steps <= 0:
+            self.latent_dynamics_valid_fraction = 0.0
+            return
+
+        command_generation = self.observations[command_generation_obs_group]
+        if command_generation.shape[-1] != 1:
+            raise ValueError(
+                "Command generation observation must have one feature, got "
+                f"shape {tuple(command_generation.shape)}."
+            )
+
+        not_done = ~self.dones[:-1].squeeze(-1).bool()
+        same_command_generation = command_generation[:-1].squeeze(-1).eq(
+            command_generation[1:].squeeze(-1)
+        )
+        valid = not_done & same_command_generation
+        self.latent_dynamics_valid_fraction = valid.float().mean().item()
+        valid_indices = valid.flatten().nonzero(as_tuple=False).flatten()
+        if valid_indices.numel() == 0:
+            return
+
+        observations_t = self.observations[:-1].flatten(0, 1)
+        observations_tp1 = self.observations[1:].flatten(0, 1)
+        commanded_actions_t = self.commanded_actions[:-1].flatten(0, 1)
+        effective_num_mini_batches = min(num_mini_batches, valid_indices.numel())
+
+        for _ in range(num_epochs):
+            permutation = valid_indices[
+                torch.randperm(valid_indices.numel(), device=self.device)
+            ]
+            for batch_indices in torch.tensor_split(permutation, effective_num_mini_batches):
+                yield RolloutStorage.Batch(
+                    observations=observations_t[batch_indices],
+                    next_observations=observations_tp1[batch_indices],
+                    commanded_actions=commanded_actions_t[batch_indices],
                 )
 
     # For reinforcement learning with recurrent networks

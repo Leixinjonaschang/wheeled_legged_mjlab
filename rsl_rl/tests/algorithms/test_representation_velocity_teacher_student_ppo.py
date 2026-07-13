@@ -46,6 +46,7 @@ def make_rep_obs() -> TensorDict:
 def make_depth_rep_obs() -> TensorDict:
     obs = make_rep_obs()
     obs["depth_camera"] = torch.randn(NUM_ENVS, *DEPTH_SHAPE)
+    obs["latent_dynamics_command_generation"] = torch.zeros(NUM_ENVS, 1)
     return obs
 
 
@@ -124,6 +125,10 @@ def build_depth_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, Te
         num_representation_epochs=1,
         num_representation_mini_batches=2,
         representation_chunk_length=2,
+        latent_dynamics_loss_coef=1.0,
+        num_latent_dynamics_epochs=1,
+        num_latent_dynamics_mini_batches=2,
+        commanded_action_clip=0.5,
     )
     return alg, obs
 
@@ -211,9 +216,86 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
 
     losses = alg.update()
 
-    assert {"student", "representation", "lin_vel"} <= set(losses)
+    assert {
+        "student",
+        "representation",
+        "lin_vel",
+        "latent_dynamics_loss",
+        "latent_identity_loss",
+        "latent_prediction_identity_ratio",
+        "latent_dynamics_valid_fraction",
+    } <= set(losses)
     assert calls["flat"] == 0
     assert calls["sequence"] > 0
+
+
+def test_depth_dynamics_updates_predictor_and_records_clipped_commanded_actions() -> None:
+    alg, obs = build_depth_algorithm()
+    sampled_actions = alg.act(obs)
+
+    assert torch.equal(alg.transition.commanded_actions, sampled_actions.clamp(-0.5, 0.5))
+
+    next_obs = make_depth_rep_obs()
+    alg.process_env_step(next_obs, torch.randn(NUM_ENVS), torch.zeros(NUM_ENVS), {})
+    assert alg.storage.commanded_actions is not None
+    assert torch.equal(alg.storage.commanded_actions[0], sampled_actions.clamp(-0.5, 0.5))
+
+    for _ in range(1, NUM_STEPS):
+        alg.act(next_obs)
+        following_obs = make_depth_rep_obs()
+        alg.process_env_step(following_obs, torch.randn(NUM_ENVS), torch.zeros(NUM_ENVS), {})
+        next_obs = following_obs
+    alg.compute_returns(next_obs)
+
+    predictor_before = {
+        name: param.detach().clone()
+        for name, param in alg.actor.latent_dynamics_predictor.named_parameters()
+    }
+    losses = alg.update()
+
+    assert any_param_changed(predictor_before, alg.actor.latent_dynamics_predictor)
+    assert losses["latent_dynamics_valid_fraction"] == 1.0
+
+
+def test_latent_dynamics_generator_filters_done_and_command_resample_pairs() -> None:
+    num_envs = 2
+    obs = TensorDict(
+        {
+            "state": torch.zeros(num_envs, 1),
+            "latent_dynamics_command_generation": torch.zeros(num_envs, 1),
+        },
+        batch_size=[num_envs],
+    )
+    storage = RolloutStorage("rl", num_envs, NUM_STEPS, obs, [1])
+    state = torch.arange(NUM_STEPS * num_envs).view(NUM_STEPS, num_envs, 1).float()
+    storage.observations["state"].copy_(state)
+    storage.observations["latent_dynamics_command_generation"].copy_(
+        torch.tensor(
+            [
+                [[0.0], [0.0]],
+                [[0.0], [1.0]],
+                [[0.0], [1.0]],
+                [[1.0], [1.0]],
+            ]
+        )
+    )
+    storage.commanded_actions = state.clone()
+    storage.dones[0, 0] = 1
+
+    batches = list(storage.latent_dynamics_mini_batch_generator(2, 1))
+    pair_markers = {
+        (int(current), int(future), int(action))
+        for batch in batches
+        for current, future, action in zip(
+            batch.observations["state"],
+            batch.next_observations["state"],
+            batch.commanded_actions,
+            strict=True,
+        )
+    }
+
+    assert pair_markers == {(2, 4, 2), (3, 5, 3), (5, 7, 5)}
+    assert storage.latent_dynamics_valid_fraction == 0.5
 
 
 def test_student_loss_detaches_privileged_encoder_target() -> None:
@@ -249,6 +331,27 @@ def test_multi_gpu_update_reduces_ppo_and_student_gradients() -> None:
     alg.update()
 
     assert reduced == {"ppo": True, "student": True}
+
+
+def test_multi_gpu_depth_update_reduces_latent_dynamics_gradients() -> None:
+    alg, obs = build_depth_algorithm()
+    fill_rollout(alg, obs)
+    alg.is_multi_gpu = True
+
+    dynamics_param_ids = {id(param) for param in alg.actor.latent_dynamics_parameters()}
+    dynamics_reduced = False
+
+    def fake_reduce_parameters(parameters=None) -> None:
+        nonlocal dynamics_reduced
+        param_ids = {id(param) for param in parameters}
+        if param_ids == dynamics_param_ids:
+            dynamics_reduced = True
+
+    alg.reduce_parameters = fake_reduce_parameters
+
+    alg.update()
+
+    assert dynamics_reduced
 
 
 def test_save_includes_student_optimizer() -> None:

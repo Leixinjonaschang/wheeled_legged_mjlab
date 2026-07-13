@@ -36,6 +36,7 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         depth_feature_dim: int = 64,
         depth_gru_hidden_dim: int = 64,
         depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
+        latent_dynamics_hidden_dims: tuple[int, ...] | list[int] = (128, 128),
     ) -> None:
         super().__init__(
             obs,
@@ -59,6 +60,12 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             activation=activation,
         )
         self.depth_gru = nn.GRUCell(depth_feature_dim, depth_gru_hidden_dim)
+        self.latent_dynamics_predictor = MLP(
+            latent_dim + output_dim,
+            latent_dim,
+            latent_dynamics_hidden_dims,
+            activation,
+        )
 
         encoder_hidden_dims = hidden_dims if encoder_hidden_dims is None else encoder_hidden_dims
         encoder_feature_dim = self._encoder_feature_dim(encoder_hidden_dims)
@@ -159,6 +166,37 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         yield from self.depth_encoder.parameters()
         yield from self.depth_gru.parameters()
         yield from super().student_parameters()
+
+    def ppo_parameters(self):
+        """Yield teacher optimizer parameters, including the training-only predictor."""
+        yield from super().ppo_parameters()
+        yield from self.latent_dynamics_predictor.parameters()
+
+    def latent_dynamics_parameters(self):
+        """Yield parameters optimized by the one-step latent dynamics loss."""
+        yield from self.privileged_encoder.parameters()
+        yield from self.latent_dynamics_predictor.parameters()
+
+    def predict_next_privileged_latent(
+        self,
+        latent: torch.Tensor,
+        commanded_action: torch.Tensor,
+    ) -> torch.Tensor:
+        predictor_input = torch.cat((latent, commanded_action), dim=-1)
+        prediction = self.latent_dynamics_predictor(predictor_input)
+        return F.normalize(prediction, p=2.0, dim=-1)
+
+    def compute_latent_dynamics_loss(
+        self,
+        obs_t: TensorDict,
+        action_t: torch.Tensor,
+        obs_tp1: TensorDict,
+    ) -> torch.Tensor:
+        latent_t = self.get_privileged_latent(obs_t)
+        with torch.no_grad():
+            latent_tp1 = self.get_privileged_latent(obs_tp1)
+        predicted_tp1 = self.predict_next_privileged_latent(latent_t, action_t)
+        return F.mse_loss(predicted_tp1, latent_tp1)
 
     def get_proprio_outputs(
         self,

@@ -49,6 +49,7 @@ class RslRlDepthRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelC
     depth_feature_dim: int = 64
     depth_gru_hidden_dim: int = 64
     depth_channels: Tuple[int, ...] = (16, 32, 32)
+    latent_dynamics_hidden_dims: Tuple[int, ...] = (128, 128)
     class_name: str = "DepthRepresentationVelocityActorCritic"
 
 
@@ -63,6 +64,9 @@ class RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithm
     representation_chunk_length: int = 12
     representation_loss_coef: float = 1.0
     lin_vel_loss_coef: float = 1.0
+    latent_dynamics_loss_coef: float = 0.0
+    num_latent_dynamics_epochs: int = 1
+    num_latent_dynamics_mini_batches: int = 4
     class_name: str = "RepresentationVelocityTeacherStudentPPO"
 
 
@@ -170,6 +174,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             depth_feature_dim=64,
             depth_gru_hidden_dim=64,
             depth_channels=(16, 32, 32),
+            latent_dynamics_hidden_dims=(128, 128),
             distribution_cfg={
                 "class_name": "GaussianDistribution",
                 "init_std": 1.0,
@@ -196,6 +201,9 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             representation_chunk_length=12,
             representation_loss_coef=1.0,
             lin_vel_loss_coef=1.0,
+            latent_dynamics_loss_coef=1.0,
+            num_latent_dynamics_epochs=1,
+            num_latent_dynamics_mini_batches=4,
         ),
         obs_groups={
             "proprio_history": ("proprio_history",),
@@ -204,6 +212,9 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             "critic": ("critic",),
             "privileged_encoder": ("privileged_encoder",),
             "depth_encoder": ("depth_camera",),
+            "latent_dynamics_command_generation": (
+                "latent_dynamics_command_generation",
+            ),
         },
         experiment_name="wf_tron1b_velocity_rep_ts_lin_vel_depth_latent64",
         save_interval=200,
