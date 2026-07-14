@@ -49,7 +49,7 @@ def make_model(obs: TensorDict | None = None, *, obs_normalization: bool = False
         "actor_command": ["actor_command"],
         "lin_vel_target": ["lin_vel_target"],
         "critic": ["critic"],
-        "privileged_encoder": ["privileged_encoder", "actor_command"],
+        "privileged_encoder": ["privileged_encoder"],
     }
     return RepresentationVelocityActorCritic(
         obs,
@@ -88,7 +88,7 @@ def make_depth_model(obs: TensorDict | None = None) -> DepthRepresentationVeloci
         "actor_command": ["actor_command"],
         "lin_vel_target": ["lin_vel_target"],
         "critic": ["critic"],
-        "privileged_encoder": ["privileged_encoder", "actor_command"],
+        "privileged_encoder": ["privileged_encoder"],
         "depth_encoder": ["depth_camera"],
     }
     return DepthRepresentationVelocityActorCritic(
@@ -129,11 +129,28 @@ def test_current_proprio_is_latest_frame_of_history() -> None:
     model = make_model(obs)
 
     assert torch.equal(model.get_current_proprio(obs), obs["proprio_history"][:, -1, :])
-    expected_proprio_obs = torch.cat(
-        (obs["proprio_history"].flatten(start_dim=1), obs["actor_command"]),
-        dim=-1,
-    )
+    expected_proprio_obs = obs["proprio_history"].flatten(start_dim=1)
     assert torch.equal(model.get_proprio_obs(obs), expected_proprio_obs)
+
+
+def test_encoder_outputs_do_not_depend_on_command() -> None:
+    obs = make_rep_obs()
+    model = make_model(obs)
+    changed_command_obs = obs.clone()
+    changed_command_obs["actor_command"] = torch.randn_like(obs["actor_command"])
+
+    assert torch.equal(
+        model.get_proprio_outputs(obs)[0],
+        model.get_proprio_outputs(changed_command_obs)[0],
+    )
+    assert torch.equal(
+        model.get_predicted_lin_vel(obs),
+        model.get_predicted_lin_vel(changed_command_obs),
+    )
+    assert torch.equal(
+        model.get_privileged_latent(obs),
+        model.get_privileged_latent(changed_command_obs),
+    )
 
 
 def test_teacher_actor_uses_predicted_velocity_and_privileged_latent() -> None:

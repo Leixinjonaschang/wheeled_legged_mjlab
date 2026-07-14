@@ -352,6 +352,7 @@ def make_observations(
     if lin_vel_representation:
         privileged_encoder_terms = deepcopy(critic_terms)
         privileged_encoder_terms.pop("base_lin_vel", None)
+        privileged_encoder_terms.pop("command", None)
         observations = {
             "proprio_history": ObservationGroupCfg(
                 terms=dict(proprio_terms),
@@ -425,17 +426,6 @@ def make_observations(
                         "buffer_size": DEPTH_BUFFER_SIZE,
                         "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
                     },
-                )
-            },
-            concatenate_terms=True,
-            enable_corruption=False,
-        )
-    if depth and lin_vel_representation:
-        observations["latent_dynamics_command_generation"] = ObservationGroupCfg(
-            terms={
-                "command_generation": ObservationTermCfg(
-                    func=mdp.command_generation,
-                    params={"command_name": COMMAND_NAME},
                 )
             },
             concatenate_terms=True,

@@ -44,10 +44,6 @@ class UniformVelocityCommand(CommandTerm):
     )
     self.is_standing_env = torch.zeros_like(self.is_heading_env)
     self.is_forward_env = torch.zeros_like(self.is_heading_env)
-    self.command_generation = torch.zeros(
-      self.num_envs, dtype=torch.long, device=self.device
-    )
-
     self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
     self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
 
@@ -92,7 +88,6 @@ class UniformVelocityCommand(CommandTerm):
     )
 
   def _resample_command(self, env_ids: torch.Tensor) -> None:
-    self.command_generation[env_ids] += 1
     r = torch.empty(len(env_ids), device=self.device)
     self.vel_command_w[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
     self.vel_command_w[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)

@@ -46,7 +46,6 @@ def make_rep_obs() -> TensorDict:
 def make_depth_rep_obs() -> TensorDict:
     obs = make_rep_obs()
     obs["depth_camera"] = torch.randn(NUM_ENVS, *DEPTH_SHAPE)
-    obs["latent_dynamics_command_generation"] = torch.zeros(NUM_ENVS, 1)
     return obs
 
 
@@ -285,29 +284,16 @@ def test_depth_dynamics_updates_predictor_and_records_clipped_commanded_actions(
     )
 
 
-def test_latent_dynamics_generator_filters_done_and_command_resample_pairs() -> None:
+def test_latent_dynamics_generator_filters_only_done_pairs() -> None:
     num_steps = 4
     num_envs = 2
     obs = TensorDict(
-        {
-            "state": torch.zeros(num_envs, 1),
-            "latent_dynamics_command_generation": torch.zeros(num_envs, 1),
-        },
+        {"state": torch.zeros(num_envs, 1)},
         batch_size=[num_envs],
     )
     storage = RolloutStorage("rl", num_envs, num_steps, obs, [1])
     state = torch.arange(num_steps * num_envs).view(num_steps, num_envs, 1).float()
     storage.observations["state"].copy_(state)
-    storage.observations["latent_dynamics_command_generation"].copy_(
-        torch.tensor(
-            [
-                [[0.0], [0.0]],
-                [[0.0], [1.0]],
-                [[0.0], [1.0]],
-                [[1.0], [1.0]],
-            ]
-        )
-    )
     storage.commanded_actions = state.clone()
     storage.dones[0, 0] = 1
 
@@ -323,27 +309,27 @@ def test_latent_dynamics_generator_filters_done_and_command_resample_pairs() -> 
         )
     }
 
-    assert pair_markers == {(2, 4, 2), (3, 5, 3), (5, 7, 5)}
-    assert storage.latent_dynamics_valid_fraction == 0.5
-    assert storage.latent_dynamics_valid_fractions[1] == 0.5
+    assert pair_markers == {
+        (1, 3, 1),
+        (2, 4, 2),
+        (3, 5, 3),
+        (4, 6, 4),
+        (5, 7, 5),
+    }
+    assert storage.latent_dynamics_valid_fraction == pytest.approx(5.0 / 6.0)
+    assert storage.latent_dynamics_valid_fractions[1] == pytest.approx(5.0 / 6.0)
 
 
 def test_latent_dynamics_generator_builds_horizon_action_block_and_masks_full_interval() -> None:
     num_steps = 8
     num_envs = 2
     obs = TensorDict(
-        {
-            "state": torch.zeros(num_envs, 1),
-            "latent_dynamics_command_generation": torch.zeros(num_envs, 1),
-        },
+        {"state": torch.zeros(num_envs, 1)},
         batch_size=[num_envs],
     )
     storage = RolloutStorage("rl", num_envs, num_steps, obs, [1])
     state = torch.arange(num_steps * num_envs).view(num_steps, num_envs, 1).float()
     storage.observations["state"].copy_(state)
-    storage.observations["latent_dynamics_command_generation"][:, 1].copy_(
-        torch.tensor([[0.0], [0.0], [1.0], [1.0], [1.0], [1.0], [1.0], [1.0]])
-    )
     storage.commanded_actions = state.clone()
     storage.dones[0, 0] = 1
 
@@ -360,11 +346,13 @@ def test_latent_dynamics_generator_builds_horizon_action_block_and_masks_full_in
     }
 
     assert pair_markers == {
+        (1, 11, (1, 3, 5, 7, 9)),
         (2, 12, (2, 4, 6, 8, 10)),
+        (3, 13, (3, 5, 7, 9, 11)),
         (4, 14, (4, 6, 8, 10, 12)),
         (5, 15, (5, 7, 9, 11, 13)),
     }
-    assert storage.latent_dynamics_valid_fractions[5] == 0.5
+    assert storage.latent_dynamics_valid_fractions[5] == pytest.approx(5.0 / 6.0)
 
 
 def test_student_loss_detaches_privileged_encoder_target() -> None:

@@ -342,17 +342,12 @@ class RolloutStorage:
         num_mini_batches: int,
         num_epochs: int,
         horizon: int = 1,
-        command_generation_obs_group: str = "latent_dynamics_command_generation",
     ) -> Generator[Batch, None, None]:
         """Yield valid direct-transition pairs and aligned action blocks for one horizon."""
         if self.training_type != "rl":
             raise ValueError("This function is only available for reinforcement learning training.")
         if self.commanded_actions is None:
             raise ValueError("Commanded actions were not recorded in rollout storage.")
-        if command_generation_obs_group not in self.observations:
-            raise ValueError(
-                f"Missing command generation observation group '{command_generation_obs_group}'."
-            )
         if num_mini_batches <= 0 or num_epochs <= 0:
             raise ValueError("Latent dynamics epochs and mini-batches must be positive.")
         if horizon <= 0:
@@ -364,13 +359,6 @@ class RolloutStorage:
             self.latent_dynamics_valid_fractions[horizon] = 0.0
             return
 
-        command_generation = self.observations[command_generation_obs_group]
-        if command_generation.shape[-1] != 1:
-            raise ValueError(
-                "Command generation observation must have one feature, got "
-                f"shape {tuple(command_generation.shape)}."
-            )
-
         transition_is_valid = ~self.dones.squeeze(-1).bool()
         not_done = torch.stack(
             [
@@ -379,10 +367,7 @@ class RolloutStorage:
             ],
             dim=0,
         ).all(dim=0)
-        same_command_generation = command_generation[:num_pair_steps].squeeze(-1).eq(
-            command_generation[horizon:].squeeze(-1)
-        )
-        valid = not_done & same_command_generation
+        valid = not_done
         self.latent_dynamics_valid_fraction = valid.float().mean().item()
         self.latent_dynamics_valid_fractions[horizon] = self.latent_dynamics_valid_fraction
         valid_indices = valid.flatten().nonzero(as_tuple=False).flatten()

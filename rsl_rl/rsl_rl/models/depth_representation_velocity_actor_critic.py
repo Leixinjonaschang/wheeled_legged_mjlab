@@ -157,8 +157,7 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             self._flatten_proprio_history(proprio_history)
         )
         depth_latent, _ = self._encode_depth_sequence(obs[self.depth_obs_group], dones, hidden_state)
-        command_obs = self.command_obs_normalizer(self.get_command(obs))
-        student_input = torch.cat((proprio_obs, command_obs, depth_latent), dim=-1)
+        student_input = torch.cat((proprio_obs, depth_latent), dim=-1)
         features = self.proprio_encoder(student_input.flatten(0, 1))
         latent = self.student_latent_head(features).view(time_steps, batch_size, self.latent_dim)
         predicted_lin_vel = self.lin_vel_head(features).view(time_steps, batch_size, self.lin_vel_dim)
@@ -464,7 +463,7 @@ class _TorchDepthRepresentationVelocityActorCritic(nn.Module):
         depth_latent: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         student_obs = torch.cat(
-            (proprio_obs, self.command_obs_normalizer(actor_command), depth_latent),
+            (proprio_obs, depth_latent),
             dim=-1,
         )
         features = self.proprio_encoder(student_obs)

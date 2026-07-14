@@ -19,9 +19,6 @@ from rsl_rl.models import RepresentationVelocityActorCritic
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import compile_model, resolve_callable, resolve_obs_groups, resolve_optimizer
 
-LATENT_DYNAMICS_COMMAND_GENERATION_GROUP = "latent_dynamics_command_generation"
-
-
 class RepresentationVelocityTeacherStudentPPO:
     """PPO on privileged latents plus delayed student velocity representation learning."""
 
@@ -290,7 +287,6 @@ class RepresentationVelocityTeacherStudentPPO:
                         self.num_latent_dynamics_mini_batches,
                         self.num_latent_dynamics_epochs,
                         horizon=horizon,
-                        command_generation_obs_group=LATENT_DYNAMICS_COMMAND_GENERATION_GROUP,
                     )
                 )
                 for horizon in self.latent_dynamics_horizons
@@ -543,7 +539,6 @@ class RepresentationVelocityTeacherStudentPPO:
 
         default_sets = ["proprio_history", "actor_command", "lin_vel_target", "critic", "privileged_encoder"]
         if cfg["algorithm"].get("latent_dynamics_loss_coef", 0.0) > 0.0:
-            default_sets.append(LATENT_DYNAMICS_COMMAND_GENERATION_GROUP)
             cfg["actor"]["latent_dynamics_horizons"] = cfg["algorithm"].get(
                 "latent_dynamics_horizons",
                 (1,),

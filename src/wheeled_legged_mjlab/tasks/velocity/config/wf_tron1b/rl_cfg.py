@@ -218,9 +218,6 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             "critic": ("critic",),
             "privileged_encoder": ("privileged_encoder",),
             "depth_encoder": ("depth_camera",),
-            "latent_dynamics_command_generation": (
-                "latent_dynamics_command_generation",
-            ),
         },
         experiment_name="wf_tron1b_velocity_rep_ts_lin_vel_depth_latent64",
         save_interval=200,
