@@ -683,7 +683,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "pose": RewardTermCfg(
             func=mdp.variable_posture,
-            weight=0.5,
+            weight=0.0,
             params={
                 "asset_cfg": leg_joint_cfg,
                 "command_name": COMMAND_NAME,
