@@ -704,7 +704,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                     r".*knee.*": 0.50,
                 },
                 "walking_threshold": 0.05,
-                "running_threshold": 1.5,
+                "running_threshold": 0.5,
             },
         ),
         "stand_still": RewardTermCfg(
