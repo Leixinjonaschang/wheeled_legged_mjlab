@@ -219,6 +219,9 @@ class RepresentationVelocityTeacherStudentPPO:
         mean_value_loss = 0.0
         mean_surrogate_loss = 0.0
         mean_entropy = 0.0
+        mean_ppo_grad_norm = 0.0
+        mean_privileged_encoder_ppo_grad_norm = 0.0
+        ppo_grad_clip_count = 0
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
         for batch in generator:
@@ -280,7 +283,12 @@ class RepresentationVelocityTeacherStudentPPO:
             loss.backward()
             if self.is_multi_gpu:
                 self.reduce_parameters(self.actor.ppo_parameters())
-            nn.utils.clip_grad_norm_(self.actor.ppo_parameters(), self.max_grad_norm)
+            mean_privileged_encoder_ppo_grad_norm += self._grad_norm(
+                self.actor.privileged_encoder.parameters()
+            )
+            ppo_grad_norm = nn.utils.clip_grad_norm_(self.actor.ppo_parameters(), self.max_grad_norm).item()
+            mean_ppo_grad_norm += ppo_grad_norm
+            ppo_grad_clip_count += ppo_grad_norm > self.max_grad_norm
             self.optimizer.step()
 
             mean_value_loss += value_loss.item()
@@ -303,6 +311,10 @@ class RepresentationVelocityTeacherStudentPPO:
         mean_latent_direct_rollout_mse = 0.0
         mean_latent_direct_rollout_cosine = 0.0
         latent_rollout_samples = 0
+        mean_latent_dynamics_grad_norm = 0.0
+        mean_privileged_encoder_dynamics_grad_norm = 0.0
+        latent_dynamics_grad_clip_count = 0
+        latent_dynamics_updates = 0
         if self.latent_dynamics_enabled:
             self.student_optimizer.zero_grad()
             dynamics_generators = {
@@ -491,7 +503,15 @@ class RepresentationVelocityTeacherStudentPPO:
                 weighted_loss.backward()
                 if self.is_multi_gpu:
                     self.reduce_parameters(self.actor.latent_dynamics_parameters())
-                nn.utils.clip_grad_norm_(self.actor.latent_dynamics_parameters(), self.max_grad_norm)
+                mean_privileged_encoder_dynamics_grad_norm += self._grad_norm(
+                    self.actor.privileged_encoder.parameters()
+                )
+                latent_dynamics_grad_norm = nn.utils.clip_grad_norm_(
+                    self.actor.latent_dynamics_parameters(), self.max_grad_norm
+                ).item()
+                mean_latent_dynamics_grad_norm += latent_dynamics_grad_norm
+                latent_dynamics_grad_clip_count += latent_dynamics_grad_norm > self.max_grad_norm
+                latent_dynamics_updates += 1
                 self.optimizer.step()
 
             self.optimizer.zero_grad()
@@ -548,6 +568,8 @@ class RepresentationVelocityTeacherStudentPPO:
                     student_updates += 1
 
         num_ppo_updates = self.num_learning_epochs * self.num_mini_batches
+        mean_ppo_grad_norm /= num_ppo_updates
+        mean_privileged_encoder_ppo_grad_norm /= num_ppo_updates
         loss_dict = {
             "value": mean_value_loss / num_ppo_updates,
             "surrogate": mean_surrogate_loss / num_ppo_updates,
@@ -555,8 +577,27 @@ class RepresentationVelocityTeacherStudentPPO:
             "student": mean_student_loss / student_updates,
             "representation": mean_representation_loss / student_updates,
             "lin_vel": mean_lin_vel_loss / student_updates,
+            "Grad/ppo_total_norm": mean_ppo_grad_norm,
+            "Grad/privileged_encoder_ppo_norm": mean_privileged_encoder_ppo_grad_norm,
+            "Grad/ppo_clip_fraction": ppo_grad_clip_count / num_ppo_updates,
         }
         if self.latent_dynamics_enabled:
+            if latent_dynamics_updates > 0:
+                mean_latent_dynamics_grad_norm /= latent_dynamics_updates
+                mean_privileged_encoder_dynamics_grad_norm /= latent_dynamics_updates
+            loss_dict.update(
+                {
+                    "Grad/dynamics_total_norm": mean_latent_dynamics_grad_norm,
+                    "Grad/privileged_encoder_dynamics_norm": mean_privileged_encoder_dynamics_grad_norm,
+                    "Grad/privileged_encoder_dynamics_to_ppo_ratio": (
+                        mean_privileged_encoder_dynamics_grad_norm
+                        / (mean_privileged_encoder_ppo_grad_norm + 1.0e-8)
+                    ),
+                    "Grad/dynamics_clip_fraction": (
+                        latent_dynamics_grad_clip_count / max(latent_dynamics_updates, 1)
+                    ),
+                }
+            )
             for horizon in self.latent_dynamics_horizons:
                 if latent_dynamics_samples[horizon] > 0:
                     mean_latent_dynamics_loss[horizon] /= latent_dynamics_samples[horizon]
@@ -677,6 +718,13 @@ class RepresentationVelocityTeacherStudentPPO:
                 )
         self.storage.clear()
         return loss_dict
+
+    @staticmethod
+    def _grad_norm(parameters: Iterable[torch.nn.Parameter]) -> float:
+        grad_norms = [param.grad.detach().norm(2) for param in parameters if param.grad is not None]
+        if not grad_norms:
+            return 0.0
+        return torch.stack(grad_norms).norm(2).item()
 
     def train_mode(self) -> None:
         self.actor.train()

@@ -224,6 +224,13 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "student",
         "representation",
         "lin_vel",
+        "Grad/ppo_total_norm",
+        "Grad/privileged_encoder_ppo_norm",
+        "Grad/ppo_clip_fraction",
+        "Grad/dynamics_total_norm",
+        "Grad/privileged_encoder_dynamics_norm",
+        "Grad/privileged_encoder_dynamics_to_ppo_ratio",
+        "Grad/dynamics_clip_fraction",
         "latent_dynamics_loss",
         "latent_identity_loss",
         "latent_prediction_identity_ratio",
@@ -251,6 +258,14 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "latent_direct_rollout_cosine_k5",
         "latent_direct_rollout_mse_k5",
     } <= set(losses)
+    assert losses["Grad/privileged_encoder_ppo_norm"] > 0.0
+    assert losses["Grad/privileged_encoder_dynamics_norm"] > 0.0
+    assert losses["Grad/privileged_encoder_dynamics_to_ppo_ratio"] == pytest.approx(
+        losses["Grad/privileged_encoder_dynamics_norm"]
+        / (losses["Grad/privileged_encoder_ppo_norm"] + 1.0e-8)
+    )
+    assert 0.0 <= losses["Grad/ppo_clip_fraction"] <= 1.0
+    assert 0.0 <= losses["Grad/dynamics_clip_fraction"] <= 1.0
     for step in range(1, 6):
         assert {
             f"latent_rollout_loss_k{step}",
