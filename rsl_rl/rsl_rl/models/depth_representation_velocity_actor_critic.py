@@ -232,6 +232,33 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         )
         return F.mse_loss(predicted_future, latent_future)
 
+    def rollout_privileged_latent(
+        self,
+        latent: torch.Tensor,
+        commanded_action_sequence: torch.Tensor,
+    ) -> torch.Tensor:
+        """Autoregressively compose the one-step predictor without truncating gradients."""
+        if "1" not in self.latent_dynamics_predictors:
+            raise ValueError("Autoregressive latent rollout requires a horizon-1 predictor.")
+        if commanded_action_sequence.shape[-1] != self.latent_dynamics_action_dim:
+            raise ValueError(
+                "Each latent rollout action must have "
+                f"{self.latent_dynamics_action_dim} features, got shape "
+                f"{tuple(commanded_action_sequence.shape)}."
+            )
+        predictions = []
+        current_latent = latent
+        for commanded_action in commanded_action_sequence.unbind(dim=0):
+            current_latent = self.predict_privileged_latent(
+                current_latent,
+                commanded_action,
+                horizon=1,
+            )
+            predictions.append(current_latent)
+        if not predictions:
+            raise ValueError("Latent rollout action sequence must contain at least one step.")
+        return torch.stack(predictions, dim=0)
+
     def get_proprio_outputs(
         self,
         obs: TensorDict,

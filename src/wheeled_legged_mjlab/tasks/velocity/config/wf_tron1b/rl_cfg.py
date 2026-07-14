@@ -68,6 +68,8 @@ class RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithm
     latent_dynamics_horizons: Tuple[int, ...] = (1,)
     latent_dynamics_horizon_weights: Tuple[float, ...] = (1.0,)
     latent_dynamics_detach_source: bool = False
+    latent_rollout_horizon: int = 5
+    latent_rollout_loss_coef: float = 0.0
     num_latent_dynamics_epochs: int = 1
     num_latent_dynamics_mini_batches: int = 4
     class_name: str = "RepresentationVelocityTeacherStudentPPO"
@@ -208,6 +210,8 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             latent_dynamics_horizons=(1, 5),
             latent_dynamics_horizon_weights=(1.0, 0.5),
             latent_dynamics_detach_source=False,
+            latent_rollout_horizon=5,
+            latent_rollout_loss_coef=0.5,
             num_latent_dynamics_epochs=1,
             num_latent_dynamics_mini_batches=4,
         ),

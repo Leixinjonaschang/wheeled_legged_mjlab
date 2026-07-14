@@ -128,6 +128,8 @@ def build_depth_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, Te
         latent_dynamics_loss_coef=1.0,
         latent_dynamics_horizons=(1, 5),
         latent_dynamics_horizon_weights=(1.0, 0.5),
+        latent_rollout_horizon=5,
+        latent_rollout_loss_coef=0.5,
         num_latent_dynamics_epochs=1,
         num_latent_dynamics_mini_batches=2,
         commanded_action_clip=0.5,
@@ -242,7 +244,21 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "latent_prediction_cosine_similarity_k5",
         "latent_dynamics_valid_fraction_k1",
         "latent_dynamics_valid_fraction_k5",
+        "latent_reversed_action_loss_k5",
+        "latent_reversed_action_ratio_k5",
+        "latent_rollout_loss",
+        "latent_rollout_valid_fraction",
+        "latent_direct_rollout_cosine_k5",
+        "latent_direct_rollout_mse_k5",
     } <= set(losses)
+    for step in range(1, 6):
+        assert {
+            f"latent_rollout_loss_k{step}",
+            f"latent_rollout_identity_ratio_k{step}",
+            f"latent_rollout_shuffled_action_loss_k{step}",
+            f"latent_rollout_shuffled_action_ratio_k{step}",
+            f"latent_rollout_cosine_similarity_k{step}",
+        } <= set(losses)
     assert calls["flat"] == 0
     assert calls["sequence"] > 0
 
@@ -353,6 +369,57 @@ def test_latent_dynamics_generator_builds_horizon_action_block_and_masks_full_in
         (5, 15, (5, 7, 9, 11, 13)),
     }
     assert storage.latent_dynamics_valid_fractions[5] == pytest.approx(5.0 / 6.0)
+
+
+def test_latent_dynamics_sequence_generator_returns_all_ordered_steps() -> None:
+    num_steps = 8
+    num_envs = 2
+    obs = TensorDict(
+        {"state": torch.zeros(num_envs, 1)},
+        batch_size=[num_envs],
+    )
+    storage = RolloutStorage("rl", num_envs, num_steps, obs, [1])
+    state = torch.arange(num_steps * num_envs).view(num_steps, num_envs, 1).float()
+    storage.observations["state"].copy_(state)
+    storage.commanded_actions = state.clone()
+    storage.dones[0, 0] = 1
+
+    batches = list(storage.latent_dynamics_sequence_mini_batch_generator(2, 1, rollout_horizon=5))
+    sequence_markers = {
+        (
+            int(batch.observations["state"][sample]),
+            tuple(int(value) for value in batch.future_observations["state"][:, sample]),
+            tuple(int(value) for value in batch.commanded_actions[:, sample]),
+        )
+        for batch in batches
+        for sample in range(batch.observations.batch_size[0])
+    }
+
+    assert sequence_markers == {
+        (1, (3, 5, 7, 9, 11), (1, 3, 5, 7, 9)),
+        (2, (4, 6, 8, 10, 12), (2, 4, 6, 8, 10)),
+        (3, (5, 7, 9, 11, 13), (3, 5, 7, 9, 11)),
+        (4, (6, 8, 10, 12, 14), (4, 6, 8, 10, 12)),
+        (5, (7, 9, 11, 13, 15), (5, 7, 9, 11, 13)),
+    }
+    assert storage.latent_dynamics_sequence_valid_fraction == pytest.approx(5.0 / 6.0)
+
+
+def test_latent_rollout_keeps_recursive_gradient_chain() -> None:
+    model = make_depth_model(make_depth_rep_obs())
+    latent = torch.randn(NUM_ENVS, model.latent_dim, requires_grad=True)
+    commanded_actions = torch.randn(5, NUM_ENVS, NUM_ACTIONS)
+
+    rollout = model.rollout_privileged_latent(latent, commanded_actions)
+    rollout[-1, :, 0].sum().backward()
+
+    assert rollout.shape == (5, NUM_ENVS, model.latent_dim)
+    assert latent.grad is not None and torch.count_nonzero(latent.grad) > 0
+    assert any(
+        param.grad is not None and torch.count_nonzero(param.grad) > 0
+        for param in model.latent_dynamics_predictors["1"].parameters()
+    )
+    assert all(param.grad is None for param in model.latent_dynamics_predictors["5"].parameters())
 
 
 def test_student_loss_detaches_privileged_encoder_target() -> None:

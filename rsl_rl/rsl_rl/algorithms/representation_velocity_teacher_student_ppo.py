@@ -45,6 +45,8 @@ class RepresentationVelocityTeacherStudentPPO:
         latent_dynamics_horizons: tuple[int, ...] | list[int] = (1,),
         latent_dynamics_horizon_weights: tuple[float, ...] | list[float] = (1.0,),
         latent_dynamics_detach_source: bool = False,
+        latent_rollout_horizon: int = 5,
+        latent_rollout_loss_coef: float = 0.0,
         num_latent_dynamics_epochs: int = 1,
         num_latent_dynamics_mini_batches: int = 4,
         max_grad_norm: float = 1.0,
@@ -93,6 +95,10 @@ class RepresentationVelocityTeacherStudentPPO:
             raise ValueError("Each latent dynamics horizon must have exactly one weight.")
         if any(weight <= 0.0 for weight in self.latent_dynamics_horizon_weights):
             raise ValueError("latent_dynamics_horizon_weights must contain only positive values.")
+        if latent_rollout_horizon <= 0:
+            raise ValueError("latent_rollout_horizon must be positive.")
+        if latent_rollout_loss_coef < 0.0:
+            raise ValueError("latent_rollout_loss_coef must be non-negative.")
         self.latent_dynamics_horizon_weight_by_horizon = dict(
             zip(
                 self.latent_dynamics_horizons,
@@ -101,6 +107,7 @@ class RepresentationVelocityTeacherStudentPPO:
             )
         )
         self.latent_dynamics_enabled = latent_dynamics_loss_coef > 0.0
+        self.latent_rollout_enabled = self.latent_dynamics_enabled and latent_rollout_loss_coef > 0.0
         if self.latent_dynamics_enabled and not hasattr(self.actor, "compute_latent_dynamics_loss"):
             raise ValueError("Latent dynamics is only supported by a model with a latent dynamics predictor.")
         if self.latent_dynamics_enabled and tuple(self.actor.latent_dynamics_horizons) != self.latent_dynamics_horizons:
@@ -112,6 +119,10 @@ class RepresentationVelocityTeacherStudentPPO:
             num_latent_dynamics_epochs <= 0 or num_latent_dynamics_mini_batches <= 0
         ):
             raise ValueError("Latent dynamics epochs and mini-batches must be positive.")
+        if self.latent_rollout_enabled and 1 not in self.latent_dynamics_horizons:
+            raise ValueError("Autoregressive latent rollout requires horizon 1 in latent_dynamics_horizons.")
+        if self.latent_rollout_enabled and not hasattr(self.actor, "rollout_privileged_latent"):
+            raise ValueError("Latent rollout is only supported by a model with a one-step rollout method.")
 
         optimizer_cls = resolve_optimizer(optimizer)
         self.optimizer = optimizer_cls(self.actor.ppo_parameters(), lr=learning_rate)  # type: ignore
@@ -148,6 +159,8 @@ class RepresentationVelocityTeacherStudentPPO:
         self.lin_vel_loss_coef = lin_vel_loss_coef
         self.latent_dynamics_loss_coef = latent_dynamics_loss_coef
         self.latent_dynamics_detach_source = latent_dynamics_detach_source
+        self.latent_rollout_horizon = latent_rollout_horizon
+        self.latent_rollout_loss_coef = latent_rollout_loss_coef
         self.num_latent_dynamics_epochs = num_latent_dynamics_epochs
         self.num_latent_dynamics_mini_batches = num_latent_dynamics_mini_batches
         self.commanded_action_clip = commanded_action_clip
@@ -277,8 +290,19 @@ class RepresentationVelocityTeacherStudentPPO:
         mean_latent_dynamics_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
         mean_latent_identity_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
         mean_latent_shuffled_action_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
+        mean_latent_reversed_action_loss = {
+            horizon: 0.0 for horizon in self.latent_dynamics_horizons if horizon > 1
+        }
         mean_latent_prediction_cosine = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
         latent_dynamics_samples = {horizon: 0 for horizon in self.latent_dynamics_horizons}
+        rollout_steps = tuple(range(1, self.latent_rollout_horizon + 1))
+        mean_latent_rollout_loss = {step: 0.0 for step in rollout_steps}
+        mean_latent_rollout_identity_loss = {step: 0.0 for step in rollout_steps}
+        mean_latent_rollout_shuffled_action_loss = {step: 0.0 for step in rollout_steps}
+        mean_latent_rollout_cosine = {step: 0.0 for step in rollout_steps}
+        mean_latent_direct_rollout_mse = 0.0
+        mean_latent_direct_rollout_cosine = 0.0
+        latent_rollout_samples = 0
         if self.latent_dynamics_enabled:
             self.student_optimizer.zero_grad()
             dynamics_generators = {
@@ -291,6 +315,17 @@ class RepresentationVelocityTeacherStudentPPO:
                 )
                 for horizon in self.latent_dynamics_horizons
             }
+            rollout_generator = (
+                iter(
+                    self.storage.latent_dynamics_sequence_mini_batch_generator(
+                        self.num_latent_dynamics_mini_batches,
+                        self.num_latent_dynamics_epochs,
+                        rollout_horizon=self.latent_rollout_horizon,
+                    )
+                )
+                if self.latent_rollout_enabled
+                else None
+            )
             while dynamics_generators:
                 horizon_batches = {}
                 for horizon, generator in tuple(dynamics_generators.items()):
@@ -298,7 +333,13 @@ class RepresentationVelocityTeacherStudentPPO:
                         horizon_batches[horizon] = next(generator)
                     except StopIteration:
                         del dynamics_generators[horizon]
-                if not horizon_batches:
+                rollout_batch = None
+                if rollout_generator is not None:
+                    try:
+                        rollout_batch = next(rollout_generator)
+                    except StopIteration:
+                        rollout_generator = None
+                if not horizon_batches and rollout_batch is None:
                     continue
 
                 active_weight = sum(
@@ -338,6 +379,22 @@ class RepresentationVelocityTeacherStudentPPO:
                             shuffled_action_block,
                             horizon,
                         )
+                        if horizon > 1:
+                            reversed_action_block = (
+                                commanded_action_block.reshape(
+                                    commanded_action_block.shape[0],
+                                    horizon,
+                                    self.actor.latent_dynamics_action_dim,
+                                )
+                                .flip(dims=(1,))
+                                .flatten(start_dim=1)
+                            )
+                            reversed_prediction = self.actor.predict_privileged_latent(
+                                latent_t,
+                                reversed_action_block,
+                                horizon,
+                            )
+                            reversed_action_loss = F.mse_loss(reversed_prediction, latent_future)
                         identity_loss = F.mse_loss(latent_t, latent_future)
                         shuffled_action_loss = F.mse_loss(shuffled_prediction, latent_future)
                         prediction_cosine = F.cosine_similarity(
@@ -350,10 +407,87 @@ class RepresentationVelocityTeacherStudentPPO:
                     mean_latent_dynamics_loss[horizon] += dynamics_loss.item() * batch_size
                     mean_latent_identity_loss[horizon] += identity_loss.item() * batch_size
                     mean_latent_shuffled_action_loss[horizon] += shuffled_action_loss.item() * batch_size
+                    if horizon > 1:
+                        mean_latent_reversed_action_loss[horizon] += reversed_action_loss.item() * batch_size
                     mean_latent_prediction_cosine[horizon] += prediction_cosine.item() * batch_size
                     latent_dynamics_samples[horizon] += batch_size
 
-                weighted_loss = self.latent_dynamics_loss_coef * weighted_loss / active_weight
+                if horizon_batches:
+                    weighted_loss = weighted_loss / active_weight
+
+                if rollout_batch is not None:
+                    observations_t = rollout_batch.observations
+                    future_observations = rollout_batch.future_observations
+                    commanded_action_sequence = rollout_batch.commanded_actions
+
+                    latent_t = self.actor.get_privileged_latent(observations_t)
+                    if self.latent_dynamics_detach_source:
+                        latent_t = latent_t.detach()
+                    with torch.no_grad():
+                        future_latents = self.actor.get_privileged_latent(future_observations)
+                    rollout_predictions = self.actor.rollout_privileged_latent(
+                        latent_t,
+                        commanded_action_sequence,
+                    )
+                    rollout_step_losses = torch.stack(
+                        [
+                            F.mse_loss(rollout_predictions[step], future_latents[step])
+                            for step in range(self.latent_rollout_horizon)
+                        ]
+                    )
+                    rollout_loss = rollout_step_losses.mean()
+                    weighted_loss = weighted_loss + self.latent_rollout_loss_coef * rollout_loss
+
+                    with torch.no_grad():
+                        batch_size = observations_t.batch_size[0]
+                        shuffled_action_sequence = commanded_action_sequence[
+                            :,
+                            torch.randperm(batch_size, device=commanded_action_sequence.device),
+                        ]
+                        shuffled_rollout_predictions = self.actor.rollout_privileged_latent(
+                            latent_t,
+                            shuffled_action_sequence,
+                        )
+                        for step in range(self.latent_rollout_horizon):
+                            identity_loss = F.mse_loss(latent_t, future_latents[step])
+                            shuffled_action_loss = F.mse_loss(
+                                shuffled_rollout_predictions[step],
+                                future_latents[step],
+                            )
+                            rollout_cosine = F.cosine_similarity(
+                                rollout_predictions[step],
+                                future_latents[step],
+                                dim=-1,
+                            ).mean()
+                            rollout_step = step + 1
+                            mean_latent_rollout_loss[rollout_step] += (
+                                rollout_step_losses[step].item() * batch_size
+                            )
+                            mean_latent_rollout_identity_loss[rollout_step] += identity_loss.item() * batch_size
+                            mean_latent_rollout_shuffled_action_loss[rollout_step] += (
+                                shuffled_action_loss.item() * batch_size
+                            )
+                            mean_latent_rollout_cosine[rollout_step] += rollout_cosine.item() * batch_size
+
+                        if self.latent_rollout_horizon in self.latent_dynamics_horizons:
+                            direct_action_block = commanded_action_sequence.transpose(0, 1).flatten(start_dim=1)
+                            direct_prediction = self.actor.predict_privileged_latent(
+                                latent_t,
+                                direct_action_block,
+                                self.latent_rollout_horizon,
+                            )
+                            mean_latent_direct_rollout_mse += F.mse_loss(
+                                direct_prediction,
+                                rollout_predictions[-1],
+                            ).item() * batch_size
+                            mean_latent_direct_rollout_cosine += F.cosine_similarity(
+                                direct_prediction,
+                                rollout_predictions[-1],
+                                dim=-1,
+                            ).mean().item() * batch_size
+                        latent_rollout_samples += batch_size
+
+                weighted_loss = self.latent_dynamics_loss_coef * weighted_loss
                 weighted_loss.backward()
                 if self.is_multi_gpu:
                     self.reduce_parameters(self.actor.latent_dynamics_parameters())
@@ -428,6 +562,8 @@ class RepresentationVelocityTeacherStudentPPO:
                     mean_latent_dynamics_loss[horizon] /= latent_dynamics_samples[horizon]
                     mean_latent_identity_loss[horizon] /= latent_dynamics_samples[horizon]
                     mean_latent_shuffled_action_loss[horizon] /= latent_dynamics_samples[horizon]
+                    if horizon > 1:
+                        mean_latent_reversed_action_loss[horizon] /= latent_dynamics_samples[horizon]
                     mean_latent_prediction_cosine[horizon] /= latent_dynamics_samples[horizon]
 
             available_horizons = [
@@ -485,6 +621,57 @@ class RepresentationVelocityTeacherStudentPPO:
                         f"latent_dynamics_valid_fraction_k{horizon}": self.storage.latent_dynamics_valid_fractions.get(
                             horizon,
                             0.0,
+                        ),
+                    }
+                )
+                if horizon > 1:
+                    loss_dict.update(
+                        {
+                            f"latent_reversed_action_loss_k{horizon}": mean_latent_reversed_action_loss[horizon],
+                            f"latent_reversed_action_ratio_k{horizon}": mean_latent_reversed_action_loss[horizon]
+                            / (mean_latent_dynamics_loss[horizon] + 1.0e-8),
+                        }
+                    )
+        if self.latent_rollout_enabled:
+            if latent_rollout_samples > 0:
+                for step in rollout_steps:
+                    mean_latent_rollout_loss[step] /= latent_rollout_samples
+                    mean_latent_rollout_identity_loss[step] /= latent_rollout_samples
+                    mean_latent_rollout_shuffled_action_loss[step] /= latent_rollout_samples
+                    mean_latent_rollout_cosine[step] /= latent_rollout_samples
+                mean_latent_direct_rollout_mse /= latent_rollout_samples
+                mean_latent_direct_rollout_cosine /= latent_rollout_samples
+
+            loss_dict.update(
+                {
+                    "latent_rollout_loss": sum(mean_latent_rollout_loss.values()) / len(rollout_steps),
+                    "latent_rollout_valid_fraction": self.storage.latent_dynamics_sequence_valid_fraction,
+                }
+            )
+            for step in rollout_steps:
+                loss_dict.update(
+                    {
+                        f"latent_rollout_loss_k{step}": mean_latent_rollout_loss[step],
+                        f"latent_rollout_identity_ratio_k{step}": mean_latent_rollout_loss[step]
+                        / (mean_latent_rollout_identity_loss[step] + 1.0e-8),
+                        f"latent_rollout_shuffled_action_loss_k{step}": (
+                            mean_latent_rollout_shuffled_action_loss[step]
+                        ),
+                        f"latent_rollout_shuffled_action_ratio_k{step}": (
+                            mean_latent_rollout_shuffled_action_loss[step]
+                            / (mean_latent_rollout_loss[step] + 1.0e-8)
+                        ),
+                        f"latent_rollout_cosine_similarity_k{step}": mean_latent_rollout_cosine[step],
+                    }
+                )
+            if self.latent_rollout_horizon in self.latent_dynamics_horizons:
+                loss_dict.update(
+                    {
+                        f"latent_direct_rollout_cosine_k{self.latent_rollout_horizon}": (
+                            mean_latent_direct_rollout_cosine
+                        ),
+                        f"latent_direct_rollout_mse_k{self.latent_rollout_horizon}": (
+                            mean_latent_direct_rollout_mse
                         ),
                     }
                 )

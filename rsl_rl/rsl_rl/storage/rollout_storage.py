@@ -88,6 +88,7 @@ class RolloutStorage:
             privileged_actions: torch.Tensor | None = None,
             dones: torch.Tensor | None = None,
             next_observations: TensorDict | None = None,
+            future_observations: TensorDict | None = None,
             commanded_actions: torch.Tensor | None = None,
         ) -> None:
             """Initialize a batch container over rollout data."""
@@ -103,6 +104,9 @@ class RolloutStorage:
 
             self.next_observations: TensorDict | None = next_observations
             """Observations at the requested future horizon after ``observations``."""
+
+            self.future_observations: TensorDict | None = future_observations
+            """Observation sequence after ``observations``, with leading time dimension."""
 
             self.values: torch.Tensor | None = values
             """Batch of value estimates (RL only)."""
@@ -161,6 +165,7 @@ class RolloutStorage:
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
         self.latent_dynamics_valid_fraction = 0.0
         self.latent_dynamics_valid_fractions: dict[int, float] = {}
+        self.latent_dynamics_sequence_valid_fraction = 0.0
 
         # For distillation
         if training_type == "distillation":
@@ -224,6 +229,7 @@ class RolloutStorage:
         self.step = 0
         self.latent_dynamics_valid_fraction = 0.0
         self.latent_dynamics_valid_fractions.clear()
+        self.latent_dynamics_sequence_valid_fraction = 0.0
 
     # For distillation
     def generator(self) -> Generator[Batch, None, None]:
@@ -394,6 +400,75 @@ class RolloutStorage:
                     observations=observations_t[batch_indices],
                     next_observations=observations_future[batch_indices],
                     commanded_actions=commanded_action_blocks[batch_indices],
+                )
+
+    def latent_dynamics_sequence_mini_batch_generator(
+        self,
+        num_mini_batches: int,
+        num_epochs: int,
+        rollout_horizon: int = 5,
+    ) -> Generator[Batch, None, None]:
+        """Yield valid starts, all future observations, and ordered action sequences."""
+        if self.training_type != "rl":
+            raise ValueError("This function is only available for reinforcement learning training.")
+        if self.commanded_actions is None:
+            raise ValueError("Commanded actions were not recorded in rollout storage.")
+        if num_mini_batches <= 0 or num_epochs <= 0:
+            raise ValueError("Latent dynamics epochs and mini-batches must be positive.")
+        if rollout_horizon <= 0:
+            raise ValueError(f"Latent rollout horizon must be positive, got {rollout_horizon}.")
+
+        num_start_steps = self.num_transitions_per_env - rollout_horizon
+        if num_start_steps <= 0:
+            self.latent_dynamics_sequence_valid_fraction = 0.0
+            return
+
+        transition_is_valid = ~self.dones.squeeze(-1).bool()
+        valid = torch.stack(
+            [
+                transition_is_valid[offset : offset + num_start_steps]
+                for offset in range(rollout_horizon)
+            ],
+            dim=0,
+        ).all(dim=0)
+        self.latent_dynamics_sequence_valid_fraction = valid.float().mean().item()
+        valid_indices = valid.flatten().nonzero(as_tuple=False).flatten()
+        if valid_indices.numel() == 0:
+            return
+
+        observations_t = self.observations[:num_start_steps].flatten(0, 1)
+        future_observations = TensorDict(
+            {
+                key: torch.stack(
+                    [
+                        value[offset : offset + num_start_steps]
+                        for offset in range(1, rollout_horizon + 1)
+                    ],
+                    dim=0,
+                ).flatten(1, 2)
+                for key, value in self.observations.items()
+            },
+            batch_size=[rollout_horizon, num_start_steps * self.num_envs],
+            device=self.device,
+        )
+        commanded_action_sequence = torch.stack(
+            [
+                self.commanded_actions[offset : offset + num_start_steps]
+                for offset in range(rollout_horizon)
+            ],
+            dim=0,
+        ).flatten(1, 2)
+        effective_num_mini_batches = min(num_mini_batches, valid_indices.numel())
+
+        for _ in range(num_epochs):
+            permutation = valid_indices[
+                torch.randperm(valid_indices.numel(), device=self.device)
+            ]
+            for batch_indices in torch.tensor_split(permutation, effective_num_mini_batches):
+                yield RolloutStorage.Batch(
+                    observations=observations_t[batch_indices],
+                    future_observations=future_observations[:, batch_indices],
+                    commanded_actions=commanded_action_sequence[:, batch_indices],
                 )
 
     # For reinforcement learning with recurrent networks
