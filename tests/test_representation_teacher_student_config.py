@@ -193,6 +193,9 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     assert agent["actor"]["latent_dynamics_hidden_dims"] == (128, 128)
     assert agent["algorithm"]["representation_chunk_length"] == 12
     assert agent["algorithm"]["latent_dynamics_loss_coef"] == 1.0
+    assert agent["algorithm"]["latent_dynamics_horizons"] == (1, 5)
+    assert agent["algorithm"]["latent_dynamics_horizon_weights"] == (1.0, 0.5)
+    assert agent["algorithm"]["latent_dynamics_detach_source"] is False
     assert agent["algorithm"]["num_latent_dynamics_epochs"] == 1
     assert agent["algorithm"]["num_latent_dynamics_mini_batches"] == 4
     command_generation_group = cfg.observations[

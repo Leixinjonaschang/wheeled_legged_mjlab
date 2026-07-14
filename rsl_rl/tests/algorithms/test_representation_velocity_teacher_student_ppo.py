@@ -19,7 +19,7 @@ from rsl_rl.models import DepthRepresentationVelocityActorCritic, Representation
 from rsl_rl.storage import RolloutStorage
 
 NUM_ENVS = 4
-NUM_STEPS = 4
+NUM_STEPS = 6
 PROPRIO_DIM = 28
 COMMAND_DIM = 3
 LIN_VEL_DIM = 3
@@ -86,6 +86,7 @@ def make_depth_model(obs: TensorDict) -> DepthRepresentationVelocityActorCritic:
         depth_feature_dim=8,
         depth_gru_hidden_dim=8,
         depth_channels=(4, 4),
+        latent_dynamics_horizons=(1, 5),
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
     )
 
@@ -126,6 +127,8 @@ def build_depth_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, Te
         num_representation_mini_batches=2,
         representation_chunk_length=2,
         latent_dynamics_loss_coef=1.0,
+        latent_dynamics_horizons=(1, 5),
+        latent_dynamics_horizon_weights=(1.0, 0.5),
         num_latent_dynamics_epochs=1,
         num_latent_dynamics_mini_batches=2,
         commanded_action_clip=0.5,
@@ -223,7 +226,23 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "latent_dynamics_loss",
         "latent_identity_loss",
         "latent_prediction_identity_ratio",
+        "latent_shuffled_action_loss",
+        "latent_shuffled_action_ratio",
         "latent_dynamics_valid_fraction",
+        "latent_dynamics_loss_k1",
+        "latent_dynamics_loss_k5",
+        "latent_identity_loss_k1",
+        "latent_identity_loss_k5",
+        "latent_prediction_identity_ratio_k1",
+        "latent_prediction_identity_ratio_k5",
+        "latent_shuffled_action_loss_k1",
+        "latent_shuffled_action_loss_k5",
+        "latent_shuffled_action_ratio_k1",
+        "latent_shuffled_action_ratio_k5",
+        "latent_prediction_cosine_similarity_k1",
+        "latent_prediction_cosine_similarity_k5",
+        "latent_dynamics_valid_fraction_k1",
+        "latent_dynamics_valid_fraction_k5",
     } <= set(losses)
     assert calls["flat"] == 0
     assert calls["sequence"] > 0
@@ -248,16 +267,26 @@ def test_depth_dynamics_updates_predictor_and_records_clipped_commanded_actions(
     alg.compute_returns(next_obs)
 
     predictor_before = {
-        name: param.detach().clone()
-        for name, param in alg.actor.latent_dynamics_predictor.named_parameters()
+        horizon: {
+            name: param.detach().clone()
+            for name, param in predictor.named_parameters()
+        }
+        for horizon, predictor in alg.actor.latent_dynamics_predictors.items()
     }
     losses = alg.update()
 
-    assert any_param_changed(predictor_before, alg.actor.latent_dynamics_predictor)
+    for horizon, predictor in alg.actor.latent_dynamics_predictors.items():
+        assert any_param_changed(predictor_before[horizon], predictor)
     assert losses["latent_dynamics_valid_fraction"] == 1.0
+    assert losses["latent_dynamics_valid_fraction_k1"] == 1.0
+    assert losses["latent_dynamics_valid_fraction_k5"] == 1.0
+    assert losses["latent_dynamics_loss"] == pytest.approx(
+        (losses["latent_dynamics_loss_k1"] + 0.5 * losses["latent_dynamics_loss_k5"]) / 1.5
+    )
 
 
 def test_latent_dynamics_generator_filters_done_and_command_resample_pairs() -> None:
+    num_steps = 4
     num_envs = 2
     obs = TensorDict(
         {
@@ -266,8 +295,8 @@ def test_latent_dynamics_generator_filters_done_and_command_resample_pairs() -> 
         },
         batch_size=[num_envs],
     )
-    storage = RolloutStorage("rl", num_envs, NUM_STEPS, obs, [1])
-    state = torch.arange(NUM_STEPS * num_envs).view(NUM_STEPS, num_envs, 1).float()
+    storage = RolloutStorage("rl", num_envs, num_steps, obs, [1])
+    state = torch.arange(num_steps * num_envs).view(num_steps, num_envs, 1).float()
     storage.observations["state"].copy_(state)
     storage.observations["latent_dynamics_command_generation"].copy_(
         torch.tensor(
@@ -296,6 +325,46 @@ def test_latent_dynamics_generator_filters_done_and_command_resample_pairs() -> 
 
     assert pair_markers == {(2, 4, 2), (3, 5, 3), (5, 7, 5)}
     assert storage.latent_dynamics_valid_fraction == 0.5
+    assert storage.latent_dynamics_valid_fractions[1] == 0.5
+
+
+def test_latent_dynamics_generator_builds_horizon_action_block_and_masks_full_interval() -> None:
+    num_steps = 8
+    num_envs = 2
+    obs = TensorDict(
+        {
+            "state": torch.zeros(num_envs, 1),
+            "latent_dynamics_command_generation": torch.zeros(num_envs, 1),
+        },
+        batch_size=[num_envs],
+    )
+    storage = RolloutStorage("rl", num_envs, num_steps, obs, [1])
+    state = torch.arange(num_steps * num_envs).view(num_steps, num_envs, 1).float()
+    storage.observations["state"].copy_(state)
+    storage.observations["latent_dynamics_command_generation"][:, 1].copy_(
+        torch.tensor([[0.0], [0.0], [1.0], [1.0], [1.0], [1.0], [1.0], [1.0]])
+    )
+    storage.commanded_actions = state.clone()
+    storage.dones[0, 0] = 1
+
+    batches = list(storage.latent_dynamics_mini_batch_generator(2, 1, horizon=5))
+    pair_markers = {
+        (int(current), int(future), tuple(int(action) for action in action_block))
+        for batch in batches
+        for current, future, action_block in zip(
+            batch.observations["state"],
+            batch.next_observations["state"],
+            batch.commanded_actions,
+            strict=True,
+        )
+    }
+
+    assert pair_markers == {
+        (2, 12, (2, 4, 6, 8, 10)),
+        (4, 14, (4, 6, 8, 10, 12)),
+        (5, 15, (5, 7, 9, 11, 13)),
+    }
+    assert storage.latent_dynamics_valid_fractions[5] == 0.5
 
 
 def test_student_loss_detaches_privileged_encoder_target() -> None:

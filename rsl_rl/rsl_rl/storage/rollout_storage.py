@@ -102,7 +102,7 @@ class RolloutStorage:
             """Batch of globally clipped policy-space actions."""
 
             self.next_observations: TensorDict | None = next_observations
-            """Observations one environment step after ``observations``."""
+            """Observations at the requested future horizon after ``observations``."""
 
             self.values: torch.Tensor | None = values
             """Batch of value estimates (RL only)."""
@@ -160,6 +160,7 @@ class RolloutStorage:
         self.commanded_actions: torch.Tensor | None = None
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
         self.latent_dynamics_valid_fraction = 0.0
+        self.latent_dynamics_valid_fractions: dict[int, float] = {}
 
         # For distillation
         if training_type == "distillation":
@@ -221,6 +222,8 @@ class RolloutStorage:
     def clear(self) -> None:
         """Reset the write cursor for the next rollout."""
         self.step = 0
+        self.latent_dynamics_valid_fraction = 0.0
+        self.latent_dynamics_valid_fractions.clear()
 
     # For distillation
     def generator(self) -> Generator[Batch, None, None]:
@@ -338,9 +341,10 @@ class RolloutStorage:
         self,
         num_mini_batches: int,
         num_epochs: int,
+        horizon: int = 1,
         command_generation_obs_group: str = "latent_dynamics_command_generation",
     ) -> Generator[Batch, None, None]:
-        """Yield valid shuffled one-step transition pairs for latent dynamics learning."""
+        """Yield valid direct-transition pairs and aligned action blocks for one horizon."""
         if self.training_type != "rl":
             raise ValueError("This function is only available for reinforcement learning training.")
         if self.commanded_actions is None:
@@ -351,10 +355,13 @@ class RolloutStorage:
             )
         if num_mini_batches <= 0 or num_epochs <= 0:
             raise ValueError("Latent dynamics epochs and mini-batches must be positive.")
+        if horizon <= 0:
+            raise ValueError(f"Latent dynamics horizon must be positive, got {horizon}.")
 
-        num_pair_steps = self.num_transitions_per_env - 1
+        num_pair_steps = self.num_transitions_per_env - horizon
         if num_pair_steps <= 0:
             self.latent_dynamics_valid_fraction = 0.0
+            self.latent_dynamics_valid_fractions[horizon] = 0.0
             return
 
         command_generation = self.observations[command_generation_obs_group]
@@ -364,19 +371,33 @@ class RolloutStorage:
                 f"shape {tuple(command_generation.shape)}."
             )
 
-        not_done = ~self.dones[:-1].squeeze(-1).bool()
-        same_command_generation = command_generation[:-1].squeeze(-1).eq(
-            command_generation[1:].squeeze(-1)
+        transition_is_valid = ~self.dones.squeeze(-1).bool()
+        not_done = torch.stack(
+            [
+                transition_is_valid[offset : offset + num_pair_steps]
+                for offset in range(horizon)
+            ],
+            dim=0,
+        ).all(dim=0)
+        same_command_generation = command_generation[:num_pair_steps].squeeze(-1).eq(
+            command_generation[horizon:].squeeze(-1)
         )
         valid = not_done & same_command_generation
         self.latent_dynamics_valid_fraction = valid.float().mean().item()
+        self.latent_dynamics_valid_fractions[horizon] = self.latent_dynamics_valid_fraction
         valid_indices = valid.flatten().nonzero(as_tuple=False).flatten()
         if valid_indices.numel() == 0:
             return
 
-        observations_t = self.observations[:-1].flatten(0, 1)
-        observations_tp1 = self.observations[1:].flatten(0, 1)
-        commanded_actions_t = self.commanded_actions[:-1].flatten(0, 1)
+        observations_t = self.observations[:num_pair_steps].flatten(0, 1)
+        observations_future = self.observations[horizon:].flatten(0, 1)
+        commanded_action_blocks = torch.cat(
+            [
+                self.commanded_actions[offset : offset + num_pair_steps]
+                for offset in range(horizon)
+            ],
+            dim=-1,
+        ).flatten(0, 1)
         effective_num_mini_batches = min(num_mini_batches, valid_indices.numel())
 
         for _ in range(num_epochs):
@@ -386,8 +407,8 @@ class RolloutStorage:
             for batch_indices in torch.tensor_split(permutation, effective_num_mini_batches):
                 yield RolloutStorage.Batch(
                     observations=observations_t[batch_indices],
-                    next_observations=observations_tp1[batch_indices],
-                    commanded_actions=commanded_actions_t[batch_indices],
+                    next_observations=observations_future[batch_indices],
+                    commanded_actions=commanded_action_blocks[batch_indices],
                 )
 
     # For reinforcement learning with recurrent networks

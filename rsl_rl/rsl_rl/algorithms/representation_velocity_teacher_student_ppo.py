@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from collections.abc import Iterable
 from tensordict import TensorDict
 
@@ -44,6 +45,9 @@ class RepresentationVelocityTeacherStudentPPO:
         representation_loss_coef: float = 1.0,
         lin_vel_loss_coef: float = 1.0,
         latent_dynamics_loss_coef: float = 0.0,
+        latent_dynamics_horizons: tuple[int, ...] | list[int] = (1,),
+        latent_dynamics_horizon_weights: tuple[float, ...] | list[float] = (1.0,),
+        latent_dynamics_detach_source: bool = False,
         num_latent_dynamics_epochs: int = 1,
         num_latent_dynamics_mini_batches: int = 4,
         max_grad_norm: float = 1.0,
@@ -80,9 +84,33 @@ class RepresentationVelocityTeacherStudentPPO:
         self._raw_critic = self.actor
         if latent_dynamics_loss_coef < 0.0:
             raise ValueError("latent_dynamics_loss_coef must be non-negative.")
+        self.latent_dynamics_horizons = tuple(int(horizon) for horizon in latent_dynamics_horizons)
+        self.latent_dynamics_horizon_weights = tuple(float(weight) for weight in latent_dynamics_horizon_weights)
+        if not self.latent_dynamics_horizons:
+            raise ValueError("latent_dynamics_horizons must not be empty.")
+        if any(horizon <= 0 for horizon in self.latent_dynamics_horizons):
+            raise ValueError("latent_dynamics_horizons must contain only positive integers.")
+        if len(set(self.latent_dynamics_horizons)) != len(self.latent_dynamics_horizons):
+            raise ValueError("latent_dynamics_horizons must not contain duplicates.")
+        if len(self.latent_dynamics_horizons) != len(self.latent_dynamics_horizon_weights):
+            raise ValueError("Each latent dynamics horizon must have exactly one weight.")
+        if any(weight <= 0.0 for weight in self.latent_dynamics_horizon_weights):
+            raise ValueError("latent_dynamics_horizon_weights must contain only positive values.")
+        self.latent_dynamics_horizon_weight_by_horizon = dict(
+            zip(
+                self.latent_dynamics_horizons,
+                self.latent_dynamics_horizon_weights,
+                strict=True,
+            )
+        )
         self.latent_dynamics_enabled = latent_dynamics_loss_coef > 0.0
         if self.latent_dynamics_enabled and not hasattr(self.actor, "compute_latent_dynamics_loss"):
             raise ValueError("Latent dynamics is only supported by a model with a latent dynamics predictor.")
+        if self.latent_dynamics_enabled and tuple(self.actor.latent_dynamics_horizons) != self.latent_dynamics_horizons:
+            raise ValueError(
+                "Model and algorithm latent dynamics horizons must match, got "
+                f"{tuple(self.actor.latent_dynamics_horizons)} and {self.latent_dynamics_horizons}."
+            )
         if self.latent_dynamics_enabled and (
             num_latent_dynamics_epochs <= 0 or num_latent_dynamics_mini_batches <= 0
         ):
@@ -122,6 +150,7 @@ class RepresentationVelocityTeacherStudentPPO:
         self.representation_loss_coef = representation_loss_coef
         self.lin_vel_loss_coef = lin_vel_loss_coef
         self.latent_dynamics_loss_coef = latent_dynamics_loss_coef
+        self.latent_dynamics_detach_source = latent_dynamics_detach_source
         self.num_latent_dynamics_epochs = num_latent_dynamics_epochs
         self.num_latent_dynamics_mini_batches = num_latent_dynamics_mini_batches
         self.commanded_action_clip = commanded_action_clip
@@ -248,42 +277,92 @@ class RepresentationVelocityTeacherStudentPPO:
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy.mean().item()
 
-        mean_latent_dynamics_loss = 0.0
-        mean_latent_identity_loss = 0.0
-        latent_dynamics_samples = 0
+        mean_latent_dynamics_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
+        mean_latent_identity_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
+        mean_latent_shuffled_action_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
+        mean_latent_prediction_cosine = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
+        latent_dynamics_samples = {horizon: 0 for horizon in self.latent_dynamics_horizons}
         if self.latent_dynamics_enabled:
             self.student_optimizer.zero_grad()
-            generator = self.storage.latent_dynamics_mini_batch_generator(
-                self.num_latent_dynamics_mini_batches,
-                self.num_latent_dynamics_epochs,
-                LATENT_DYNAMICS_COMMAND_GENERATION_GROUP,
-            )
-            for batch in generator:
-                observations_t = batch.observations
-                observations_tp1 = batch.next_observations
-                commanded_actions = batch.commanded_actions
-                dynamics_loss = self.actor.compute_latent_dynamics_loss(
-                    observations_t,
-                    commanded_actions,
-                    observations_tp1,
+            dynamics_generators = {
+                horizon: iter(
+                    self.storage.latent_dynamics_mini_batch_generator(
+                        self.num_latent_dynamics_mini_batches,
+                        self.num_latent_dynamics_epochs,
+                        horizon=horizon,
+                        command_generation_obs_group=LATENT_DYNAMICS_COMMAND_GENERATION_GROUP,
+                    )
                 )
-                with torch.no_grad():
-                    latent_t = self.actor.get_privileged_latent(observations_t)
-                    latent_tp1 = self.actor.get_privileged_latent(observations_tp1)
-                    identity_loss = (latent_t - latent_tp1).pow(2).mean()
+                for horizon in self.latent_dynamics_horizons
+            }
+            while dynamics_generators:
+                horizon_batches = {}
+                for horizon, generator in tuple(dynamics_generators.items()):
+                    try:
+                        horizon_batches[horizon] = next(generator)
+                    except StopIteration:
+                        del dynamics_generators[horizon]
+                if not horizon_batches:
+                    continue
 
+                active_weight = sum(
+                    self.latent_dynamics_horizon_weight_by_horizon[horizon]
+                    for horizon in horizon_batches
+                )
                 self.optimizer.zero_grad()
-                weighted_loss = self.latent_dynamics_loss_coef * dynamics_loss
+                weighted_loss = torch.zeros((), device=self.device)
+                for horizon, batch in horizon_batches.items():
+                    observations_t = batch.observations
+                    observations_future = batch.next_observations
+                    commanded_action_block = batch.commanded_actions
+                    dynamics_loss = self.actor.compute_latent_dynamics_loss(
+                        observations_t,
+                        commanded_action_block,
+                        observations_future,
+                        horizon=horizon,
+                        detach_source=self.latent_dynamics_detach_source,
+                    )
+                    weighted_loss = weighted_loss + (
+                        self.latent_dynamics_horizon_weight_by_horizon[horizon] * dynamics_loss
+                    )
+
+                    with torch.no_grad():
+                        latent_t = self.actor.get_privileged_latent(observations_t)
+                        latent_future = self.actor.get_privileged_latent(observations_future)
+                        predicted_future = self.actor.predict_privileged_latent(
+                            latent_t,
+                            commanded_action_block,
+                            horizon,
+                        )
+                        shuffled_action_block = commanded_action_block[
+                            torch.randperm(commanded_action_block.shape[0], device=commanded_action_block.device)
+                        ]
+                        shuffled_prediction = self.actor.predict_privileged_latent(
+                            latent_t,
+                            shuffled_action_block,
+                            horizon,
+                        )
+                        identity_loss = F.mse_loss(latent_t, latent_future)
+                        shuffled_action_loss = F.mse_loss(shuffled_prediction, latent_future)
+                        prediction_cosine = F.cosine_similarity(
+                            predicted_future,
+                            latent_future,
+                            dim=-1,
+                        ).mean()
+
+                    batch_size = observations_t.batch_size[0]
+                    mean_latent_dynamics_loss[horizon] += dynamics_loss.item() * batch_size
+                    mean_latent_identity_loss[horizon] += identity_loss.item() * batch_size
+                    mean_latent_shuffled_action_loss[horizon] += shuffled_action_loss.item() * batch_size
+                    mean_latent_prediction_cosine[horizon] += prediction_cosine.item() * batch_size
+                    latent_dynamics_samples[horizon] += batch_size
+
+                weighted_loss = self.latent_dynamics_loss_coef * weighted_loss / active_weight
                 weighted_loss.backward()
                 if self.is_multi_gpu:
                     self.reduce_parameters(self.actor.latent_dynamics_parameters())
                 nn.utils.clip_grad_norm_(self.actor.latent_dynamics_parameters(), self.max_grad_norm)
                 self.optimizer.step()
-
-                batch_size = observations_t.batch_size[0]
-                mean_latent_dynamics_loss += dynamics_loss.item() * batch_size
-                mean_latent_identity_loss += identity_loss.item() * batch_size
-                latent_dynamics_samples += batch_size
 
             self.optimizer.zero_grad()
 
@@ -348,18 +427,71 @@ class RepresentationVelocityTeacherStudentPPO:
             "lin_vel": mean_lin_vel_loss / student_updates,
         }
         if self.latent_dynamics_enabled:
-            if latent_dynamics_samples > 0:
-                mean_latent_dynamics_loss /= latent_dynamics_samples
-                mean_latent_identity_loss /= latent_dynamics_samples
+            for horizon in self.latent_dynamics_horizons:
+                if latent_dynamics_samples[horizon] > 0:
+                    mean_latent_dynamics_loss[horizon] /= latent_dynamics_samples[horizon]
+                    mean_latent_identity_loss[horizon] /= latent_dynamics_samples[horizon]
+                    mean_latent_shuffled_action_loss[horizon] /= latent_dynamics_samples[horizon]
+                    mean_latent_prediction_cosine[horizon] /= latent_dynamics_samples[horizon]
+
+            available_horizons = [
+                horizon
+                for horizon in self.latent_dynamics_horizons
+                if latent_dynamics_samples[horizon] > 0
+            ]
+            available_weight = sum(
+                self.latent_dynamics_horizon_weight_by_horizon[horizon]
+                for horizon in available_horizons
+            )
+
+            def weighted_horizon_mean(values: dict[int, float]) -> float:
+                if available_weight == 0.0:
+                    return 0.0
+                return sum(
+                    self.latent_dynamics_horizon_weight_by_horizon[horizon] * values[horizon]
+                    for horizon in available_horizons
+                ) / available_weight
+
+            aggregate_dynamics_loss = weighted_horizon_mean(mean_latent_dynamics_loss)
+            aggregate_identity_loss = weighted_horizon_mean(mean_latent_identity_loss)
+            aggregate_shuffled_action_loss = weighted_horizon_mean(mean_latent_shuffled_action_loss)
+            aggregate_prediction_cosine = weighted_horizon_mean(mean_latent_prediction_cosine)
+            configured_weight = sum(self.latent_dynamics_horizon_weights)
+            aggregate_valid_fraction = sum(
+                self.latent_dynamics_horizon_weight_by_horizon[horizon]
+                * self.storage.latent_dynamics_valid_fractions.get(horizon, 0.0)
+                for horizon in self.latent_dynamics_horizons
+            ) / configured_weight
             loss_dict.update(
                 {
-                    "latent_dynamics_loss": mean_latent_dynamics_loss,
-                    "latent_identity_loss": mean_latent_identity_loss,
-                    "latent_prediction_identity_ratio": mean_latent_dynamics_loss
-                    / (mean_latent_identity_loss + 1.0e-8),
-                    "latent_dynamics_valid_fraction": self.storage.latent_dynamics_valid_fraction,
+                    "latent_dynamics_loss": aggregate_dynamics_loss,
+                    "latent_identity_loss": aggregate_identity_loss,
+                    "latent_prediction_identity_ratio": aggregate_dynamics_loss
+                    / (aggregate_identity_loss + 1.0e-8),
+                    "latent_shuffled_action_loss": aggregate_shuffled_action_loss,
+                    "latent_shuffled_action_ratio": aggregate_shuffled_action_loss
+                    / (aggregate_dynamics_loss + 1.0e-8),
+                    "latent_prediction_cosine_similarity": aggregate_prediction_cosine,
+                    "latent_dynamics_valid_fraction": aggregate_valid_fraction,
                 }
             )
+            for horizon in self.latent_dynamics_horizons:
+                loss_dict.update(
+                    {
+                        f"latent_dynamics_loss_k{horizon}": mean_latent_dynamics_loss[horizon],
+                        f"latent_identity_loss_k{horizon}": mean_latent_identity_loss[horizon],
+                        f"latent_prediction_identity_ratio_k{horizon}": mean_latent_dynamics_loss[horizon]
+                        / (mean_latent_identity_loss[horizon] + 1.0e-8),
+                        f"latent_shuffled_action_loss_k{horizon}": mean_latent_shuffled_action_loss[horizon],
+                        f"latent_shuffled_action_ratio_k{horizon}": mean_latent_shuffled_action_loss[horizon]
+                        / (mean_latent_dynamics_loss[horizon] + 1.0e-8),
+                        f"latent_prediction_cosine_similarity_k{horizon}": mean_latent_prediction_cosine[horizon],
+                        f"latent_dynamics_valid_fraction_k{horizon}": self.storage.latent_dynamics_valid_fractions.get(
+                            horizon,
+                            0.0,
+                        ),
+                    }
+                )
         self.storage.clear()
         return loss_dict
 
@@ -412,6 +544,10 @@ class RepresentationVelocityTeacherStudentPPO:
         default_sets = ["proprio_history", "actor_command", "lin_vel_target", "critic", "privileged_encoder"]
         if cfg["algorithm"].get("latent_dynamics_loss_coef", 0.0) > 0.0:
             default_sets.append(LATENT_DYNAMICS_COMMAND_GENERATION_GROUP)
+            cfg["actor"]["latent_dynamics_horizons"] = cfg["algorithm"].get(
+                "latent_dynamics_horizons",
+                (1,),
+            )
         cfg["obs_groups"] = resolve_obs_groups(obs, cfg["obs_groups"], default_sets)
         if cfg["algorithm"].get("rnd_cfg") is not None:
             raise ValueError("RND is not supported by RepresentationVelocityTeacherStudentPPO.")

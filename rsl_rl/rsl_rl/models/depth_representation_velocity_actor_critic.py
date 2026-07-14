@@ -37,6 +37,7 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         depth_gru_hidden_dim: int = 64,
         depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
         latent_dynamics_hidden_dims: tuple[int, ...] | list[int] = (128, 128),
+        latent_dynamics_horizons: tuple[int, ...] | list[int] = (1,),
     ) -> None:
         super().__init__(
             obs,
@@ -60,11 +61,24 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             activation=activation,
         )
         self.depth_gru = nn.GRUCell(depth_feature_dim, depth_gru_hidden_dim)
-        self.latent_dynamics_predictor = MLP(
-            latent_dim + output_dim,
-            latent_dim,
-            latent_dynamics_hidden_dims,
-            activation,
+        self.latent_dynamics_horizons = tuple(int(horizon) for horizon in latent_dynamics_horizons)
+        if not self.latent_dynamics_horizons:
+            raise ValueError("latent_dynamics_horizons must not be empty.")
+        if any(horizon <= 0 for horizon in self.latent_dynamics_horizons):
+            raise ValueError("latent_dynamics_horizons must contain only positive integers.")
+        if len(set(self.latent_dynamics_horizons)) != len(self.latent_dynamics_horizons):
+            raise ValueError("latent_dynamics_horizons must not contain duplicates.")
+        self.latent_dynamics_action_dim = output_dim
+        self.latent_dynamics_predictors = nn.ModuleDict(
+            {
+                str(horizon): MLP(
+                    latent_dim + horizon * output_dim,
+                    latent_dim,
+                    latent_dynamics_hidden_dims,
+                    activation,
+                )
+                for horizon in self.latent_dynamics_horizons
+            }
         )
 
         encoder_hidden_dims = hidden_dims if encoder_hidden_dims is None else encoder_hidden_dims
@@ -168,35 +182,56 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         yield from super().student_parameters()
 
     def ppo_parameters(self):
-        """Yield teacher optimizer parameters, including the training-only predictor."""
+        """Yield teacher optimizer parameters, including the training-only predictors."""
         yield from super().ppo_parameters()
-        yield from self.latent_dynamics_predictor.parameters()
+        yield from self.latent_dynamics_predictors.parameters()
 
     def latent_dynamics_parameters(self):
-        """Yield parameters optimized by the one-step latent dynamics loss."""
+        """Yield parameters optimized by the direct multi-horizon dynamics loss."""
         yield from self.privileged_encoder.parameters()
-        yield from self.latent_dynamics_predictor.parameters()
+        yield from self.latent_dynamics_predictors.parameters()
 
-    def predict_next_privileged_latent(
+    def predict_privileged_latent(
         self,
         latent: torch.Tensor,
-        commanded_action: torch.Tensor,
+        commanded_action_block: torch.Tensor,
+        horizon: int,
     ) -> torch.Tensor:
-        predictor_input = torch.cat((latent, commanded_action), dim=-1)
-        prediction = self.latent_dynamics_predictor(predictor_input)
+        predictor_key = str(horizon)
+        if predictor_key not in self.latent_dynamics_predictors:
+            raise ValueError(
+                f"No latent dynamics predictor configured for horizon {horizon}; "
+                f"available horizons are {self.latent_dynamics_horizons}."
+            )
+        expected_action_dim = horizon * self.latent_dynamics_action_dim
+        if commanded_action_block.shape[-1] != expected_action_dim:
+            raise ValueError(
+                f"Horizon {horizon} expects an action block with {expected_action_dim} features, "
+                f"got shape {tuple(commanded_action_block.shape)}."
+            )
+        predictor_input = torch.cat((latent, commanded_action_block), dim=-1)
+        prediction = self.latent_dynamics_predictors[predictor_key](predictor_input)
         return F.normalize(prediction, p=2.0, dim=-1)
 
     def compute_latent_dynamics_loss(
         self,
         obs_t: TensorDict,
-        action_t: torch.Tensor,
-        obs_tp1: TensorDict,
+        commanded_action_block: torch.Tensor,
+        obs_future: TensorDict,
+        horizon: int = 1,
+        detach_source: bool = False,
     ) -> torch.Tensor:
         latent_t = self.get_privileged_latent(obs_t)
+        if detach_source:
+            latent_t = latent_t.detach()
         with torch.no_grad():
-            latent_tp1 = self.get_privileged_latent(obs_tp1)
-        predicted_tp1 = self.predict_next_privileged_latent(latent_t, action_t)
-        return F.mse_loss(predicted_tp1, latent_tp1)
+            latent_future = self.get_privileged_latent(obs_future)
+        predicted_future = self.predict_privileged_latent(
+            latent_t,
+            commanded_action_block,
+            horizon,
+        )
+        return F.mse_loss(predicted_future, latent_future)
 
     def get_proprio_outputs(
         self,
