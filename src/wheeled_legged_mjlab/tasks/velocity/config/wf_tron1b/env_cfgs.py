@@ -673,7 +673,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "pose": RewardTermCfg(
             func=mdp.variable_posture,
-            weight=0.0,
+            weight=0.5,
             params={
                 "asset_cfg": leg_joint_cfg,
                 "command_name": COMMAND_NAME,
@@ -811,7 +811,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "rough_contact_pattern": RewardTermCfg(
                     func=mdp.rough_contact_pattern,
-                    weight=0.5,
+                    weight=0.3,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
