@@ -180,7 +180,7 @@ class Logger:
 
             # Log losses
             for key, value in loss_dict.items():
-                metric_key = key if key.startswith("Grad/") else f"Loss/{key}"
+                metric_key = key if key.startswith(("Grad/", "Update/")) else f"Loss/{key}"
                 self.writer.add_scalar(metric_key, value, it)
             self.writer.add_scalar("Loss/learning_rate", learning_rate, it)
 
@@ -227,7 +227,7 @@ class Logger:
 
             # Print losses
             for key, value in loss_dict.items():
-                label = f"Mean {key}:" if key.startswith("Grad/") else f"Mean {key} loss:"
+                label = f"Mean {key}:" if key.startswith(("Grad/", "Update/")) else f"Mean {key} loss:"
                 log_string += f"""{label:>{pad}} {value:.4f}\n"""
 
             # Print rewards and episode length

@@ -116,7 +116,7 @@ def build_depth_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, Te
     alg = RepresentationVelocityTeacherStudentPPO(
         model,
         storage,
-        num_learning_epochs=1,
+        num_learning_epochs=2,
         num_mini_batches=2,
         learning_rate=1.0e-3,
         student_learning_rate=1.0e-3,
@@ -227,10 +227,17 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "Grad/ppo_total_norm",
         "Grad/privileged_encoder_ppo_norm",
         "Grad/ppo_clip_fraction",
+        "Grad/combined_total_norm",
+        "Grad/combined_clip_fraction",
         "Grad/dynamics_total_norm",
         "Grad/privileged_encoder_dynamics_norm",
         "Grad/privileged_encoder_dynamics_to_ppo_ratio",
         "Grad/dynamics_clip_fraction",
+        "Update/privileged_encoder_norm_joint",
+        "Update/privileged_encoder_norm_ppo_only",
+        "Update/policy_kl_joint",
+        "Update/policy_kl_ppo_only",
+        "Update/joint_step_fraction",
         "latent_dynamics_loss",
         "latent_identity_loss",
         "latent_prediction_identity_ratio",
@@ -261,11 +268,16 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
     assert losses["Grad/privileged_encoder_ppo_norm"] > 0.0
     assert losses["Grad/privileged_encoder_dynamics_norm"] > 0.0
     assert losses["Grad/privileged_encoder_dynamics_to_ppo_ratio"] == pytest.approx(
-        losses["Grad/privileged_encoder_dynamics_norm"]
-        / (losses["Grad/privileged_encoder_ppo_norm"] + 1.0e-8)
+        losses["Grad/privileged_encoder_dynamics_norm"] / (losses["Grad/privileged_encoder_ppo_norm"] + 1.0e-8)
     )
     assert 0.0 <= losses["Grad/ppo_clip_fraction"] <= 1.0
+    assert 0.0 <= losses["Grad/combined_clip_fraction"] <= 1.0
     assert 0.0 <= losses["Grad/dynamics_clip_fraction"] <= 1.0
+    assert losses["Update/privileged_encoder_norm_joint"] > 0.0
+    assert losses["Update/privileged_encoder_norm_ppo_only"] > 0.0
+    assert losses["Update/policy_kl_joint"] >= 0.0
+    assert losses["Update/policy_kl_ppo_only"] >= 0.0
+    assert losses["Update/joint_step_fraction"] == pytest.approx(0.5)
     for step in range(1, 6):
         assert {
             f"latent_rollout_loss_k{step}",
@@ -297,22 +309,49 @@ def test_depth_dynamics_updates_predictor_and_records_clipped_commanded_actions(
     alg.compute_returns(next_obs)
 
     predictor_before = {
-        horizon: {
-            name: param.detach().clone()
-            for name, param in predictor.named_parameters()
-        }
+        horizon: {name: param.detach().clone() for name, param in predictor.named_parameters()}
         for horizon, predictor in alg.actor.latent_dynamics_predictors.items()
     }
     losses = alg.update()
 
     for horizon, predictor in alg.actor.latent_dynamics_predictors.items():
         assert any_param_changed(predictor_before[horizon], predictor)
-    assert losses["latent_dynamics_valid_fraction"] == 1.0
-    assert losses["latent_dynamics_valid_fraction_k1"] == 1.0
-    assert losses["latent_dynamics_valid_fraction_k5"] == 1.0
+    assert losses["latent_dynamics_valid_fraction"] == pytest.approx(1.0)
+    assert losses["latent_dynamics_valid_fraction_k1"] == pytest.approx(1.0)
+    assert losses["latent_dynamics_valid_fraction_k5"] == pytest.approx(1.0)
     assert losses["latent_dynamics_loss"] == pytest.approx(
         (losses["latent_dynamics_loss_k1"] + 0.5 * losses["latent_dynamics_loss_k5"]) / 1.5
     )
+
+
+def test_depth_dynamics_uses_joint_optimizer_steps_only() -> None:
+    alg, obs = build_depth_algorithm()
+    fill_rollout(alg, obs)
+    optimizer_steps = 0
+    original_step = alg.optimizer.step
+
+    def counted_step(*args, **kwargs):
+        nonlocal optimizer_steps
+        optimizer_steps += 1
+        return original_step(*args, **kwargs)
+
+    alg.optimizer.step = counted_step
+
+    alg.update()
+
+    assert optimizer_steps == alg.num_learning_epochs * alg.num_mini_batches
+
+
+def test_joint_dynamics_respects_detached_source_encoder() -> None:
+    alg, obs = build_depth_algorithm()
+    alg.latent_dynamics_detach_source = True
+    fill_rollout(alg, obs)
+
+    losses = alg.update()
+
+    assert losses["Grad/privileged_encoder_dynamics_norm"] == pytest.approx(0.0)
+    assert losses["Grad/dynamics_total_norm"] > 0.0
+    assert losses["Update/joint_step_fraction"] == pytest.approx(0.5)
 
 
 def test_latent_dynamics_generator_filters_only_done_pairs() -> None:

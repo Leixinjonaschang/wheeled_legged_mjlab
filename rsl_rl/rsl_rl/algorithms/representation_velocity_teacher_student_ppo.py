@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-# ruff: noqa: D102, D107
+# ruff: noqa: D102, D107, N812
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from rsl_rl.extensions import resolve_rnd_config
 from rsl_rl.models import RepresentationVelocityActorCritic
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import compile_model, resolve_callable, resolve_obs_groups, resolve_optimizer
+
 
 class RepresentationVelocityTeacherStudentPPO:
     """PPO on privileged latents plus delayed student velocity representation learning."""
@@ -115,10 +116,16 @@ class RepresentationVelocityTeacherStudentPPO:
                 "Model and algorithm latent dynamics horizons must match, got "
                 f"{tuple(self.actor.latent_dynamics_horizons)} and {self.latent_dynamics_horizons}."
             )
-        if self.latent_dynamics_enabled and (
-            num_latent_dynamics_epochs <= 0 or num_latent_dynamics_mini_batches <= 0
-        ):
+        if self.latent_dynamics_enabled and (num_latent_dynamics_epochs <= 0 or num_latent_dynamics_mini_batches <= 0):
             raise ValueError("Latent dynamics epochs and mini-batches must be positive.")
+        if self.latent_dynamics_enabled and (
+            num_latent_dynamics_epochs * num_latent_dynamics_mini_batches > num_learning_epochs * num_mini_batches
+        ):
+            raise ValueError(
+                "Joint latent dynamics updates must not outnumber PPO updates; got "
+                f"{num_latent_dynamics_epochs * num_latent_dynamics_mini_batches} and "
+                f"{num_learning_epochs * num_mini_batches}."
+            )
         if self.latent_rollout_enabled and 1 not in self.latent_dynamics_horizons:
             raise ValueError("Autoregressive latent rollout requires horizon 1 in latent_dynamics_horizons.")
         if self.latent_rollout_enabled and not hasattr(self.actor, "rollout_privileged_latent"):
@@ -222,9 +229,52 @@ class RepresentationVelocityTeacherStudentPPO:
         mean_ppo_grad_norm = 0.0
         mean_privileged_encoder_ppo_grad_norm = 0.0
         ppo_grad_clip_count = 0
+        mean_latent_dynamics_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
+        mean_latent_identity_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
+        mean_latent_shuffled_action_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
+        mean_latent_reversed_action_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons if horizon > 1}
+        mean_latent_prediction_cosine = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
+        latent_dynamics_samples = {horizon: 0 for horizon in self.latent_dynamics_horizons}
+        rollout_steps = tuple(range(1, self.latent_rollout_horizon + 1))
+        mean_latent_rollout_loss = {step: 0.0 for step in rollout_steps}
+        mean_latent_rollout_identity_loss = {step: 0.0 for step in rollout_steps}
+        mean_latent_rollout_shuffled_action_loss = {step: 0.0 for step in rollout_steps}
+        mean_latent_rollout_cosine = {step: 0.0 for step in rollout_steps}
+        mean_latent_direct_rollout_mse = 0.0
+        mean_latent_direct_rollout_cosine = 0.0
+        latent_rollout_samples = 0
+        mean_latent_dynamics_grad_norm = 0.0
+        mean_privileged_encoder_dynamics_grad_norm = 0.0
+        latent_dynamics_grad_clip_count = 0
+        latent_dynamics_updates = 0
+        mean_combined_grad_norm = 0.0
+        combined_grad_clip_count = 0
+        mean_joint_encoder_update_norm = 0.0
+        mean_ppo_only_encoder_update_norm = 0.0
+        mean_joint_policy_kl = 0.0
+        mean_ppo_only_policy_kl = 0.0
+        joint_update_diagnostics = 0
+        ppo_only_update_diagnostics = 0
+
+        num_ppo_updates = self.num_learning_epochs * self.num_mini_batches
+        num_configured_dynamics_updates = (
+            self.num_latent_dynamics_epochs * self.num_latent_dynamics_mini_batches
+            if self.latent_dynamics_enabled
+            else 0
+        )
+        # Spread auxiliary batches across PPO so shared parameters receive one joint Adam step,
+        # rather than extra dynamics-only steps that would reuse PPO's optimizer momentum.
+        dynamics_update_indices = {
+            ((update + 1) * num_ppo_updates - 1) // num_configured_dynamics_updates
+            for update in range(num_configured_dynamics_updates)
+        }
+        ppo_only_diagnostic_indices = {
+            update - 1 for update in dynamics_update_indices if update > 0 and update - 1 not in dynamics_update_indices
+        }
+        dynamics_generator = iter(self._latent_dynamics_batch_generator())
 
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        for batch in generator:
+        for update_index, batch in enumerate(generator):
             original_batch_size = batch.observations.batch_size[0]
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
@@ -277,244 +327,115 @@ class RepresentationVelocityTeacherStudentPPO:
             else:
                 value_loss = (batch.returns - values).pow(2).mean()
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
+            ppo_loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy.mean()
+            dynamics_batches = next(dynamics_generator, None) if update_index in dynamics_update_indices else None
+            dynamics_loss = None
+            if dynamics_batches is not None:
+                horizon_batches, rollout_batch = dynamics_batches
+                (
+                    dynamics_loss,
+                    horizon_metrics,
+                    rollout_metrics,
+                    direct_rollout_mse,
+                    direct_rollout_cosine,
+                    rollout_batch_size,
+                ) = self._compute_latent_dynamics_objective(horizon_batches, rollout_batch)
+                for horizon, metrics in horizon_metrics.items():
+                    (
+                        horizon_loss,
+                        identity_loss,
+                        shuffled_action_loss,
+                        reversed_action_loss,
+                        prediction_cosine,
+                        batch_size,
+                    ) = metrics
+                    mean_latent_dynamics_loss[horizon] += horizon_loss * batch_size
+                    mean_latent_identity_loss[horizon] += identity_loss * batch_size
+                    mean_latent_shuffled_action_loss[horizon] += shuffled_action_loss * batch_size
+                    if horizon > 1:
+                        mean_latent_reversed_action_loss[horizon] += reversed_action_loss * batch_size
+                    mean_latent_prediction_cosine[horizon] += prediction_cosine * batch_size
+                    latent_dynamics_samples[horizon] += batch_size
+                for rollout_step, metrics in rollout_metrics.items():
+                    rollout_loss, identity_loss, shuffled_action_loss, rollout_cosine = metrics
+                    mean_latent_rollout_loss[rollout_step] += rollout_loss * rollout_batch_size
+                    mean_latent_rollout_identity_loss[rollout_step] += identity_loss * rollout_batch_size
+                    mean_latent_rollout_shuffled_action_loss[rollout_step] += shuffled_action_loss * rollout_batch_size
+                    mean_latent_rollout_cosine[rollout_step] += rollout_cosine * rollout_batch_size
+                mean_latent_direct_rollout_mse += direct_rollout_mse * rollout_batch_size
+                mean_latent_direct_rollout_cosine += direct_rollout_cosine * rollout_batch_size
+                latent_rollout_samples += rollout_batch_size
+
+            # Compare each joint step with the neighboring PPO-only step at the parameter-update level.
+            collect_update_diagnostics = dynamics_loss is not None or update_index in ppo_only_diagnostic_indices
+            encoder_before = (
+                self._clone_parameters(self.actor.privileged_encoder.parameters())
+                if collect_update_diagnostics
+                else None
+            )
+            distribution_params_before = (
+                tuple(param.detach().clone() for param in distribution_params) if collect_update_diagnostics else None
+            )
 
             self.optimizer.zero_grad()
-            loss.backward()
+            ppo_loss.backward()
             if self.is_multi_gpu:
                 self.reduce_parameters(self.actor.ppo_parameters())
-            mean_privileged_encoder_ppo_grad_norm += self._grad_norm(
-                self.actor.privileged_encoder.parameters()
-            )
-            ppo_grad_norm = nn.utils.clip_grad_norm_(self.actor.ppo_parameters(), self.max_grad_norm).item()
+            ppo_grad_norm = self._grad_norm(self.actor.ppo_parameters())
+            privileged_encoder_ppo_grad_norm = self._grad_norm(self.actor.privileged_encoder.parameters())
             mean_ppo_grad_norm += ppo_grad_norm
+            mean_privileged_encoder_ppo_grad_norm += privileged_encoder_ppo_grad_norm
             ppo_grad_clip_count += ppo_grad_norm > self.max_grad_norm
+
+            if dynamics_loss is not None:
+                dynamics_parameters = list(self.actor.latent_dynamics_parameters())
+                baseline_gradients = self._clone_gradients(dynamics_parameters)
+                dynamics_loss.backward()
+                if self.is_multi_gpu:
+                    self._reduce_gradient_delta(dynamics_parameters, baseline_gradients)
+                latent_dynamics_grad_norm = self._gradient_delta_norm(
+                    dynamics_parameters,
+                    baseline_gradients,
+                )
+                privileged_encoder_dynamics_grad_norm = self._gradient_delta_norm(
+                    list(self.actor.privileged_encoder.parameters()),
+                    baseline_gradients,
+                )
+                mean_latent_dynamics_grad_norm += latent_dynamics_grad_norm
+                mean_privileged_encoder_dynamics_grad_norm += privileged_encoder_dynamics_grad_norm
+                latent_dynamics_grad_clip_count += latent_dynamics_grad_norm > self.max_grad_norm
+                latent_dynamics_updates += 1
+
+            combined_grad_norm = nn.utils.clip_grad_norm_(
+                self.actor.ppo_parameters(),
+                self.max_grad_norm,
+            ).item()
+            mean_combined_grad_norm += combined_grad_norm
+            combined_grad_clip_count += combined_grad_norm > self.max_grad_norm
             self.optimizer.step()
+
+            if collect_update_diagnostics:
+                encoder_update_norm = self._parameter_delta_norm(
+                    self.actor.privileged_encoder.parameters(),
+                    encoder_before,
+                )
+                policy_kl = self._policy_step_kl(
+                    batch,
+                    original_batch_size,
+                    distribution_params_before,
+                )
+                if dynamics_loss is not None:
+                    mean_joint_encoder_update_norm += encoder_update_norm
+                    mean_joint_policy_kl += policy_kl
+                    joint_update_diagnostics += 1
+                else:
+                    mean_ppo_only_encoder_update_norm += encoder_update_norm
+                    mean_ppo_only_policy_kl += policy_kl
+                    ppo_only_update_diagnostics += 1
 
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy.mean().item()
-
-        mean_latent_dynamics_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
-        mean_latent_identity_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
-        mean_latent_shuffled_action_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
-        mean_latent_reversed_action_loss = {
-            horizon: 0.0 for horizon in self.latent_dynamics_horizons if horizon > 1
-        }
-        mean_latent_prediction_cosine = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
-        latent_dynamics_samples = {horizon: 0 for horizon in self.latent_dynamics_horizons}
-        rollout_steps = tuple(range(1, self.latent_rollout_horizon + 1))
-        mean_latent_rollout_loss = {step: 0.0 for step in rollout_steps}
-        mean_latent_rollout_identity_loss = {step: 0.0 for step in rollout_steps}
-        mean_latent_rollout_shuffled_action_loss = {step: 0.0 for step in rollout_steps}
-        mean_latent_rollout_cosine = {step: 0.0 for step in rollout_steps}
-        mean_latent_direct_rollout_mse = 0.0
-        mean_latent_direct_rollout_cosine = 0.0
-        latent_rollout_samples = 0
-        mean_latent_dynamics_grad_norm = 0.0
-        mean_privileged_encoder_dynamics_grad_norm = 0.0
-        latent_dynamics_grad_clip_count = 0
-        latent_dynamics_updates = 0
-        if self.latent_dynamics_enabled:
-            self.student_optimizer.zero_grad()
-            dynamics_generators = {
-                horizon: iter(
-                    self.storage.latent_dynamics_mini_batch_generator(
-                        self.num_latent_dynamics_mini_batches,
-                        self.num_latent_dynamics_epochs,
-                        horizon=horizon,
-                    )
-                )
-                for horizon in self.latent_dynamics_horizons
-            }
-            rollout_generator = (
-                iter(
-                    self.storage.latent_dynamics_sequence_mini_batch_generator(
-                        self.num_latent_dynamics_mini_batches,
-                        self.num_latent_dynamics_epochs,
-                        rollout_horizon=self.latent_rollout_horizon,
-                    )
-                )
-                if self.latent_rollout_enabled
-                else None
-            )
-            while dynamics_generators:
-                horizon_batches = {}
-                for horizon, generator in tuple(dynamics_generators.items()):
-                    try:
-                        horizon_batches[horizon] = next(generator)
-                    except StopIteration:
-                        del dynamics_generators[horizon]
-                rollout_batch = None
-                if rollout_generator is not None:
-                    try:
-                        rollout_batch = next(rollout_generator)
-                    except StopIteration:
-                        rollout_generator = None
-                if not horizon_batches and rollout_batch is None:
-                    continue
-
-                active_weight = sum(
-                    self.latent_dynamics_horizon_weight_by_horizon[horizon]
-                    for horizon in horizon_batches
-                )
-                self.optimizer.zero_grad()
-                weighted_loss = torch.zeros((), device=self.device)
-                for horizon, batch in horizon_batches.items():
-                    observations_t = batch.observations
-                    observations_future = batch.next_observations
-                    commanded_action_block = batch.commanded_actions
-                    dynamics_loss = self.actor.compute_latent_dynamics_loss(
-                        observations_t,
-                        commanded_action_block,
-                        observations_future,
-                        horizon=horizon,
-                        detach_source=self.latent_dynamics_detach_source,
-                    )
-                    weighted_loss = weighted_loss + (
-                        self.latent_dynamics_horizon_weight_by_horizon[horizon] * dynamics_loss
-                    )
-
-                    with torch.no_grad():
-                        latent_t = self.actor.get_privileged_latent(observations_t)
-                        latent_future = self.actor.get_privileged_latent(observations_future)
-                        predicted_future = self.actor.predict_privileged_latent(
-                            latent_t,
-                            commanded_action_block,
-                            horizon,
-                        )
-                        shuffled_action_block = commanded_action_block[
-                            torch.randperm(commanded_action_block.shape[0], device=commanded_action_block.device)
-                        ]
-                        shuffled_prediction = self.actor.predict_privileged_latent(
-                            latent_t,
-                            shuffled_action_block,
-                            horizon,
-                        )
-                        if horizon > 1:
-                            reversed_action_block = (
-                                commanded_action_block.reshape(
-                                    commanded_action_block.shape[0],
-                                    horizon,
-                                    self.actor.latent_dynamics_action_dim,
-                                )
-                                .flip(dims=(1,))
-                                .flatten(start_dim=1)
-                            )
-                            reversed_prediction = self.actor.predict_privileged_latent(
-                                latent_t,
-                                reversed_action_block,
-                                horizon,
-                            )
-                            reversed_action_loss = F.mse_loss(reversed_prediction, latent_future)
-                        identity_loss = F.mse_loss(latent_t, latent_future)
-                        shuffled_action_loss = F.mse_loss(shuffled_prediction, latent_future)
-                        prediction_cosine = F.cosine_similarity(
-                            predicted_future,
-                            latent_future,
-                            dim=-1,
-                        ).mean()
-
-                    batch_size = observations_t.batch_size[0]
-                    mean_latent_dynamics_loss[horizon] += dynamics_loss.item() * batch_size
-                    mean_latent_identity_loss[horizon] += identity_loss.item() * batch_size
-                    mean_latent_shuffled_action_loss[horizon] += shuffled_action_loss.item() * batch_size
-                    if horizon > 1:
-                        mean_latent_reversed_action_loss[horizon] += reversed_action_loss.item() * batch_size
-                    mean_latent_prediction_cosine[horizon] += prediction_cosine.item() * batch_size
-                    latent_dynamics_samples[horizon] += batch_size
-
-                if horizon_batches:
-                    weighted_loss = weighted_loss / active_weight
-
-                if rollout_batch is not None:
-                    observations_t = rollout_batch.observations
-                    future_observations = rollout_batch.future_observations
-                    commanded_action_sequence = rollout_batch.commanded_actions
-
-                    latent_t = self.actor.get_privileged_latent(observations_t)
-                    if self.latent_dynamics_detach_source:
-                        latent_t = latent_t.detach()
-                    with torch.no_grad():
-                        future_latents = self.actor.get_privileged_latent(future_observations)
-                    rollout_predictions = self.actor.rollout_privileged_latent(
-                        latent_t,
-                        commanded_action_sequence,
-                    )
-                    rollout_step_losses = torch.stack(
-                        [
-                            F.mse_loss(rollout_predictions[step], future_latents[step])
-                            for step in range(self.latent_rollout_horizon)
-                        ]
-                    )
-                    rollout_loss = rollout_step_losses.mean()
-                    weighted_loss = weighted_loss + self.latent_rollout_loss_coef * rollout_loss
-
-                    with torch.no_grad():
-                        batch_size = observations_t.batch_size[0]
-                        shuffled_action_sequence = commanded_action_sequence[
-                            :,
-                            torch.randperm(batch_size, device=commanded_action_sequence.device),
-                        ]
-                        shuffled_rollout_predictions = self.actor.rollout_privileged_latent(
-                            latent_t,
-                            shuffled_action_sequence,
-                        )
-                        for step in range(self.latent_rollout_horizon):
-                            identity_loss = F.mse_loss(latent_t, future_latents[step])
-                            shuffled_action_loss = F.mse_loss(
-                                shuffled_rollout_predictions[step],
-                                future_latents[step],
-                            )
-                            rollout_cosine = F.cosine_similarity(
-                                rollout_predictions[step],
-                                future_latents[step],
-                                dim=-1,
-                            ).mean()
-                            rollout_step = step + 1
-                            mean_latent_rollout_loss[rollout_step] += (
-                                rollout_step_losses[step].item() * batch_size
-                            )
-                            mean_latent_rollout_identity_loss[rollout_step] += identity_loss.item() * batch_size
-                            mean_latent_rollout_shuffled_action_loss[rollout_step] += (
-                                shuffled_action_loss.item() * batch_size
-                            )
-                            mean_latent_rollout_cosine[rollout_step] += rollout_cosine.item() * batch_size
-
-                        if self.latent_rollout_horizon in self.latent_dynamics_horizons:
-                            direct_action_block = commanded_action_sequence.transpose(0, 1).flatten(start_dim=1)
-                            direct_prediction = self.actor.predict_privileged_latent(
-                                latent_t,
-                                direct_action_block,
-                                self.latent_rollout_horizon,
-                            )
-                            mean_latent_direct_rollout_mse += F.mse_loss(
-                                direct_prediction,
-                                rollout_predictions[-1],
-                            ).item() * batch_size
-                            mean_latent_direct_rollout_cosine += F.cosine_similarity(
-                                direct_prediction,
-                                rollout_predictions[-1],
-                                dim=-1,
-                            ).mean().item() * batch_size
-                        latent_rollout_samples += batch_size
-
-                weighted_loss = self.latent_dynamics_loss_coef * weighted_loss
-                weighted_loss.backward()
-                if self.is_multi_gpu:
-                    self.reduce_parameters(self.actor.latent_dynamics_parameters())
-                mean_privileged_encoder_dynamics_grad_norm += self._grad_norm(
-                    self.actor.privileged_encoder.parameters()
-                )
-                latent_dynamics_grad_norm = nn.utils.clip_grad_norm_(
-                    self.actor.latent_dynamics_parameters(), self.max_grad_norm
-                ).item()
-                mean_latent_dynamics_grad_norm += latent_dynamics_grad_norm
-                latent_dynamics_grad_clip_count += latent_dynamics_grad_norm > self.max_grad_norm
-                latent_dynamics_updates += 1
-                self.optimizer.step()
-
-            self.optimizer.zero_grad()
 
         mean_student_loss = 0.0
         mean_representation_loss = 0.0
@@ -570,6 +491,7 @@ class RepresentationVelocityTeacherStudentPPO:
         num_ppo_updates = self.num_learning_epochs * self.num_mini_batches
         mean_ppo_grad_norm /= num_ppo_updates
         mean_privileged_encoder_ppo_grad_norm /= num_ppo_updates
+        mean_combined_grad_norm /= num_ppo_updates
         loss_dict = {
             "value": mean_value_loss / num_ppo_updates,
             "surrogate": mean_surrogate_loss / num_ppo_updates,
@@ -580,24 +502,28 @@ class RepresentationVelocityTeacherStudentPPO:
             "Grad/ppo_total_norm": mean_ppo_grad_norm,
             "Grad/privileged_encoder_ppo_norm": mean_privileged_encoder_ppo_grad_norm,
             "Grad/ppo_clip_fraction": ppo_grad_clip_count / num_ppo_updates,
+            "Grad/combined_total_norm": mean_combined_grad_norm,
+            "Grad/combined_clip_fraction": combined_grad_clip_count / num_ppo_updates,
+            "Update/privileged_encoder_norm_joint": (mean_joint_encoder_update_norm / max(joint_update_diagnostics, 1)),
+            "Update/privileged_encoder_norm_ppo_only": (
+                mean_ppo_only_encoder_update_norm / max(ppo_only_update_diagnostics, 1)
+            ),
+            "Update/policy_kl_joint": mean_joint_policy_kl / max(joint_update_diagnostics, 1),
+            "Update/policy_kl_ppo_only": mean_ppo_only_policy_kl / max(ppo_only_update_diagnostics, 1),
+            "Update/joint_step_fraction": joint_update_diagnostics / num_ppo_updates,
         }
         if self.latent_dynamics_enabled:
             if latent_dynamics_updates > 0:
                 mean_latent_dynamics_grad_norm /= latent_dynamics_updates
                 mean_privileged_encoder_dynamics_grad_norm /= latent_dynamics_updates
-            loss_dict.update(
-                {
-                    "Grad/dynamics_total_norm": mean_latent_dynamics_grad_norm,
-                    "Grad/privileged_encoder_dynamics_norm": mean_privileged_encoder_dynamics_grad_norm,
-                    "Grad/privileged_encoder_dynamics_to_ppo_ratio": (
-                        mean_privileged_encoder_dynamics_grad_norm
-                        / (mean_privileged_encoder_ppo_grad_norm + 1.0e-8)
-                    ),
-                    "Grad/dynamics_clip_fraction": (
-                        latent_dynamics_grad_clip_count / max(latent_dynamics_updates, 1)
-                    ),
-                }
-            )
+            loss_dict.update({
+                "Grad/dynamics_total_norm": mean_latent_dynamics_grad_norm,
+                "Grad/privileged_encoder_dynamics_norm": mean_privileged_encoder_dynamics_grad_norm,
+                "Grad/privileged_encoder_dynamics_to_ppo_ratio": (
+                    mean_privileged_encoder_dynamics_grad_norm / (mean_privileged_encoder_ppo_grad_norm + 1.0e-8)
+                ),
+                "Grad/dynamics_clip_fraction": (latent_dynamics_grad_clip_count / max(latent_dynamics_updates, 1)),
+            })
             for horizon in self.latent_dynamics_horizons:
                 if latent_dynamics_samples[horizon] > 0:
                     mean_latent_dynamics_loss[horizon] /= latent_dynamics_samples[horizon]
@@ -608,71 +534,66 @@ class RepresentationVelocityTeacherStudentPPO:
                     mean_latent_prediction_cosine[horizon] /= latent_dynamics_samples[horizon]
 
             available_horizons = [
-                horizon
-                for horizon in self.latent_dynamics_horizons
-                if latent_dynamics_samples[horizon] > 0
+                horizon for horizon in self.latent_dynamics_horizons if latent_dynamics_samples[horizon] > 0
             ]
             available_weight = sum(
-                self.latent_dynamics_horizon_weight_by_horizon[horizon]
-                for horizon in available_horizons
+                self.latent_dynamics_horizon_weight_by_horizon[horizon] for horizon in available_horizons
             )
 
             def weighted_horizon_mean(values: dict[int, float]) -> float:
-                if available_weight == 0.0:
+                if not available_weight:
                     return 0.0
-                return sum(
-                    self.latent_dynamics_horizon_weight_by_horizon[horizon] * values[horizon]
-                    for horizon in available_horizons
-                ) / available_weight
+                return (
+                    sum(
+                        self.latent_dynamics_horizon_weight_by_horizon[horizon] * values[horizon]
+                        for horizon in available_horizons
+                    )
+                    / available_weight
+                )
 
             aggregate_dynamics_loss = weighted_horizon_mean(mean_latent_dynamics_loss)
             aggregate_identity_loss = weighted_horizon_mean(mean_latent_identity_loss)
             aggregate_shuffled_action_loss = weighted_horizon_mean(mean_latent_shuffled_action_loss)
             aggregate_prediction_cosine = weighted_horizon_mean(mean_latent_prediction_cosine)
             configured_weight = sum(self.latent_dynamics_horizon_weights)
-            aggregate_valid_fraction = sum(
-                self.latent_dynamics_horizon_weight_by_horizon[horizon]
-                * self.storage.latent_dynamics_valid_fractions.get(horizon, 0.0)
-                for horizon in self.latent_dynamics_horizons
-            ) / configured_weight
-            loss_dict.update(
-                {
-                    "latent_dynamics_loss": aggregate_dynamics_loss,
-                    "latent_identity_loss": aggregate_identity_loss,
-                    "latent_prediction_identity_ratio": aggregate_dynamics_loss
-                    / (aggregate_identity_loss + 1.0e-8),
-                    "latent_shuffled_action_loss": aggregate_shuffled_action_loss,
-                    "latent_shuffled_action_ratio": aggregate_shuffled_action_loss
-                    / (aggregate_dynamics_loss + 1.0e-8),
-                    "latent_prediction_cosine_similarity": aggregate_prediction_cosine,
-                    "latent_dynamics_valid_fraction": aggregate_valid_fraction,
-                }
-            )
-            for horizon in self.latent_dynamics_horizons:
-                loss_dict.update(
-                    {
-                        f"latent_dynamics_loss_k{horizon}": mean_latent_dynamics_loss[horizon],
-                        f"latent_identity_loss_k{horizon}": mean_latent_identity_loss[horizon],
-                        f"latent_prediction_identity_ratio_k{horizon}": mean_latent_dynamics_loss[horizon]
-                        / (mean_latent_identity_loss[horizon] + 1.0e-8),
-                        f"latent_shuffled_action_loss_k{horizon}": mean_latent_shuffled_action_loss[horizon],
-                        f"latent_shuffled_action_ratio_k{horizon}": mean_latent_shuffled_action_loss[horizon]
-                        / (mean_latent_dynamics_loss[horizon] + 1.0e-8),
-                        f"latent_prediction_cosine_similarity_k{horizon}": mean_latent_prediction_cosine[horizon],
-                        f"latent_dynamics_valid_fraction_k{horizon}": self.storage.latent_dynamics_valid_fractions.get(
-                            horizon,
-                            0.0,
-                        ),
-                    }
+            aggregate_valid_fraction = (
+                sum(
+                    self.latent_dynamics_horizon_weight_by_horizon[horizon]
+                    * self.storage.latent_dynamics_valid_fractions.get(horizon, 0.0)
+                    for horizon in self.latent_dynamics_horizons
                 )
+                / configured_weight
+            )
+            loss_dict.update({
+                "latent_dynamics_loss": aggregate_dynamics_loss,
+                "latent_identity_loss": aggregate_identity_loss,
+                "latent_prediction_identity_ratio": aggregate_dynamics_loss / (aggregate_identity_loss + 1.0e-8),
+                "latent_shuffled_action_loss": aggregate_shuffled_action_loss,
+                "latent_shuffled_action_ratio": aggregate_shuffled_action_loss / (aggregate_dynamics_loss + 1.0e-8),
+                "latent_prediction_cosine_similarity": aggregate_prediction_cosine,
+                "latent_dynamics_valid_fraction": aggregate_valid_fraction,
+            })
+            for horizon in self.latent_dynamics_horizons:
+                loss_dict.update({
+                    f"latent_dynamics_loss_k{horizon}": mean_latent_dynamics_loss[horizon],
+                    f"latent_identity_loss_k{horizon}": mean_latent_identity_loss[horizon],
+                    f"latent_prediction_identity_ratio_k{horizon}": mean_latent_dynamics_loss[horizon]
+                    / (mean_latent_identity_loss[horizon] + 1.0e-8),
+                    f"latent_shuffled_action_loss_k{horizon}": mean_latent_shuffled_action_loss[horizon],
+                    f"latent_shuffled_action_ratio_k{horizon}": mean_latent_shuffled_action_loss[horizon]
+                    / (mean_latent_dynamics_loss[horizon] + 1.0e-8),
+                    f"latent_prediction_cosine_similarity_k{horizon}": mean_latent_prediction_cosine[horizon],
+                    f"latent_dynamics_valid_fraction_k{horizon}": self.storage.latent_dynamics_valid_fractions.get(
+                        horizon,
+                        0.0,
+                    ),
+                })
                 if horizon > 1:
-                    loss_dict.update(
-                        {
-                            f"latent_reversed_action_loss_k{horizon}": mean_latent_reversed_action_loss[horizon],
-                            f"latent_reversed_action_ratio_k{horizon}": mean_latent_reversed_action_loss[horizon]
-                            / (mean_latent_dynamics_loss[horizon] + 1.0e-8),
-                        }
-                    )
+                    loss_dict.update({
+                        f"latent_reversed_action_loss_k{horizon}": mean_latent_reversed_action_loss[horizon],
+                        f"latent_reversed_action_ratio_k{horizon}": mean_latent_reversed_action_loss[horizon]
+                        / (mean_latent_dynamics_loss[horizon] + 1.0e-8),
+                    })
         if self.latent_rollout_enabled:
             if latent_rollout_samples > 0:
                 for step in rollout_steps:
@@ -683,41 +604,323 @@ class RepresentationVelocityTeacherStudentPPO:
                 mean_latent_direct_rollout_mse /= latent_rollout_samples
                 mean_latent_direct_rollout_cosine /= latent_rollout_samples
 
-            loss_dict.update(
-                {
-                    "latent_rollout_loss": sum(mean_latent_rollout_loss.values()) / len(rollout_steps),
-                    "latent_rollout_valid_fraction": self.storage.latent_dynamics_sequence_valid_fraction,
-                }
-            )
+            loss_dict.update({
+                "latent_rollout_loss": sum(mean_latent_rollout_loss.values()) / len(rollout_steps),
+                "latent_rollout_valid_fraction": self.storage.latent_dynamics_sequence_valid_fraction,
+            })
             for step in rollout_steps:
-                loss_dict.update(
-                    {
-                        f"latent_rollout_loss_k{step}": mean_latent_rollout_loss[step],
-                        f"latent_rollout_identity_ratio_k{step}": mean_latent_rollout_loss[step]
-                        / (mean_latent_rollout_identity_loss[step] + 1.0e-8),
-                        f"latent_rollout_shuffled_action_loss_k{step}": (
-                            mean_latent_rollout_shuffled_action_loss[step]
-                        ),
-                        f"latent_rollout_shuffled_action_ratio_k{step}": (
-                            mean_latent_rollout_shuffled_action_loss[step]
-                            / (mean_latent_rollout_loss[step] + 1.0e-8)
-                        ),
-                        f"latent_rollout_cosine_similarity_k{step}": mean_latent_rollout_cosine[step],
-                    }
-                )
+                loss_dict.update({
+                    f"latent_rollout_loss_k{step}": mean_latent_rollout_loss[step],
+                    f"latent_rollout_identity_ratio_k{step}": mean_latent_rollout_loss[step]
+                    / (mean_latent_rollout_identity_loss[step] + 1.0e-8),
+                    f"latent_rollout_shuffled_action_loss_k{step}": (mean_latent_rollout_shuffled_action_loss[step]),
+                    f"latent_rollout_shuffled_action_ratio_k{step}": (
+                        mean_latent_rollout_shuffled_action_loss[step] / (mean_latent_rollout_loss[step] + 1.0e-8)
+                    ),
+                    f"latent_rollout_cosine_similarity_k{step}": mean_latent_rollout_cosine[step],
+                })
             if self.latent_rollout_horizon in self.latent_dynamics_horizons:
-                loss_dict.update(
-                    {
-                        f"latent_direct_rollout_cosine_k{self.latent_rollout_horizon}": (
-                            mean_latent_direct_rollout_cosine
-                        ),
-                        f"latent_direct_rollout_mse_k{self.latent_rollout_horizon}": (
-                            mean_latent_direct_rollout_mse
-                        ),
-                    }
-                )
+                loss_dict.update({
+                    f"latent_direct_rollout_cosine_k{self.latent_rollout_horizon}": (mean_latent_direct_rollout_cosine),
+                    f"latent_direct_rollout_mse_k{self.latent_rollout_horizon}": (mean_latent_direct_rollout_mse),
+                })
         self.storage.clear()
         return loss_dict
+
+    def _latent_dynamics_batch_generator(
+        self,
+    ) -> Iterable[tuple[dict[int, RolloutStorage.Batch], RolloutStorage.Batch | None]]:
+        dynamics_generators = {
+            horizon: iter(
+                self.storage.latent_dynamics_mini_batch_generator(
+                    self.num_latent_dynamics_mini_batches,
+                    self.num_latent_dynamics_epochs,
+                    horizon=horizon,
+                )
+            )
+            for horizon in self.latent_dynamics_horizons
+        }
+        rollout_generator = (
+            iter(
+                self.storage.latent_dynamics_sequence_mini_batch_generator(
+                    self.num_latent_dynamics_mini_batches,
+                    self.num_latent_dynamics_epochs,
+                    rollout_horizon=self.latent_rollout_horizon,
+                )
+            )
+            if self.latent_rollout_enabled
+            else None
+        )
+        while dynamics_generators or rollout_generator is not None:
+            horizon_batches = {}
+            for horizon, generator in tuple(dynamics_generators.items()):
+                try:
+                    horizon_batches[horizon] = next(generator)
+                except StopIteration:  # noqa: PERF203
+                    del dynamics_generators[horizon]
+            rollout_batch = None
+            if rollout_generator is not None:
+                try:
+                    rollout_batch = next(rollout_generator)
+                except StopIteration:
+                    rollout_generator = None
+            if horizon_batches or rollout_batch is not None:
+                yield horizon_batches, rollout_batch
+
+    def _compute_latent_dynamics_objective(
+        self,
+        horizon_batches: dict[int, RolloutStorage.Batch],
+        rollout_batch: RolloutStorage.Batch | None,
+    ) -> tuple[
+        torch.Tensor,
+        dict[int, tuple[float, float, float, float, float, int]],
+        dict[int, tuple[float, float, float, float]],
+        float,
+        float,
+        int,
+    ]:
+        active_weight = sum(self.latent_dynamics_horizon_weight_by_horizon[horizon] for horizon in horizon_batches)
+        weighted_loss = torch.zeros((), device=self.device)
+        horizon_metrics = {}
+        for horizon, batch in horizon_batches.items():
+            observations_t = batch.observations
+            observations_future = batch.next_observations
+            commanded_action_block = batch.commanded_actions
+            dynamics_loss = self.actor.compute_latent_dynamics_loss(
+                observations_t,
+                commanded_action_block,
+                observations_future,
+                horizon=horizon,
+                detach_source=self.latent_dynamics_detach_source,
+            )
+            weighted_loss = weighted_loss + (self.latent_dynamics_horizon_weight_by_horizon[horizon] * dynamics_loss)
+
+            with torch.no_grad():
+                latent_t = self.actor.get_privileged_latent(observations_t)
+                latent_future = self.actor.get_privileged_latent(observations_future)
+                predicted_future = self.actor.predict_privileged_latent(
+                    latent_t,
+                    commanded_action_block,
+                    horizon,
+                )
+                shuffled_action_block = commanded_action_block[
+                    torch.randperm(commanded_action_block.shape[0], device=commanded_action_block.device)
+                ]
+                shuffled_prediction = self.actor.predict_privileged_latent(
+                    latent_t,
+                    shuffled_action_block,
+                    horizon,
+                )
+                reversed_action_loss = torch.zeros((), device=self.device)
+                if horizon > 1:
+                    reversed_action_block = (
+                        commanded_action_block
+                        .reshape(
+                            commanded_action_block.shape[0],
+                            horizon,
+                            self.actor.latent_dynamics_action_dim,
+                        )
+                        .flip(dims=(1,))
+                        .flatten(start_dim=1)
+                    )
+                    reversed_prediction = self.actor.predict_privileged_latent(
+                        latent_t,
+                        reversed_action_block,
+                        horizon,
+                    )
+                    reversed_action_loss = F.mse_loss(reversed_prediction, latent_future)
+                identity_loss = F.mse_loss(latent_t, latent_future)
+                shuffled_action_loss = F.mse_loss(shuffled_prediction, latent_future)
+                prediction_cosine = F.cosine_similarity(
+                    predicted_future,
+                    latent_future,
+                    dim=-1,
+                ).mean()
+
+            horizon_metrics[horizon] = (
+                dynamics_loss.item(),
+                identity_loss.item(),
+                shuffled_action_loss.item(),
+                reversed_action_loss.item(),
+                prediction_cosine.item(),
+                observations_t.batch_size[0],
+            )
+
+        if horizon_batches:
+            weighted_loss = weighted_loss / active_weight
+
+        rollout_metrics = {}
+        direct_rollout_mse = 0.0
+        direct_rollout_cosine = 0.0
+        rollout_batch_size = 0
+        if rollout_batch is not None:
+            observations_t = rollout_batch.observations
+            future_observations = rollout_batch.future_observations
+            commanded_action_sequence = rollout_batch.commanded_actions
+
+            latent_t = self.actor.get_privileged_latent(observations_t)
+            if self.latent_dynamics_detach_source:
+                latent_t = latent_t.detach()
+            with torch.no_grad():
+                future_latents = self.actor.get_privileged_latent(future_observations)
+            rollout_predictions = self.actor.rollout_privileged_latent(
+                latent_t,
+                commanded_action_sequence,
+            )
+            rollout_step_losses = torch.stack([
+                F.mse_loss(rollout_predictions[step], future_latents[step])
+                for step in range(self.latent_rollout_horizon)
+            ])
+            weighted_loss = weighted_loss + self.latent_rollout_loss_coef * rollout_step_losses.mean()
+
+            with torch.no_grad():
+                rollout_batch_size = observations_t.batch_size[0]
+                shuffled_action_sequence = commanded_action_sequence[
+                    :,
+                    torch.randperm(rollout_batch_size, device=commanded_action_sequence.device),
+                ]
+                shuffled_rollout_predictions = self.actor.rollout_privileged_latent(
+                    latent_t,
+                    shuffled_action_sequence,
+                )
+                for step in range(self.latent_rollout_horizon):
+                    identity_loss = F.mse_loss(latent_t, future_latents[step])
+                    shuffled_action_loss = F.mse_loss(
+                        shuffled_rollout_predictions[step],
+                        future_latents[step],
+                    )
+                    rollout_cosine = F.cosine_similarity(
+                        rollout_predictions[step],
+                        future_latents[step],
+                        dim=-1,
+                    ).mean()
+                    rollout_metrics[step + 1] = (
+                        rollout_step_losses[step].item(),
+                        identity_loss.item(),
+                        shuffled_action_loss.item(),
+                        rollout_cosine.item(),
+                    )
+
+                if self.latent_rollout_horizon in self.latent_dynamics_horizons:
+                    direct_action_block = commanded_action_sequence.transpose(0, 1).flatten(start_dim=1)
+                    direct_prediction = self.actor.predict_privileged_latent(
+                        latent_t,
+                        direct_action_block,
+                        self.latent_rollout_horizon,
+                    )
+                    direct_rollout_mse = F.mse_loss(
+                        direct_prediction,
+                        rollout_predictions[-1],
+                    ).item()
+                    direct_rollout_cosine = (
+                        F
+                        .cosine_similarity(
+                            direct_prediction,
+                            rollout_predictions[-1],
+                            dim=-1,
+                        )
+                        .mean()
+                        .item()
+                    )
+
+        return (
+            self.latent_dynamics_loss_coef * weighted_loss,
+            horizon_metrics,
+            rollout_metrics,
+            direct_rollout_mse,
+            direct_rollout_cosine,
+            rollout_batch_size,
+        )
+
+    @staticmethod
+    def _clone_parameters(parameters: Iterable[torch.nn.Parameter]) -> list[torch.Tensor]:
+        return [parameter.detach().clone() for parameter in parameters]
+
+    @staticmethod
+    def _clone_gradients(
+        parameters: Iterable[torch.nn.Parameter],
+    ) -> dict[int, torch.Tensor | None]:
+        return {
+            id(parameter): None if parameter.grad is None else parameter.grad.detach().clone()
+            for parameter in parameters
+        }
+
+    @staticmethod
+    def _gradient_delta_norm(
+        parameters: Iterable[torch.nn.Parameter],
+        baseline_gradients: dict[int, torch.Tensor | None],
+    ) -> float:
+        delta_norms = []
+        for parameter in parameters:
+            baseline = baseline_gradients.get(id(parameter))
+            if parameter.grad is None:
+                continue
+            delta = parameter.grad.detach() if baseline is None else parameter.grad.detach() - baseline
+            delta_norms.append(delta.norm(2))
+        if not delta_norms:
+            return 0.0
+        return torch.stack(delta_norms).norm(2).item()
+
+    def _reduce_gradient_delta(
+        self,
+        parameters: list[torch.nn.Parameter],
+        baseline_gradients: dict[int, torch.Tensor | None],
+    ) -> None:
+        for parameter in parameters:
+            baseline = baseline_gradients[id(parameter)]
+            if parameter.grad is not None and baseline is not None:
+                parameter.grad.sub_(baseline)
+        self.reduce_parameters(parameters)
+        reduced_gradients = self._clone_gradients(parameters)
+        for parameter in parameters:
+            baseline = baseline_gradients[id(parameter)]
+            reduced = reduced_gradients[id(parameter)]
+            if baseline is None:
+                parameter.grad = reduced
+            elif reduced is None:
+                parameter.grad = baseline
+            else:
+                parameter.grad = baseline + reduced
+
+    @staticmethod
+    def _parameter_delta_norm(
+        parameters: Iterable[torch.nn.Parameter],
+        before: list[torch.Tensor],
+    ) -> float:
+        delta_norms = [
+            (parameter.detach() - previous).norm(2) for parameter, previous in zip(parameters, before, strict=True)
+        ]
+        if not delta_norms:
+            return 0.0
+        return torch.stack(delta_norms).norm(2).item()
+
+    @torch.inference_mode()
+    def _policy_step_kl(
+        self,
+        batch: RolloutStorage.Batch,
+        original_batch_size: int,
+        distribution_params_before: tuple[torch.Tensor, ...],
+    ) -> float:
+        hidden_state_before = self.actor.get_hidden_state()
+        if isinstance(hidden_state_before, torch.Tensor):
+            hidden_state_before = hidden_state_before.detach().clone()
+        self.actor.act_teacher(
+            batch.observations,
+            hidden_state=batch.hidden_states[0],
+            stochastic_output=False,
+        )
+        distribution_params_after = tuple(
+            parameter[:original_batch_size].detach() for parameter in self.actor.output_distribution_params
+        )
+        policy_kl = self.actor.get_kl_divergence(
+            distribution_params_before,
+            distribution_params_after,
+        ).mean()
+        self.actor.reset(hidden_state=hidden_state_before)
+        if self.is_multi_gpu and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(policy_kl, op=torch.distributed.ReduceOp.SUM)
+            policy_kl /= self.gpu_world_size
+        return policy_kl.item()
 
     @staticmethod
     def _grad_norm(parameters: Iterable[torch.nn.Parameter]) -> float:
