@@ -716,7 +716,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "leg_joint_pos_limits": RewardTermCfg(
             func=mdp.joint_pos_limits,
-            weight=-2.0,
+            weight=-5.0,
             params={"asset_cfg": leg_joint_cfg},
         ),
         "leg_joint_vel": RewardTermCfg(
