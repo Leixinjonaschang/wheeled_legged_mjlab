@@ -206,7 +206,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             representation_chunk_length=12,
             representation_loss_coef=1.0,
             lin_vel_loss_coef=1.0,
-            latent_dynamics_loss_coef=1.0,
+            latent_dynamics_loss_coef=10.0,
             latent_dynamics_horizons=(1, 5),
             latent_dynamics_horizon_weights=(1.0, 0.5),
             latent_dynamics_detach_source=False,
