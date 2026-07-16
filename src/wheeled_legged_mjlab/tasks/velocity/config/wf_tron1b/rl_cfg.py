@@ -211,7 +211,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             latent_dynamics_horizon_weights=(1.0, 0.5),
             latent_dynamics_detach_source=False,
             latent_rollout_horizon=5,
-            latent_rollout_loss_coef=0.5,
+            latent_rollout_loss_coef=0.75,
             num_latent_dynamics_epochs=1,
             num_latent_dynamics_mini_batches=4,
         ),
