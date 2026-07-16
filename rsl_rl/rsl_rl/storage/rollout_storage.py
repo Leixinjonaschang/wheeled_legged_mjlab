@@ -36,8 +36,8 @@ class RolloutStorage:
             self.actions: torch.Tensor | None = None
             """Actions taken at the current step."""
 
-            self.commanded_actions: torch.Tensor | None = None
-            """Globally clipped policy-space actions sent to the environment."""
+            self.applied_actions: torch.Tensor | None = None
+            """Policy-space actions actually applied during the environment step."""
 
             self.rewards: torch.Tensor | None = None
             """Rewards received after the action."""
@@ -89,7 +89,7 @@ class RolloutStorage:
             dones: torch.Tensor | None = None,
             next_observations: TensorDict | None = None,
             future_observations: TensorDict | None = None,
-            commanded_actions: torch.Tensor | None = None,
+            applied_actions: torch.Tensor | None = None,
         ) -> None:
             """Initialize a batch container over rollout data."""
             self.observations: TensorDict | None = observations
@@ -99,8 +99,8 @@ class RolloutStorage:
             self.actions: torch.Tensor | None = actions
             """Batch of actions."""
 
-            self.commanded_actions: torch.Tensor | None = commanded_actions
-            """Batch of globally clipped policy-space actions."""
+            self.applied_actions: torch.Tensor | None = applied_actions
+            """Batch of policy-space actions actually applied by the environment."""
 
             self.next_observations: TensorDict | None = next_observations
             """Observations at the requested future horizon after ``observations``."""
@@ -161,7 +161,7 @@ class RolloutStorage:
         )
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
-        self.commanded_actions: torch.Tensor | None = None
+        self.applied_actions: torch.Tensor | None = None
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
         self.latent_dynamics_valid_fraction = 0.0
         self.latent_dynamics_valid_fractions: dict[int, float] = {}
@@ -195,10 +195,10 @@ class RolloutStorage:
         # Core
         self.observations[self.step].copy_(transition.observations)
         self.actions[self.step].copy_(transition.actions)  # type: ignore
-        if transition.commanded_actions is not None:
-            if self.commanded_actions is None:
-                self.commanded_actions = torch.zeros_like(self.actions)
-            self.commanded_actions[self.step].copy_(transition.commanded_actions)
+        if transition.applied_actions is not None:
+            if self.applied_actions is None:
+                self.applied_actions = torch.zeros_like(self.actions)
+            self.applied_actions[self.step].copy_(transition.applied_actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
 
@@ -352,8 +352,8 @@ class RolloutStorage:
         """Yield valid direct-transition pairs and aligned action blocks for one horizon."""
         if self.training_type != "rl":
             raise ValueError("This function is only available for reinforcement learning training.")
-        if self.commanded_actions is None:
-            raise ValueError("Commanded actions were not recorded in rollout storage.")
+        if self.applied_actions is None:
+            raise ValueError("Applied actions were not recorded in rollout storage.")
         if num_mini_batches <= 0 or num_epochs <= 0:
             raise ValueError("Latent dynamics epochs and mini-batches must be positive.")
         if horizon <= 0:
@@ -382,9 +382,9 @@ class RolloutStorage:
 
         observations_t = self.observations[:num_pair_steps].flatten(0, 1)
         observations_future = self.observations[horizon:].flatten(0, 1)
-        commanded_action_blocks = torch.cat(
+        applied_action_blocks = torch.cat(
             [
-                self.commanded_actions[offset : offset + num_pair_steps]
+                self.applied_actions[offset : offset + num_pair_steps]
                 for offset in range(horizon)
             ],
             dim=-1,
@@ -399,7 +399,7 @@ class RolloutStorage:
                 yield RolloutStorage.Batch(
                     observations=observations_t[batch_indices],
                     next_observations=observations_future[batch_indices],
-                    commanded_actions=commanded_action_blocks[batch_indices],
+                    applied_actions=applied_action_blocks[batch_indices],
                 )
 
     def latent_dynamics_sequence_mini_batch_generator(
@@ -411,8 +411,8 @@ class RolloutStorage:
         """Yield valid starts, all future observations, and ordered action sequences."""
         if self.training_type != "rl":
             raise ValueError("This function is only available for reinforcement learning training.")
-        if self.commanded_actions is None:
-            raise ValueError("Commanded actions were not recorded in rollout storage.")
+        if self.applied_actions is None:
+            raise ValueError("Applied actions were not recorded in rollout storage.")
         if num_mini_batches <= 0 or num_epochs <= 0:
             raise ValueError("Latent dynamics epochs and mini-batches must be positive.")
         if rollout_horizon <= 0:
@@ -451,9 +451,9 @@ class RolloutStorage:
             batch_size=[rollout_horizon, num_start_steps * self.num_envs],
             device=self.device,
         )
-        commanded_action_sequence = torch.stack(
+        applied_action_sequence = torch.stack(
             [
-                self.commanded_actions[offset : offset + num_start_steps]
+                self.applied_actions[offset : offset + num_start_steps]
                 for offset in range(rollout_horizon)
             ],
             dim=0,
@@ -468,7 +468,7 @@ class RolloutStorage:
                 yield RolloutStorage.Batch(
                     observations=observations_t[batch_indices],
                     future_observations=future_observations[:, batch_indices],
-                    commanded_actions=commanded_action_sequence[:, batch_indices],
+                    applied_actions=applied_action_sequence[:, batch_indices],
                 )
 
     # For reinforcement learning with recurrent networks

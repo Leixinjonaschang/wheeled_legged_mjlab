@@ -61,7 +61,6 @@ class RepresentationVelocityTeacherStudentPPO:
         symmetry_cfg: dict | None = None,
         multi_gpu_cfg: dict | None = None,
         share_cnn_encoders: bool = False,
-        commanded_action_clip: float | None = None,
     ) -> None:
         if rnd_cfg is not None:
             raise ValueError("RND is not supported by RepresentationVelocityTeacherStudentPPO.")
@@ -170,7 +169,6 @@ class RepresentationVelocityTeacherStudentPPO:
         self.latent_rollout_loss_coef = latent_rollout_loss_coef
         self.num_latent_dynamics_epochs = num_latent_dynamics_epochs
         self.num_latent_dynamics_mini_batches = num_latent_dynamics_mini_batches
-        self.commanded_action_clip = commanded_action_clip
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
         self.rnd = None
 
@@ -181,15 +179,6 @@ class RepresentationVelocityTeacherStudentPPO:
         self.transition.actions_log_prob = self.actor.get_output_log_prob(self.transition.actions).detach()
         self.transition.distribution_params = tuple(p.detach() for p in self.actor.output_distribution_params)
         self.transition.observations = obs
-        if self.latent_dynamics_enabled:
-            commanded_actions = self.transition.actions
-            if self.commanded_action_clip is not None:
-                commanded_actions = torch.clamp(
-                    commanded_actions,
-                    -self.commanded_action_clip,
-                    self.commanded_action_clip,
-                )
-            self.transition.commanded_actions = commanded_actions.detach()
         return self.transition.actions
 
     def process_env_step(
@@ -198,6 +187,14 @@ class RepresentationVelocityTeacherStudentPPO:
         self.actor.update_normalization(obs)
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
+        if self.latent_dynamics_enabled:
+            if "applied_actions" not in extras:
+                raise ValueError(
+                    "Latent dynamics training requires applied_actions from the environment."
+                )
+            self.transition.applied_actions = (
+                extras["applied_actions"].to(self.device).detach()
+            )
         if "time_outs" in extras:
             self.transition.rewards += self.gamma * torch.squeeze(
                 self.transition.values * extras["time_outs"].unsqueeze(1).to(self.device),
@@ -685,10 +682,10 @@ class RepresentationVelocityTeacherStudentPPO:
         for horizon, batch in horizon_batches.items():
             observations_t = batch.observations
             observations_future = batch.next_observations
-            commanded_action_block = batch.commanded_actions
+            applied_action_block = batch.applied_actions
             dynamics_loss = self.actor.compute_latent_dynamics_loss(
                 observations_t,
-                commanded_action_block,
+                applied_action_block,
                 observations_future,
                 horizon=horizon,
                 detach_source=self.latent_dynamics_detach_source,
@@ -700,11 +697,11 @@ class RepresentationVelocityTeacherStudentPPO:
                 latent_future = self.actor.get_privileged_latent(observations_future)
                 predicted_future = self.actor.predict_privileged_latent(
                     latent_t,
-                    commanded_action_block,
+                    applied_action_block,
                     horizon,
                 )
-                shuffled_action_block = commanded_action_block[
-                    torch.randperm(commanded_action_block.shape[0], device=commanded_action_block.device)
+                shuffled_action_block = applied_action_block[
+                    torch.randperm(applied_action_block.shape[0], device=applied_action_block.device)
                 ]
                 shuffled_prediction = self.actor.predict_privileged_latent(
                     latent_t,
@@ -714,9 +711,9 @@ class RepresentationVelocityTeacherStudentPPO:
                 reversed_action_loss = torch.zeros((), device=self.device)
                 if horizon > 1:
                     reversed_action_block = (
-                        commanded_action_block
+                        applied_action_block
                         .reshape(
-                            commanded_action_block.shape[0],
+                            applied_action_block.shape[0],
                             horizon,
                             self.actor.latent_dynamics_action_dim,
                         )
@@ -756,7 +753,7 @@ class RepresentationVelocityTeacherStudentPPO:
         if rollout_batch is not None:
             observations_t = rollout_batch.observations
             future_observations = rollout_batch.future_observations
-            commanded_action_sequence = rollout_batch.commanded_actions
+            applied_action_sequence = rollout_batch.applied_actions
 
             latent_t = self.actor.get_privileged_latent(observations_t)
             if self.latent_dynamics_detach_source:
@@ -765,7 +762,7 @@ class RepresentationVelocityTeacherStudentPPO:
                 future_latents = self.actor.get_privileged_latent(future_observations)
             rollout_predictions = self.actor.rollout_privileged_latent(
                 latent_t,
-                commanded_action_sequence,
+                applied_action_sequence,
             )
             rollout_step_losses = torch.stack([
                 F.mse_loss(rollout_predictions[step], future_latents[step])
@@ -775,9 +772,9 @@ class RepresentationVelocityTeacherStudentPPO:
 
             with torch.no_grad():
                 rollout_batch_size = observations_t.batch_size[0]
-                shuffled_action_sequence = commanded_action_sequence[
+                shuffled_action_sequence = applied_action_sequence[
                     :,
-                    torch.randperm(rollout_batch_size, device=commanded_action_sequence.device),
+                    torch.randperm(rollout_batch_size, device=applied_action_sequence.device),
                 ]
                 shuffled_rollout_predictions = self.actor.rollout_privileged_latent(
                     latent_t,
@@ -802,7 +799,7 @@ class RepresentationVelocityTeacherStudentPPO:
                     )
 
                 if self.latent_rollout_horizon in self.latent_dynamics_horizons:
-                    direct_action_block = commanded_action_sequence.transpose(0, 1).flatten(start_dim=1)
+                    direct_action_block = applied_action_sequence.transpose(0, 1).flatten(start_dim=1)
                     direct_prediction = self.actor.predict_privileged_latent(
                         latent_t,
                         direct_action_block,
@@ -1002,7 +999,6 @@ class RepresentationVelocityTeacherStudentPPO:
             device=device,
             **cfg["algorithm"],
             multi_gpu_cfg=cfg["multi_gpu"],
-            commanded_action_clip=getattr(env, "clip_actions", None),
         )
         alg.compile(cfg.get("torch_compile_mode"))
         return alg

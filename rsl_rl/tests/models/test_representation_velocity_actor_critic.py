@@ -308,10 +308,10 @@ def test_depth_latent_dynamics_prediction_is_normalized_and_has_isolated_gradien
     obs_t = make_depth_rep_obs()
     obs_tp1 = make_depth_rep_obs()
     model = make_depth_model(obs_t)
-    commanded_action_block = torch.randn(NUM_ENVS, 5 * NUM_ACTIONS)
+    applied_action_block = torch.randn(NUM_ENVS, 5 * NUM_ACTIONS)
 
     latent_t = model.get_privileged_latent(obs_t)
-    prediction = model.predict_privileged_latent(latent_t, commanded_action_block, horizon=5)
+    prediction = model.predict_privileged_latent(latent_t, applied_action_block, horizon=5)
     assert torch.allclose(prediction.norm(dim=-1), torch.ones(NUM_ENVS), atol=1.0e-6)
     assert set(model.latent_dynamics_predictors) == {"1", "5"}
 
@@ -327,7 +327,7 @@ def test_depth_latent_dynamics_prediction_is_normalized_and_has_isolated_gradien
     model.zero_grad()
     dynamics_loss = model.compute_latent_dynamics_loss(
         obs_t,
-        commanded_action_block,
+        applied_action_block,
         obs_tp1,
         horizon=5,
     )
@@ -364,12 +364,12 @@ def test_depth_latent_dynamics_can_detach_source_for_representation_ablation() -
     obs_t = make_depth_rep_obs()
     obs_future = make_depth_rep_obs()
     model = make_depth_model(obs_t)
-    commanded_action_block = torch.randn(NUM_ENVS, 5 * NUM_ACTIONS)
+    applied_action_block = torch.randn(NUM_ENVS, 5 * NUM_ACTIONS)
 
     model.zero_grad()
     loss = model.compute_latent_dynamics_loss(
         obs_t,
-        commanded_action_block,
+        applied_action_block,
         obs_future,
         horizon=5,
         detach_source=True,

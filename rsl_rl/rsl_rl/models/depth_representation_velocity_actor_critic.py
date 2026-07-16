@@ -193,7 +193,7 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
     def predict_privileged_latent(
         self,
         latent: torch.Tensor,
-        commanded_action_block: torch.Tensor,
+        applied_action_block: torch.Tensor,
         horizon: int,
     ) -> torch.Tensor:
         predictor_key = str(horizon)
@@ -203,19 +203,19 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
                 f"available horizons are {self.latent_dynamics_horizons}."
             )
         expected_action_dim = horizon * self.latent_dynamics_action_dim
-        if commanded_action_block.shape[-1] != expected_action_dim:
+        if applied_action_block.shape[-1] != expected_action_dim:
             raise ValueError(
                 f"Horizon {horizon} expects an action block with {expected_action_dim} features, "
-                f"got shape {tuple(commanded_action_block.shape)}."
+                f"got shape {tuple(applied_action_block.shape)}."
             )
-        predictor_input = torch.cat((latent, commanded_action_block), dim=-1)
+        predictor_input = torch.cat((latent, applied_action_block), dim=-1)
         prediction = self.latent_dynamics_predictors[predictor_key](predictor_input)
         return F.normalize(prediction, p=2.0, dim=-1)
 
     def compute_latent_dynamics_loss(
         self,
         obs_t: TensorDict,
-        commanded_action_block: torch.Tensor,
+        applied_action_block: torch.Tensor,
         obs_future: TensorDict,
         horizon: int = 1,
         detach_source: bool = False,
@@ -227,7 +227,7 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             latent_future = self.get_privileged_latent(obs_future)
         predicted_future = self.predict_privileged_latent(
             latent_t,
-            commanded_action_block,
+            applied_action_block,
             horizon,
         )
         return F.mse_loss(predicted_future, latent_future)
@@ -235,23 +235,23 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
     def rollout_privileged_latent(
         self,
         latent: torch.Tensor,
-        commanded_action_sequence: torch.Tensor,
+        applied_action_sequence: torch.Tensor,
     ) -> torch.Tensor:
         """Autoregressively compose the one-step predictor without truncating gradients."""
         if "1" not in self.latent_dynamics_predictors:
             raise ValueError("Autoregressive latent rollout requires a horizon-1 predictor.")
-        if commanded_action_sequence.shape[-1] != self.latent_dynamics_action_dim:
+        if applied_action_sequence.shape[-1] != self.latent_dynamics_action_dim:
             raise ValueError(
                 "Each latent rollout action must have "
                 f"{self.latent_dynamics_action_dim} features, got shape "
-                f"{tuple(commanded_action_sequence.shape)}."
+                f"{tuple(applied_action_sequence.shape)}."
             )
         predictions = []
         current_latent = latent
-        for commanded_action in commanded_action_sequence.unbind(dim=0):
+        for applied_action in applied_action_sequence.unbind(dim=0):
             current_latent = self.predict_privileged_latent(
                 current_latent,
-                commanded_action,
+                applied_action,
                 horizon=1,
             )
             predictions.append(current_latent)

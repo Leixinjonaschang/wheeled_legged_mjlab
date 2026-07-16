@@ -132,7 +132,6 @@ def build_depth_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, Te
         latent_rollout_loss_coef=0.5,
         num_latent_dynamics_epochs=1,
         num_latent_dynamics_mini_batches=2,
-        commanded_action_clip=0.5,
     )
     return alg, obs
 
@@ -143,7 +142,12 @@ def fill_rollout(alg: RepresentationVelocityTeacherStudentPPO, obs: TensorDict) 
         next_obs = make_depth_rep_obs() if "depth_camera" in obs else make_rep_obs()
         rewards = torch.randn(NUM_ENVS)
         dones = torch.zeros(NUM_ENVS)
-        alg.process_env_step(next_obs, rewards, dones, {})
+        alg.process_env_step(
+            next_obs,
+            rewards,
+            dones,
+            {"applied_actions": torch.randn(NUM_ENVS, NUM_ACTIONS)},
+        )
         obs = next_obs
     alg.compute_returns(obs)
     return obs
@@ -290,21 +294,32 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
     assert calls["sequence"] > 0
 
 
-def test_depth_dynamics_updates_predictor_and_records_clipped_commanded_actions() -> None:
+def test_depth_dynamics_updates_predictor_and_records_applied_actions() -> None:
     alg, obs = build_depth_algorithm()
-    sampled_actions = alg.act(obs)
+    alg.act(obs)
 
-    assert torch.equal(alg.transition.commanded_actions, sampled_actions.clamp(-0.5, 0.5))
+    assert alg.transition.applied_actions is None
 
     next_obs = make_depth_rep_obs()
-    alg.process_env_step(next_obs, torch.randn(NUM_ENVS), torch.zeros(NUM_ENVS), {})
-    assert alg.storage.commanded_actions is not None
-    assert torch.equal(alg.storage.commanded_actions[0], sampled_actions.clamp(-0.5, 0.5))
+    applied_actions = torch.tensor([[1.0, -1.0]]).repeat(NUM_ENVS, 1)
+    alg.process_env_step(
+        next_obs,
+        torch.randn(NUM_ENVS),
+        torch.zeros(NUM_ENVS),
+        {"applied_actions": applied_actions},
+    )
+    assert alg.storage.applied_actions is not None
+    assert torch.equal(alg.storage.applied_actions[0], applied_actions)
 
     for _ in range(1, NUM_STEPS):
         alg.act(next_obs)
         following_obs = make_depth_rep_obs()
-        alg.process_env_step(following_obs, torch.randn(NUM_ENVS), torch.zeros(NUM_ENVS), {})
+        alg.process_env_step(
+            following_obs,
+            torch.randn(NUM_ENVS),
+            torch.zeros(NUM_ENVS),
+            {"applied_actions": torch.randn(NUM_ENVS, NUM_ACTIONS)},
+        )
         next_obs = following_obs
     alg.compute_returns(next_obs)
 
@@ -364,7 +379,7 @@ def test_latent_dynamics_generator_filters_only_done_pairs() -> None:
     storage = RolloutStorage("rl", num_envs, num_steps, obs, [1])
     state = torch.arange(num_steps * num_envs).view(num_steps, num_envs, 1).float()
     storage.observations["state"].copy_(state)
-    storage.commanded_actions = state.clone()
+    storage.applied_actions = state.clone()
     storage.dones[0, 0] = 1
 
     batches = list(storage.latent_dynamics_mini_batch_generator(2, 1))
@@ -374,7 +389,7 @@ def test_latent_dynamics_generator_filters_only_done_pairs() -> None:
         for current, future, action in zip(
             batch.observations["state"],
             batch.next_observations["state"],
-            batch.commanded_actions,
+            batch.applied_actions,
             strict=True,
         )
     }
@@ -400,7 +415,7 @@ def test_latent_dynamics_generator_builds_horizon_action_block_and_masks_full_in
     storage = RolloutStorage("rl", num_envs, num_steps, obs, [1])
     state = torch.arange(num_steps * num_envs).view(num_steps, num_envs, 1).float()
     storage.observations["state"].copy_(state)
-    storage.commanded_actions = state.clone()
+    storage.applied_actions = state.clone()
     storage.dones[0, 0] = 1
 
     batches = list(storage.latent_dynamics_mini_batch_generator(2, 1, horizon=5))
@@ -410,7 +425,7 @@ def test_latent_dynamics_generator_builds_horizon_action_block_and_masks_full_in
         for current, future, action_block in zip(
             batch.observations["state"],
             batch.next_observations["state"],
-            batch.commanded_actions,
+            batch.applied_actions,
             strict=True,
         )
     }
@@ -435,7 +450,7 @@ def test_latent_dynamics_sequence_generator_returns_all_ordered_steps() -> None:
     storage = RolloutStorage("rl", num_envs, num_steps, obs, [1])
     state = torch.arange(num_steps * num_envs).view(num_steps, num_envs, 1).float()
     storage.observations["state"].copy_(state)
-    storage.commanded_actions = state.clone()
+    storage.applied_actions = state.clone()
     storage.dones[0, 0] = 1
 
     batches = list(storage.latent_dynamics_sequence_mini_batch_generator(2, 1, rollout_horizon=5))
@@ -443,7 +458,7 @@ def test_latent_dynamics_sequence_generator_returns_all_ordered_steps() -> None:
         (
             int(batch.observations["state"][sample]),
             tuple(int(value) for value in batch.future_observations["state"][:, sample]),
-            tuple(int(value) for value in batch.commanded_actions[:, sample]),
+            tuple(int(value) for value in batch.applied_actions[:, sample]),
         )
         for batch in batches
         for sample in range(batch.observations.batch_size[0])
@@ -462,9 +477,9 @@ def test_latent_dynamics_sequence_generator_returns_all_ordered_steps() -> None:
 def test_latent_rollout_keeps_recursive_gradient_chain() -> None:
     model = make_depth_model(make_depth_rep_obs())
     latent = torch.randn(NUM_ENVS, model.latent_dim, requires_grad=True)
-    commanded_actions = torch.randn(5, NUM_ENVS, NUM_ACTIONS)
+    applied_actions = torch.randn(5, NUM_ENVS, NUM_ACTIONS)
 
-    rollout = model.rollout_privileged_latent(latent, commanded_actions)
+    rollout = model.rollout_privileged_latent(latent, applied_actions)
     rollout[-1, :, 0].sum().backward()
 
     assert rollout.shape == (5, NUM_ENVS, model.latent_dim)
