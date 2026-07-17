@@ -714,6 +714,11 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-0.02,
             params={"asset_cfg": leg_joint_cfg},
         ),
+        "leg_joint_torque": RewardTermCfg(
+            func=mdp.joint_torques_l2,
+            weight=-1.0e-5,
+            params={"asset_cfg": leg_joint_cfg},
+        ),
         "wheel_joint_vel": RewardTermCfg(
             func=mdp.joint_vel_l2,
             weight=-0.002,
