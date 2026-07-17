@@ -86,12 +86,17 @@ WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
 WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
 TERRAIN_SCAN_GRID_SHAPE = (11, 11)
 DEPTH_CAMERA_NAME = "depth_camera"
-DEPTH_CAMERA_MUJOCO_NAME = f"{ROBOT_ENTITY}/d435"
+DEPTH_CAMERA_ENTITY_NAME = "d435"
+DEPTH_CAMERA_MUJOCO_NAME = f"{ROBOT_ENTITY}/{DEPTH_CAMERA_ENTITY_NAME}"
 DEPTH_CAMERA_WIDTH = 48
 DEPTH_CAMERA_HEIGHT = 28
 DEPTH_BUFFER_SIZE = 5
 DEPTH_BUFFER_UPDATE_PERIOD = 5
-DEPTH_CAPTURE_FREQUENCY_HZ = 25.0
+DEPTH_CAPTURE_FREQUENCY_HZ = 30.0
+DEPTH_SYSTEM_DELAY_RANGE_S = (0.0, 0.020)
+DEPTH_CAMERA_POSITION_DELTA_RANGE_M = (-0.010, 0.010)
+DEPTH_CAMERA_PITCH_DELTA_RANGE_RAD = (-math.radians(1.0), math.radians(1.0))
+DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG = (-1.0, 1.0)
 ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.0
 ROUGHNESS_GATE_THRESHOLD_FINAL = 0.25
 ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 5_000 * 24
@@ -410,6 +415,7 @@ def make_observations(
                     params={
                         "sensor_name": DEPTH_CAMERA_NAME,
                         "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
+                        "system_delay_range_s": DEPTH_SYSTEM_DELAY_RANGE_S,
                     },
                 )
             },
@@ -496,9 +502,9 @@ def make_commands() -> dict[str, CommandTermCfg]:
     }
 
 
-def make_events() -> dict[str, EventTermCfg]:
+def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
     """Reset logic and domain randomization used by the velocity task."""
-    return {
+    events = {
         "prepare_quantities": EventTermCfg(
             func=mdp.prepare_quantities,
             mode="startup",
@@ -602,6 +608,58 @@ def make_events() -> dict[str, EventTermCfg]:
             },
         ),
     }
+    if depth:
+        events.update(
+            {
+                "cam_pos": EventTermCfg(
+                    func=mdp.dr.cam_pos,
+                    mode="reset",
+                    params={
+                        "asset_cfg": SceneEntityCfg(
+                            ROBOT_ENTITY,
+                            camera_names=(DEPTH_CAMERA_ENTITY_NAME,),
+                        ),
+                        "distribution": "uniform",
+                        "operation": "add",
+                        "ranges": {
+                            0: DEPTH_CAMERA_POSITION_DELTA_RANGE_M,
+                            1: DEPTH_CAMERA_POSITION_DELTA_RANGE_M,
+                            2: DEPTH_CAMERA_POSITION_DELTA_RANGE_M,
+                        },
+                        "shared_random": False,
+                    },
+                ),
+                "cam_pitch": EventTermCfg(
+                    func=mdp.dr.cam_quat,
+                    mode="reset",
+                    params={
+                        "asset_cfg": SceneEntityCfg(
+                            ROBOT_ENTITY,
+                            camera_names=(DEPTH_CAMERA_ENTITY_NAME,),
+                        ),
+                        "distribution": "uniform",
+                        "roll_range": (0.0, 0.0),
+                        "pitch_range": DEPTH_CAMERA_PITCH_DELTA_RANGE_RAD,
+                        "yaw_range": (0.0, 0.0),
+                    },
+                ),
+                "cam_fovy": EventTermCfg(
+                    func=mdp.dr.cam_fovy,
+                    mode="reset",
+                    params={
+                        "asset_cfg": SceneEntityCfg(
+                            ROBOT_ENTITY,
+                            camera_names=(DEPTH_CAMERA_ENTITY_NAME,),
+                        ),
+                        "distribution": "uniform",
+                        "operation": "add",
+                        "ranges": DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG,
+                        "shared_random": False,
+                    },
+                ),
+            }
+        )
+    return events
 
 
 def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
@@ -955,7 +1013,7 @@ def make_env_cfg(
         ),
         actions=make_actions(action_delay=not play),
         commands=make_commands(),
-        events=make_events(),
+        events=make_events(depth=depth),
         rewards=make_rewards(rough=rough),
         terminations=make_terminations(rough=rough),
         curriculum=make_curriculum(rough=rough),
@@ -981,6 +1039,12 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
     if "proprio_history" in cfg.observations:
         cfg.observations["proprio_history"].enable_corruption = False
     cfg.events.pop("push_robot", None)
+    for event_name in ("cam_pos", "cam_pitch", "cam_fovy"):
+        cfg.events.pop(event_name, None)
+    if DEPTH_CAMERA_NAME in cfg.observations:
+        depth_term = cfg.observations[DEPTH_CAMERA_NAME].terms[DEPTH_CAMERA_NAME]
+        if "system_delay_range_s" in depth_term.params:
+            depth_term.params["system_delay_range_s"] = (0.0, 0.0)
     cfg.curriculum = {}
     cfg.terminations["fell_over"].params["limit_angle"] = (
         FELL_OVER_LIMIT_ANGLE_FINAL
