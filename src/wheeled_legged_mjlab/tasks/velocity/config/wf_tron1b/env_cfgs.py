@@ -71,6 +71,14 @@ NON_WHEEL_COLLISION_GEOMS = (
 )
 
 BASE_HEIGHT_TARGET = 0.82
+POSE_TARGET_JOINT_POS = {
+    "abad_L_Joint": 0.0,
+    "hip_L_Joint": 0.2,
+    "knee_L_Joint": 0.48,
+    "abad_R_Joint": 0.0,
+    "hip_R_Joint": -0.2,
+    "knee_R_Joint": -0.48,
+}
 WHEEL_DISTANCE_RANGE = (0.28, 0.55)
 WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
@@ -668,6 +676,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             params={
                 "asset_cfg": leg_joint_cfg,
                 "command_name": COMMAND_NAME,
+                "target_joint_pos": POSE_TARGET_JOINT_POS,
                 "std_standing": {
                     r".*abad.*": 0.05,
                     r".*hip.*": 0.08,
@@ -684,7 +693,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                     r".*knee.*": 0.50,
                 },
                 "walking_threshold": 0.05,
-                "running_threshold": 1.5,
+                "running_threshold": 0.5,
             },
         ),
         "stand_still": RewardTermCfg(
