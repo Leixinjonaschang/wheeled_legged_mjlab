@@ -56,6 +56,7 @@ tests/*
 !tests/test_action_delay.py
 !tests/test_fell_over_curriculum.py
 !tests/test_representation_teacher_student_config.py
+!tests/test_velocity_command.py
 !rsl_rl/tests/
 rsl_rl/tests/*
 !rsl_rl/tests/algorithms/
