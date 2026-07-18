@@ -13,6 +13,9 @@ import torch
 from tensordict import TensorDict
 
 from rsl_rl.models import DepthRepresentationVelocityActorCritic, RepresentationVelocityActorCritic
+from rsl_rl.models.depth_representation_velocity_predictor_actor_critic import (
+    DepthRepresentationVelocityPredictorActorCritic,
+)
 
 NUM_ENVS = 4
 PROPRIO_DIM = 28
@@ -101,9 +104,43 @@ def make_depth_model(obs: TensorDict | None = None) -> DepthRepresentationVeloci
         depth_feature_dim=8,
         depth_gru_hidden_dim=8,
         depth_channels=(4, 4),
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+
+def make_depth_predictor_model(
+    obs: TensorDict | None = None,
+) -> DepthRepresentationVelocityPredictorActorCritic:
+    obs = make_depth_rep_obs() if obs is None else obs
+    obs_groups = {
+        "proprio_history": ["proprio_history"],
+        "actor_command": ["actor_command"],
+        "lin_vel_target": ["lin_vel_target"],
+        "critic": ["critic"],
+        "privileged_encoder": ["privileged_encoder"],
+        "depth_encoder": ["depth_camera"],
+    }
+    return DepthRepresentationVelocityPredictorActorCritic(
+        obs,
+        obs_groups,
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        encoder_hidden_dims=[16],
+        latent_dim=LATENT_DIM,
+        depth_feature_dim=8,
+        depth_gru_hidden_dim=8,
+        depth_channels=(4, 4),
         latent_dynamics_horizons=(1, 5),
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
     )
+
+
+def test_depth_model_has_no_latent_dynamics_interface() -> None:
+    model = make_depth_model()
+
+    assert not hasattr(model, "latent_dynamics_horizons")
+    assert not hasattr(model, "latent_dynamics_predictors")
+    assert not hasattr(model, "compute_latent_dynamics_loss")
 
 
 def test_teacher_student_value_and_velocity_paths_have_expected_shapes() -> None:
@@ -307,7 +344,7 @@ def test_depth_student_losses_update_depth_and_student_encoder_side() -> None:
 def test_depth_latent_dynamics_prediction_is_normalized_and_has_isolated_gradients() -> None:
     obs_t = make_depth_rep_obs()
     obs_tp1 = make_depth_rep_obs()
-    model = make_depth_model(obs_t)
+    model = make_depth_predictor_model(obs_t)
     applied_action_block = torch.randn(NUM_ENVS, 5 * NUM_ACTIONS)
 
     latent_t = model.get_privileged_latent(obs_t)
@@ -349,7 +386,7 @@ def test_depth_latent_dynamics_prediction_is_normalized_and_has_isolated_gradien
 
 def test_depth_ppo_path_does_not_backpropagate_into_dynamics_predictor() -> None:
     obs = make_depth_rep_obs()
-    model = make_depth_model(obs)
+    model = make_depth_predictor_model(obs)
 
     model.zero_grad()
     actions = model.act_teacher(obs, stochastic_output=True)
@@ -363,7 +400,7 @@ def test_depth_ppo_path_does_not_backpropagate_into_dynamics_predictor() -> None
 def test_depth_latent_dynamics_can_detach_source_for_representation_ablation() -> None:
     obs_t = make_depth_rep_obs()
     obs_future = make_depth_rep_obs()
-    model = make_depth_model(obs_t)
+    model = make_depth_predictor_model(obs_t)
     applied_action_block = torch.randn(NUM_ENVS, 5 * NUM_ACTIONS)
 
     model.zero_grad()

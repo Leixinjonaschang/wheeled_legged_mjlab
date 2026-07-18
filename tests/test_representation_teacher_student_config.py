@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 import subprocess
+import sys
 
 import torch
 from tensordict import TensorDict
@@ -70,7 +71,8 @@ def test_representation_velocity_tasks_are_registered() -> None:
     assert rough_agent["algorithm"]["class_name"] == "RepresentationVelocityTeacherStudentPPO"
     assert rough_agent["algorithm"]["representation_loss_coef"] == 1.0
     assert rough_agent["algorithm"]["lin_vel_loss_coef"] == 1.0
-    assert rough_agent["algorithm"]["latent_dynamics_loss_coef"] == 0.0
+    assert all("latent_dynamics" not in name for name in rough_agent["algorithm"])
+    assert all("latent_dynamics" not in name for name in rough_agent["actor"])
     assert rough_agent["actor"]["class_name"] == "RepresentationVelocityActorCritic"
     assert rough_agent["obs_groups"] == {
         "proprio_history": ("proprio_history",),
@@ -178,9 +180,13 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     tasks = set(list_tasks())
 
     assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth" in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict" in tasks
 
     cfg = wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg()
     agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth"))
+    predict_agent = asdict(
+        load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict")
+    )
     depth_group = cfg.observations[DEPTH_CAMERA_NAME]
     depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
 
@@ -190,16 +196,27 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
     }
     assert agent["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
-    assert agent["actor"]["latent_dynamics_hidden_dims"] == (128, 256, 256, 128)
     assert agent["algorithm"]["representation_chunk_length"] == 12
-    assert agent["algorithm"]["latent_dynamics_loss_coef"] == 1.0
-    assert agent["algorithm"]["latent_dynamics_horizons"] == (1, 5)
-    assert agent["algorithm"]["latent_dynamics_horizon_weights"] == (1.0, 0.5)
-    assert agent["algorithm"]["latent_dynamics_detach_source"] is False
-    assert agent["algorithm"]["latent_rollout_horizon"] == 5
-    assert agent["algorithm"]["latent_rollout_loss_coef"] == 0.5
-    assert agent["algorithm"]["num_latent_dynamics_epochs"] == 1
-    assert agent["algorithm"]["num_latent_dynamics_mini_batches"] == 4
+    assert all("latent_dynamics" not in name for name in agent["actor"])
+    assert all("latent_dynamics" not in name for name in agent["algorithm"])
+    assert all("latent_rollout" not in name for name in agent["algorithm"])
+
+    assert predict_agent["actor"]["class_name"].endswith(
+        ":DepthRepresentationVelocityPredictorActorCritic"
+    )
+    assert predict_agent["actor"]["latent_dynamics_hidden_dims"] == (128, 256, 256, 128)
+    assert predict_agent["actor"]["latent_dynamics_horizons"] == (1, 5)
+    assert predict_agent["algorithm"]["class_name"].endswith(
+        ":RepresentationVelocityPredictorTeacherStudentPPO"
+    )
+    assert predict_agent["algorithm"]["latent_dynamics_loss_coef"] == 50.0
+    assert predict_agent["algorithm"]["latent_dynamics_horizons"] == (1, 5)
+    assert predict_agent["algorithm"]["latent_dynamics_horizon_weights"] == (1.0, 0.5)
+    assert predict_agent["algorithm"]["latent_dynamics_detach_source"] is False
+    assert predict_agent["algorithm"]["latent_rollout_horizon"] == 5
+    assert predict_agent["algorithm"]["latent_rollout_loss_coef"] == 0.75
+    assert predict_agent["algorithm"]["num_latent_dynamics_epochs"] == 1
+    assert predict_agent["algorithm"]["num_latent_dynamics_mini_batches"] == 4
     assert "latent_dynamics_command_generation" not in cfg.observations
     assert agent["obs_groups"] == {
         "proprio_history": ("proprio_history",),
@@ -209,6 +226,47 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "privileged_encoder": ("privileged_encoder",),
         "depth_encoder": (DEPTH_CAMERA_NAME,),
     }
+
+
+def test_plain_depth_task_loads_without_importing_predictor_modules() -> None:
+    script = """
+import builtins
+from dataclasses import asdict
+
+real_import = builtins.__import__
+
+def reject_predictor(name, *args, **kwargs):
+    if "predictor" in name:
+        raise ImportError(f"blocked predictor import: {name}")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = reject_predictor
+
+import wheeled_legged_mjlab
+from mjlab.tasks.registry import load_rl_cfg
+from rsl_rl.utils import resolve_callable
+
+cfg = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth"))
+assert cfg["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
+assert cfg["algorithm"]["class_name"] == "RepresentationVelocityTeacherStudentPPO"
+assert not any("latent_dynamics" in key for key in cfg["actor"])
+assert not any("latent_dynamics" in key for key in cfg["algorithm"])
+assert resolve_callable(cfg["actor"]["class_name"]).__module__.endswith(
+    "depth_representation_velocity_actor_critic"
+)
+assert resolve_callable(cfg["algorithm"]["class_name"]).__module__.endswith(
+    "representation_velocity_teacher_student_ppo"
+)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:

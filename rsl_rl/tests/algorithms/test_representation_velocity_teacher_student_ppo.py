@@ -15,7 +15,13 @@ from tensordict import TensorDict
 import pytest
 
 from rsl_rl.algorithms import RepresentationVelocityTeacherStudentPPO
+from rsl_rl.algorithms.representation_velocity_predictor_teacher_student_ppo import (
+    RepresentationVelocityPredictorTeacherStudentPPO,
+)
 from rsl_rl.models import DepthRepresentationVelocityActorCritic, RepresentationVelocityActorCritic
+from rsl_rl.models.depth_representation_velocity_predictor_actor_critic import (
+    DepthRepresentationVelocityPredictorActorCritic,
+)
 from rsl_rl.storage import RolloutStorage
 
 NUM_ENVS = 4
@@ -85,6 +91,30 @@ def make_depth_model(obs: TensorDict) -> DepthRepresentationVelocityActorCritic:
         depth_feature_dim=8,
         depth_gru_hidden_dim=8,
         depth_channels=(4, 4),
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+
+def make_depth_predictor_model(
+    obs: TensorDict,
+) -> DepthRepresentationVelocityPredictorActorCritic:
+    return DepthRepresentationVelocityPredictorActorCritic(
+        obs,
+        {
+            "proprio_history": ["proprio_history"],
+            "actor_command": ["actor_command"],
+            "lin_vel_target": ["lin_vel_target"],
+            "critic": ["critic"],
+            "privileged_encoder": ["privileged_encoder", "actor_command"],
+            "depth_encoder": ["depth_camera"],
+        },
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        encoder_hidden_dims=[16],
+        latent_dim=4,
+        depth_feature_dim=8,
+        depth_gru_hidden_dim=8,
+        depth_channels=(4, 4),
         latent_dynamics_horizons=(1, 5),
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
     )
@@ -108,12 +138,33 @@ def build_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, TensorDi
     return alg, obs
 
 
-def build_depth_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, TensorDict]:
+def build_plain_depth_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, TensorDict]:
     torch.manual_seed(12)
     obs = make_depth_rep_obs()
     model = make_depth_model(obs)
     storage = RolloutStorage("rl", NUM_ENVS, NUM_STEPS, obs, [NUM_ACTIONS])
     alg = RepresentationVelocityTeacherStudentPPO(
+        model,
+        storage,
+        num_learning_epochs=2,
+        num_mini_batches=2,
+        learning_rate=1.0e-3,
+        student_learning_rate=1.0e-3,
+        schedule="fixed",
+        desired_kl=0.01,
+        num_representation_epochs=1,
+        num_representation_mini_batches=2,
+        representation_chunk_length=2,
+    )
+    return alg, obs
+
+
+def build_depth_algorithm() -> tuple[RepresentationVelocityPredictorTeacherStudentPPO, TensorDict]:
+    torch.manual_seed(12)
+    obs = make_depth_rep_obs()
+    model = make_depth_predictor_model(obs)
+    storage = RolloutStorage("rl", NUM_ENVS, NUM_STEPS, obs, [NUM_ACTIONS])
+    alg = RepresentationVelocityPredictorTeacherStudentPPO(
         model,
         storage,
         num_learning_epochs=2,
@@ -136,7 +187,11 @@ def build_depth_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, Te
     return alg, obs
 
 
-def fill_rollout(alg: RepresentationVelocityTeacherStudentPPO, obs: TensorDict) -> TensorDict:
+def fill_rollout(
+    alg: RepresentationVelocityTeacherStudentPPO
+    | RepresentationVelocityPredictorTeacherStudentPPO,
+    obs: TensorDict,
+) -> TensorDict:
     for _ in range(NUM_STEPS):
         alg.act(obs)
         next_obs = make_depth_rep_obs() if "depth_camera" in obs else make_rep_obs()
@@ -171,7 +226,7 @@ def test_gradient_delta_cosine(baseline: list[float], delta: list[float], expect
     baseline_tensor = torch.tensor(baseline)
     parameter.grad = baseline_tensor + torch.tensor(delta)
 
-    cosine = RepresentationVelocityTeacherStudentPPO._gradient_delta_cosine(
+    cosine = RepresentationVelocityPredictorTeacherStudentPPO._gradient_delta_cosine(
         [parameter],
         {id(parameter): baseline_tensor},
     )
@@ -186,7 +241,7 @@ def test_gradient_delta_cosine_includes_dynamics_only_parameters() -> None:
     shared_parameter.grad = torch.tensor([2.0, 0.0])
     dynamics_only_parameter.grad = torch.tensor([0.0, 1.0])
 
-    cosine = RepresentationVelocityTeacherStudentPPO._gradient_delta_cosine(
+    cosine = RepresentationVelocityPredictorTeacherStudentPPO._gradient_delta_cosine(
         [shared_parameter, dynamics_only_parameter],
         {
             id(shared_parameter): shared_baseline,
@@ -334,6 +389,18 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         } <= set(losses)
     assert calls["flat"] == 0
     assert calls["sequence"] > 0
+
+
+def test_plain_depth_update_has_no_predictor_dependency() -> None:
+    alg, obs = build_plain_depth_algorithm()
+    fill_rollout(alg, obs)
+
+    assert alg.storage.applied_actions is None
+    losses = alg.update()
+
+    assert {"student", "representation", "lin_vel"} <= set(losses)
+    assert all("latent" not in name for name in losses)
+    assert not hasattr(alg.actor, "latent_dynamics_predictors")
 
 
 def test_depth_dynamics_updates_predictor_and_records_applied_actions() -> None:
@@ -518,7 +585,7 @@ def test_latent_dynamics_sequence_generator_returns_all_ordered_steps() -> None:
 
 
 def test_latent_rollout_keeps_recursive_gradient_chain() -> None:
-    model = make_depth_model(make_depth_rep_obs())
+    model = make_depth_predictor_model(make_depth_rep_obs())
     latent = torch.randn(NUM_ENVS, model.latent_dim, requires_grad=True)
     applied_actions = torch.randn(5, NUM_ENVS, NUM_ACTIONS)
 

@@ -9,6 +9,7 @@ from mjlab.rl import (
     RslRlPpoAlgorithmCfg,
 )
 
+
 class WFTRON1BRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     trial_message: str = ""
 
@@ -49,8 +50,21 @@ class RslRlDepthRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelC
     depth_feature_dim: int = 64
     depth_gru_hidden_dim: int = 64
     depth_channels: Tuple[int, ...] = (16, 32, 32)
-    latent_dynamics_hidden_dims: Tuple[int, ...] = (128, 256, 256, 128)
     class_name: str = "DepthRepresentationVelocityActorCritic"
+
+
+@dataclass
+class RslRlDepthRepresentationVelocityPredictorModelCfg(
+    RslRlDepthRepresentationVelocityModelCfg
+):
+    """Config for the depth model with latent dynamics prediction."""
+
+    latent_dynamics_hidden_dims: Tuple[int, ...] = (128, 256, 256, 128)
+    latent_dynamics_horizons: Tuple[int, ...] = (1, 5)
+    class_name: str = (
+        "rsl_rl.models.depth_representation_velocity_predictor_actor_critic:"
+        "DepthRepresentationVelocityPredictorActorCritic"
+    )
 
 
 @dataclass
@@ -64,15 +78,27 @@ class RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithm
     representation_chunk_length: int = 12
     representation_loss_coef: float = 1.0
     lin_vel_loss_coef: float = 1.0
-    latent_dynamics_loss_coef: float = 0.0
-    latent_dynamics_horizons: Tuple[int, ...] = (1,)
-    latent_dynamics_horizon_weights: Tuple[float, ...] = (1.0,)
+    class_name: str = "RepresentationVelocityTeacherStudentPPO"
+
+
+@dataclass
+class RslRlRepresentationVelocityPredictorTeacherStudentPpoAlgorithmCfg(
+    RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg
+):
+    """Config for velocity representation PPO with latent dynamics prediction."""
+
+    latent_dynamics_loss_coef: float = 50.0
+    latent_dynamics_horizons: Tuple[int, ...] = (1, 5)
+    latent_dynamics_horizon_weights: Tuple[float, ...] = (1.0, 0.5)
     latent_dynamics_detach_source: bool = False
     latent_rollout_horizon: int = 5
-    latent_rollout_loss_coef: float = 0.0
+    latent_rollout_loss_coef: float = 0.75
     num_latent_dynamics_epochs: int = 1
     num_latent_dynamics_mini_batches: int = 4
-    class_name: str = "RepresentationVelocityTeacherStudentPPO"
+    class_name: str = (
+        "rsl_rl.algorithms.representation_velocity_predictor_teacher_student_ppo:"
+        "RepresentationVelocityPredictorTeacherStudentPPO"
+    )
 
 
 def wf_tron1b_ppo_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
@@ -167,7 +193,7 @@ def wf_tron1b_rep_ts_lin_vel_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
 
 
 def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
-    """Create velocity representation teacher-student runner configuration with depth."""
+    """Create the depth runner without a latent dynamics predictor."""
     return WFTRON1BRslRlOnPolicyRunnerCfg(
         actor=RslRlDepthRepresentationVelocityModelCfg(
             hidden_dims=(512, 256, 256, 128),
@@ -179,7 +205,6 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             depth_feature_dim=64,
             depth_gru_hidden_dim=64,
             depth_channels=(16, 32, 32),
-            latent_dynamics_hidden_dims=(128, 256, 256, 128),
             distribution_cfg={
                 "class_name": "GaussianDistribution",
                 "init_std": 1.0,
@@ -206,14 +231,6 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             representation_chunk_length=12,
             representation_loss_coef=1.0,
             lin_vel_loss_coef=1.0,
-            latent_dynamics_loss_coef=100.0,
-            latent_dynamics_horizons=(1, 5),
-            latent_dynamics_horizon_weights=(1.0, 0.5),
-            latent_dynamics_detach_source=False,
-            latent_rollout_horizon=5,
-            latent_rollout_loss_coef=0.75,
-            num_latent_dynamics_epochs=1,
-            num_latent_dynamics_mini_batches=4,
         ),
         obs_groups={
             "proprio_history": ("proprio_history",),
@@ -230,6 +247,60 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
         clip_actions=2.0,
         upload_model=False,
     )
+
+
+def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
+    """Create the depth runner with multi-horizon latent dynamics prediction."""
+    cfg = wf_tron1b_rep_ts_lin_vel_depth_runner_cfg()
+    cfg.actor = RslRlDepthRepresentationVelocityPredictorModelCfg(
+        hidden_dims=(512, 256, 256, 128),
+        encoder_hidden_dims=(512, 256, 128),
+        activation="elu",
+        obs_normalization=True,
+        latent_dim=64,
+        normalize_latent=True,
+        depth_feature_dim=64,
+        depth_gru_hidden_dim=64,
+        depth_channels=(16, 32, 32),
+        latent_dynamics_hidden_dims=(128, 256, 256, 128),
+        latent_dynamics_horizons=(1, 5),
+        distribution_cfg={
+            "class_name": "GaussianDistribution",
+            "init_std": 1.0,
+            "std_type": "scalar",
+        },
+    )
+    cfg.algorithm = RslRlRepresentationVelocityPredictorTeacherStudentPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-3,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+        student_learning_rate=1.0e-3,
+        num_student_substeps=1,
+        num_representation_epochs=1,
+        num_representation_mini_batches=4,
+        representation_chunk_length=12,
+        representation_loss_coef=1.0,
+        lin_vel_loss_coef=1.0,
+        latent_dynamics_loss_coef=50.0,
+        latent_dynamics_horizons=(1, 5),
+        latent_dynamics_horizon_weights=(1.0, 0.5),
+        latent_dynamics_detach_source=False,
+        latent_rollout_horizon=5,
+        latent_rollout_loss_coef=0.75,
+        num_latent_dynamics_epochs=1,
+        num_latent_dynamics_mini_batches=4,
+    )
+    cfg.experiment_name = "wf_tron1b_velocity_rep_ts_lin_vel_depth_predict_latent64"
+    return cfg
 
 
 def wf_tron1b_rep_ts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
