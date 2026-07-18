@@ -157,6 +157,46 @@ def any_param_changed(before: dict[str, torch.Tensor], module: torch.nn.Module) 
     return any(not torch.equal(before[name], param) for name, param in module.named_parameters())
 
 
+@pytest.mark.parametrize(
+    ("baseline", "delta", "expected"),
+    [
+        ([1.0, 0.0], [1.0, 0.0], 1.0),
+        ([1.0, 0.0], [-1.0, 0.0], -1.0),
+        ([1.0, 0.0], [0.0, 2.0], 0.0),
+        ([1.0, 0.0], [0.0, 0.0], 0.0),
+    ],
+)
+def test_gradient_delta_cosine(baseline: list[float], delta: list[float], expected: float) -> None:
+    parameter = torch.nn.Parameter(torch.zeros(2))
+    baseline_tensor = torch.tensor(baseline)
+    parameter.grad = baseline_tensor + torch.tensor(delta)
+
+    cosine = RepresentationVelocityTeacherStudentPPO._gradient_delta_cosine(
+        [parameter],
+        {id(parameter): baseline_tensor},
+    )
+
+    assert cosine == pytest.approx(expected)
+
+
+def test_gradient_delta_cosine_includes_dynamics_only_parameters() -> None:
+    shared_parameter = torch.nn.Parameter(torch.zeros(2))
+    dynamics_only_parameter = torch.nn.Parameter(torch.zeros(2))
+    shared_baseline = torch.tensor([1.0, 0.0])
+    shared_parameter.grad = torch.tensor([2.0, 0.0])
+    dynamics_only_parameter.grad = torch.tensor([0.0, 1.0])
+
+    cosine = RepresentationVelocityTeacherStudentPPO._gradient_delta_cosine(
+        [shared_parameter, dynamics_only_parameter],
+        {
+            id(shared_parameter): shared_baseline,
+            id(dynamics_only_parameter): None,
+        },
+    )
+
+    assert cosine == pytest.approx(1.0 / 2.0**0.5)
+
+
 def test_update_returns_student_losses_and_updates_parameter_groups() -> None:
     alg, obs = build_algorithm()
     fill_rollout(alg, obs)
@@ -236,6 +276,7 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "Grad/dynamics_total_norm",
         "Grad/privileged_encoder_dynamics_norm",
         "Grad/privileged_encoder_dynamics_to_ppo_ratio",
+        "Grad/privileged_encoder_ppo_dynamics_cosine",
         "Grad/dynamics_clip_fraction",
         "Update/privileged_encoder_norm_joint",
         "Update/privileged_encoder_norm_ppo_only",
@@ -274,6 +315,7 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
     assert losses["Grad/privileged_encoder_dynamics_to_ppo_ratio"] == pytest.approx(
         losses["Grad/privileged_encoder_dynamics_norm"] / (losses["Grad/privileged_encoder_ppo_norm"] + 1.0e-8)
     )
+    assert -1.0 <= losses["Grad/privileged_encoder_ppo_dynamics_cosine"] <= 1.0
     assert 0.0 <= losses["Grad/ppo_clip_fraction"] <= 1.0
     assert 0.0 <= losses["Grad/combined_clip_fraction"] <= 1.0
     assert 0.0 <= losses["Grad/dynamics_clip_fraction"] <= 1.0
@@ -365,6 +407,7 @@ def test_joint_dynamics_respects_detached_source_encoder() -> None:
     losses = alg.update()
 
     assert losses["Grad/privileged_encoder_dynamics_norm"] == pytest.approx(0.0)
+    assert losses["Grad/privileged_encoder_ppo_dynamics_cosine"] == pytest.approx(0.0)
     assert losses["Grad/dynamics_total_norm"] > 0.0
     assert losses["Update/joint_step_fraction"] == pytest.approx(0.5)
 

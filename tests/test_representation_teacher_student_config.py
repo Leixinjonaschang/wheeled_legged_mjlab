@@ -190,7 +190,7 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
     }
     assert agent["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
-    assert agent["actor"]["latent_dynamics_hidden_dims"] == (128, 128)
+    assert agent["actor"]["latent_dynamics_hidden_dims"] == (128, 256, 256, 128)
     assert agent["algorithm"]["representation_chunk_length"] == 12
     assert agent["algorithm"]["latent_dynamics_loss_coef"] == 1.0
     assert agent["algorithm"]["latent_dynamics_horizons"] == (1, 5)

@@ -242,6 +242,7 @@ class RepresentationVelocityTeacherStudentPPO:
         latent_rollout_samples = 0
         mean_latent_dynamics_grad_norm = 0.0
         mean_privileged_encoder_dynamics_grad_norm = 0.0
+        mean_privileged_encoder_ppo_dynamics_cosine = 0.0
         latent_dynamics_grad_clip_count = 0
         latent_dynamics_updates = 0
         mean_combined_grad_norm = 0.0
@@ -398,8 +399,13 @@ class RepresentationVelocityTeacherStudentPPO:
                     list(self.actor.privileged_encoder.parameters()),
                     baseline_gradients,
                 )
+                privileged_encoder_ppo_dynamics_cosine = self._gradient_delta_cosine(
+                    self.actor.privileged_encoder.parameters(),
+                    baseline_gradients,
+                )
                 mean_latent_dynamics_grad_norm += latent_dynamics_grad_norm
                 mean_privileged_encoder_dynamics_grad_norm += privileged_encoder_dynamics_grad_norm
+                mean_privileged_encoder_ppo_dynamics_cosine += privileged_encoder_ppo_dynamics_cosine
                 latent_dynamics_grad_clip_count += latent_dynamics_grad_norm > self.max_grad_norm
                 latent_dynamics_updates += 1
 
@@ -513,12 +519,14 @@ class RepresentationVelocityTeacherStudentPPO:
             if latent_dynamics_updates > 0:
                 mean_latent_dynamics_grad_norm /= latent_dynamics_updates
                 mean_privileged_encoder_dynamics_grad_norm /= latent_dynamics_updates
+                mean_privileged_encoder_ppo_dynamics_cosine /= latent_dynamics_updates
             loss_dict.update({
                 "Grad/dynamics_total_norm": mean_latent_dynamics_grad_norm,
                 "Grad/privileged_encoder_dynamics_norm": mean_privileged_encoder_dynamics_grad_norm,
                 "Grad/privileged_encoder_dynamics_to_ppo_ratio": (
                     mean_privileged_encoder_dynamics_grad_norm / (mean_privileged_encoder_ppo_grad_norm + 1.0e-8)
                 ),
+                "Grad/privileged_encoder_ppo_dynamics_cosine": mean_privileged_encoder_ppo_dynamics_cosine,
                 "Grad/dynamics_clip_fraction": (latent_dynamics_grad_clip_count / max(latent_dynamics_updates, 1)),
             })
             for horizon in self.latent_dynamics_horizons:
@@ -857,6 +865,46 @@ class RepresentationVelocityTeacherStudentPPO:
         if not delta_norms:
             return 0.0
         return torch.stack(delta_norms).norm(2).item()
+
+    @staticmethod
+    def _gradient_delta_cosine(
+        parameters: Iterable[torch.nn.Parameter],
+        baseline_gradients: dict[int, torch.Tensor | None],
+    ) -> float:
+        """Return cosine similarity between baseline and subsequently added gradients."""
+        dot_product = None
+        baseline_squared_norm = None
+        delta_squared_norm = None
+        for parameter in parameters:
+            baseline = baseline_gradients.get(id(parameter))
+            current = None if parameter.grad is None else parameter.grad.detach()
+            if baseline is None and current is None:
+                continue
+            if baseline is None:
+                assert current is not None
+                delta = current
+                parameter_dot = torch.zeros((), device=current.device, dtype=current.dtype)
+                parameter_baseline_squared_norm = torch.zeros((), device=current.device, dtype=current.dtype)
+            else:
+                delta = -baseline if current is None else current - baseline
+                parameter_dot = torch.sum(baseline * delta)
+                parameter_baseline_squared_norm = torch.sum(baseline.square())
+            parameter_delta_squared_norm = torch.sum(delta.square())
+            if dot_product is None:
+                dot_product = parameter_dot
+                baseline_squared_norm = parameter_baseline_squared_norm
+                delta_squared_norm = parameter_delta_squared_norm
+            else:
+                dot_product = dot_product + parameter_dot
+                baseline_squared_norm = baseline_squared_norm + parameter_baseline_squared_norm
+                delta_squared_norm = delta_squared_norm + parameter_delta_squared_norm
+
+        if dot_product is None or baseline_squared_norm is None or delta_squared_norm is None:
+            return 0.0
+        denominator = torch.sqrt(baseline_squared_norm * delta_squared_norm)
+        if denominator.item() == 0.0:
+            return 0.0
+        return torch.clamp(dot_product / denominator, min=-1.0, max=1.0).item()
 
     def _reduce_gradient_delta(
         self,

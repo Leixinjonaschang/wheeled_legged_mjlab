@@ -36,7 +36,7 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         depth_feature_dim: int = 64,
         depth_gru_hidden_dim: int = 64,
         depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
-        latent_dynamics_hidden_dims: tuple[int, ...] | list[int] = (128, 128),
+        latent_dynamics_hidden_dims: tuple[int, ...] | list[int] = (128, 256, 256, 128),
         latent_dynamics_horizons: tuple[int, ...] | list[int] = (1,),
     ) -> None:
         super().__init__(

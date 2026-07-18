@@ -487,7 +487,7 @@ def make_commands() -> dict[str, CommandTermCfg]:
             heading_control_stiffness=1.0,
             debug_vis=True,
             ranges=UniformVelocityCommandCfg.Ranges(
-                lin_vel_x=(-1.0, 2.5),
+                lin_vel_x=(-1.0, 1.5),
                 lin_vel_y=(-1.0, 1.0),
                 ang_vel_z=(-math.pi / 2, math.pi / 2),
                 heading=(-math.pi, math.pi),

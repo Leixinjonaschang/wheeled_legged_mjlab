@@ -49,7 +49,7 @@ class RslRlDepthRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelC
     depth_feature_dim: int = 64
     depth_gru_hidden_dim: int = 64
     depth_channels: Tuple[int, ...] = (16, 32, 32)
-    latent_dynamics_hidden_dims: Tuple[int, ...] = (128, 128)
+    latent_dynamics_hidden_dims: Tuple[int, ...] = (128, 256, 256, 128)
     class_name: str = "DepthRepresentationVelocityActorCritic"
 
 
@@ -179,7 +179,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             depth_feature_dim=64,
             depth_gru_hidden_dim=64,
             depth_channels=(16, 32, 32),
-            latent_dynamics_hidden_dims=(128, 128),
+            latent_dynamics_hidden_dims=(128, 256, 256, 128),
             distribution_cfg={
                 "class_name": "GaussianDistribution",
                 "init_std": 1.0,
@@ -206,7 +206,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             representation_chunk_length=12,
             representation_loss_coef=1.0,
             lin_vel_loss_coef=1.0,
-            latent_dynamics_loss_coef=10.0,
+            latent_dynamics_loss_coef=100.0,
             latent_dynamics_horizons=(1, 5),
             latent_dynamics_horizon_weights=(1.0, 0.5),
             latent_dynamics_detach_source=False,
