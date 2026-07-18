@@ -90,6 +90,8 @@ DEPTH_CAMERA_ENTITY_NAME = "d435"
 DEPTH_CAMERA_MUJOCO_NAME = f"{ROBOT_ENTITY}/{DEPTH_CAMERA_ENTITY_NAME}"
 DEPTH_CAMERA_WIDTH = 53
 DEPTH_CAMERA_HEIGHT = 30
+DEPTH_LEFT_CROP = 8
+DEPTH_MODEL_WIDTH = DEPTH_CAMERA_WIDTH - DEPTH_LEFT_CROP
 DEPTH_BUFFER_SIZE = 5
 DEPTH_BUFFER_UPDATE_PERIOD = 5
 DEPTH_CAPTURE_FREQUENCY_HZ = 30.0
@@ -416,6 +418,7 @@ def make_observations(
                         "sensor_name": DEPTH_CAMERA_NAME,
                         "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
                         "system_delay_range_s": DEPTH_SYSTEM_DELAY_RANGE_S,
+                        "left_crop": DEPTH_LEFT_CROP,
                     },
                 )
             },
@@ -431,6 +434,7 @@ def make_observations(
                         "sensor_name": DEPTH_CAMERA_NAME,
                         "buffer_size": DEPTH_BUFFER_SIZE,
                         "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
+                        "left_crop": DEPTH_LEFT_CROP,
                     },
                 )
             },
