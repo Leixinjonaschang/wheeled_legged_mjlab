@@ -72,11 +72,22 @@ def foot_contact_forces(
   return torch.sign(forces_flat) * torch.log1p(torch.abs(forces_flat))
 
 
-def depth_image(env: ManagerBasedRlEnv, sensor_name: str = "depth_camera") -> torch.Tensor:
+def depth_image(
+  env: ManagerBasedRlEnv,
+  sensor_name: str = "depth_camera",
+  left_crop: int = 0,
+) -> torch.Tensor:
   """Depth image from the forward-facing camera."""
   camera: CameraSensor = env.scene[sensor_name]
   assert camera.data.depth is not None, f"Sensor '{sensor_name}' has no depth data"
-  return camera.data.depth.squeeze(-1)
+  depth = camera.data.depth.squeeze(-1)
+  if left_crop < 0 or left_crop >= depth.shape[-1]:
+    raise ValueError(
+      f"left_crop must be in [0, {depth.shape[-1] - 1}], got {left_crop}"
+    )
+  if left_crop > 0:
+    depth = depth[..., left_crop:].contiguous()
+  return depth
 
 
 class DepthBuffer:
@@ -94,6 +105,7 @@ class DepthBuffer:
     sensor_name: str = "depth_camera",
     buffer_size: int = 5,
     update_period: int = 5,
+    left_crop: int = 0,
   ) -> torch.Tensor:
     if buffer_size < 1:
       raise ValueError(f"buffer_size must be >= 1, got {buffer_size}")
@@ -112,7 +124,7 @@ class DepthBuffer:
       assert self._buffer is not None
       return self._buffer
 
-    frame = depth_image(env, sensor_name=sensor_name)
+    frame = depth_image(env, sensor_name=sensor_name, left_crop=left_crop)
 
     if needs_init:
       self._buffer = frame.unsqueeze(1).repeat(
@@ -176,6 +188,7 @@ class AsyncDepthBuffer:
     sensor_name: str = "depth_camera",
     capture_frequency_hz: float = 30.0,
     system_delay_range_s: tuple[float, float] = (0.0, 0.0),
+    left_crop: int = 0,
   ) -> torch.Tensor:
     if capture_frequency_hz <= 0.0:
       raise ValueError(
@@ -219,7 +232,11 @@ class AsyncDepthBuffer:
     if not (needs_init or capture_due or needs_reset_fill):
       return self._select(current_time_s)
 
-    frame = depth_image(env, sensor_name=sensor_name).unsqueeze(1)
+    frame = depth_image(
+      env,
+      sensor_name=sensor_name,
+      left_crop=left_crop,
+    ).unsqueeze(1)
 
     if needs_init:
       self._capture_period_s = capture_period_s
