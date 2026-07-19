@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import subprocess
 import sys
 
+import pytest
 import torch
 from tensordict import TensorDict
 
@@ -23,7 +24,17 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     DEPTH_BUFFER_SIZE,
     DEPTH_BUFFER_UPDATE_PERIOD,
     DEPTH_CAPTURE_FREQUENCY_HZ,
+    DEPTH_CAMERA_ENTITY_NAME,
+    DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG,
+    DEPTH_CAMERA_HEIGHT,
     DEPTH_CAMERA_NAME,
+    DEPTH_CAMERA_PITCH_DELTA_RANGE_RAD,
+    DEPTH_CAMERA_POSITION_DELTA_RANGE_M,
+    DEPTH_CAMERA_WIDTH,
+    DEPTH_LEFT_CROP,
+    DEPTH_MODEL_WIDTH,
+    DEPTH_SYSTEM_DELAY_RANGE_S,
+    wf_tron1b_rough_depth_env_cfg,
     wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg,
     wf_tron1b_rough_rep_ts_lin_vel_env_cfg,
     wf_tron1b_rough_env_cfg,
@@ -162,7 +173,16 @@ def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
         "sensor_name": DEPTH_CAMERA_NAME,
         "buffer_size": DEPTH_BUFFER_SIZE,
         "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
+        "left_crop": DEPTH_LEFT_CROP,
     }
+    depth_sensor = next(
+        sensor for sensor in cfg.scene.sensors if sensor.name == DEPTH_CAMERA_NAME
+    )
+    assert (depth_sensor.height, depth_sensor.width) == (
+        DEPTH_CAMERA_HEIGHT,
+        DEPTH_CAMERA_WIDTH,
+    )
+    assert DEPTH_MODEL_WIDTH == DEPTH_CAMERA_WIDTH - DEPTH_LEFT_CROP == 45
     assert depth_group.enable_corruption is False
     assert agent["obs_groups"] == {
         "teacher_actor": ("actor",),
@@ -194,6 +214,8 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     assert depth_term.params == {
         "sensor_name": DEPTH_CAMERA_NAME,
         "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
+        "system_delay_range_s": DEPTH_SYSTEM_DELAY_RANGE_S,
+        "left_crop": DEPTH_LEFT_CROP,
     }
     assert agent["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
     assert agent["algorithm"]["representation_chunk_length"] == 12
@@ -271,17 +293,88 @@ assert resolve_callable(cfg["algorithm"]["class_name"]).__module__.endswith(
     )
 
     assert result.returncode == 0, result.stderr
+def test_depth_camera_domain_randomization_and_play_overrides() -> None:
+    cfg = wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg()
+
+    assert {"cam_pos", "cam_pitch", "cam_fovy"} <= set(cfg.events)
+    assert not {"cam_pos", "cam_pitch", "cam_fovy"} & set(
+        wf_tron1b_rough_env_cfg().events
+    )
+
+    cam_pos = cfg.events["cam_pos"]
+    assert cam_pos.func is mdp.dr.cam_pos
+    assert cam_pos.mode == "reset"
+    assert cam_pos.params["asset_cfg"].camera_names == (DEPTH_CAMERA_ENTITY_NAME,)
+    assert cam_pos.params["distribution"] == "uniform"
+    assert cam_pos.params["operation"] == "add"
+    assert cam_pos.params["ranges"] == {
+        0: DEPTH_CAMERA_POSITION_DELTA_RANGE_M,
+        1: DEPTH_CAMERA_POSITION_DELTA_RANGE_M,
+        2: DEPTH_CAMERA_POSITION_DELTA_RANGE_M,
+    }
+    assert cam_pos.params["shared_random"] is False
+
+    cam_pitch = cfg.events["cam_pitch"]
+    assert cam_pitch.func is mdp.dr.cam_quat
+    assert cam_pitch.mode == "reset"
+    assert cam_pitch.params["roll_range"] == (0.0, 0.0)
+    assert cam_pitch.params["pitch_range"] == DEPTH_CAMERA_PITCH_DELTA_RANGE_RAD
+    assert cam_pitch.params["yaw_range"] == (0.0, 0.0)
+
+    cam_fovy = cfg.events["cam_fovy"]
+    assert cam_fovy.func is mdp.dr.cam_fovy
+    assert cam_fovy.mode == "reset"
+    assert cam_fovy.params["operation"] == "add"
+    assert cam_fovy.params["ranges"] == DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG
+    assert cam_fovy.params["shared_random"] is False
+
+    play_cfg = wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(play=True)
+    assert not {"cam_pos", "cam_pitch", "cam_fovy"} & set(play_cfg.events)
+    play_depth_term = play_cfg.observations[DEPTH_CAMERA_NAME].terms[
+        DEPTH_CAMERA_NAME
+    ]
+    assert play_depth_term.params["capture_frequency_hz"] == 30.0
+    assert play_depth_term.params["system_delay_range_s"] == (0.0, 0.0)
+    assert play_depth_term.params["left_crop"] == DEPTH_LEFT_CROP
+
+    buffered_play_cfg = wf_tron1b_rough_depth_env_cfg(play=True)
+    buffered_depth_term = buffered_play_cfg.observations[DEPTH_CAMERA_NAME].terms[
+        DEPTH_CAMERA_NAME
+    ]
+    assert buffered_depth_term.func is mdp.depth_buffer
+    assert "system_delay_range_s" not in buffered_depth_term.params
+    assert buffered_depth_term.params["left_crop"] == DEPTH_LEFT_CROP
+
+
+def test_depth_image_crops_left_columns() -> None:
+    raw_depth = torch.arange(
+        DEPTH_CAMERA_HEIGHT * DEPTH_CAMERA_WIDTH,
+        dtype=torch.float32,
+    ).reshape(1, DEPTH_CAMERA_HEIGHT, DEPTH_CAMERA_WIDTH, 1)
+    env = SimpleNamespace(
+        scene={"depth_camera": SimpleNamespace(data=SimpleNamespace(depth=raw_depth))}
+    )
+
+    depth = observation_mdp.depth_image(env, left_crop=DEPTH_LEFT_CROP)
+
+    assert depth.shape == (1, DEPTH_CAMERA_HEIGHT, DEPTH_MODEL_WIDTH)
+    assert torch.equal(depth, raw_depth.squeeze(-1)[..., DEPTH_LEFT_CROP:])
+    assert depth.is_contiguous()
+    with pytest.raises(ValueError, match="left_crop must be in"):
+        observation_mdp.depth_image(env, left_crop=DEPTH_CAMERA_WIDTH)
 
 
 def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:
     env = SimpleNamespace(common_step_counter=0, frame=torch.ones(2, 2, 3))
     term = observation_mdp.depth_buffer(cfg=None, env=env)
     depth_calls = 0
+    left_crops = []
 
-    def get_depth(env, sensor_name):
+    def get_depth(env, sensor_name, left_crop=0):
         nonlocal depth_calls
         depth_calls += 1
-        return env.frame
+        left_crops.append(left_crop)
+        return env.frame[..., left_crop:]
 
     monkeypatch.setattr(
         observation_mdp,
@@ -289,19 +382,19 @@ def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:
         get_depth,
     )
 
-    obs = term(env, buffer_size=5, update_period=5)
-    assert obs.shape == (2, 5, 2, 3)
+    obs = term(env, buffer_size=5, update_period=5, left_crop=1)
+    assert obs.shape == (2, 5, 2, 2)
     assert torch.all(obs == 1.0)
     assert depth_calls == 1
 
     env.common_step_counter = 4
     env.frame = torch.full((2, 2, 3), 2.0)
-    obs = term(env, buffer_size=5, update_period=5)
+    obs = term(env, buffer_size=5, update_period=5, left_crop=1)
     assert torch.all(obs == 1.0)
     assert depth_calls == 1
 
     env.common_step_counter = 5
-    obs = term(env, buffer_size=5, update_period=5)
+    obs = term(env, buffer_size=5, update_period=5, left_crop=1)
     assert torch.all(obs[:, :4] == 1.0)
     assert torch.all(obs[:, 4] == 2.0)
     assert depth_calls == 2
@@ -309,22 +402,25 @@ def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:
     env.common_step_counter = 6
     env.frame = torch.stack((torch.full((2, 3), 3.0), torch.full((2, 3), 4.0)))
     term.reset(torch.tensor([1]))
-    obs = term(env, buffer_size=5, update_period=5)
+    obs = term(env, buffer_size=5, update_period=5, left_crop=1)
     assert torch.all(obs[0, :4] == 1.0)
     assert torch.all(obs[0, 4] == 2.0)
     assert torch.all(obs[1] == 4.0)
     assert depth_calls == 3
+    assert left_crops == [1, 1, 1]
 
 
 def test_async_depth_buffer_updates_on_capture_clock(monkeypatch) -> None:
     env = SimpleNamespace(common_step_counter=0, step_dt=0.02, frame=torch.ones(2, 2, 3))
     term = observation_mdp.async_depth_buffer(cfg=None, env=env)
     depth_calls = 0
+    left_crops = []
 
-    def get_depth(env, sensor_name):
+    def get_depth(env, sensor_name, left_crop=0):
         nonlocal depth_calls
         depth_calls += 1
-        return env.frame
+        left_crops.append(left_crop)
+        return env.frame[..., left_crop:]
 
     monkeypatch.setattr(
         observation_mdp,
@@ -332,29 +428,129 @@ def test_async_depth_buffer_updates_on_capture_clock(monkeypatch) -> None:
         get_depth,
     )
 
-    obs = term(env, capture_frequency_hz=25.0)
-    assert obs.shape == (2, 1, 2, 3)
+    obs = term(env, capture_frequency_hz=30.0, left_crop=1)
+    assert obs.shape == (2, 1, 2, 2)
     assert torch.all(obs == 1.0)
     assert depth_calls == 1
 
     env.common_step_counter = 1
     env.frame = torch.full((2, 2, 3), 2.0)
-    obs = term(env, capture_frequency_hz=25.0)
+    obs = term(env, capture_frequency_hz=30.0, left_crop=1)
     assert torch.all(obs == 1.0)
     assert depth_calls == 1
 
     env.common_step_counter = 2
-    obs = term(env, capture_frequency_hz=25.0)
+    obs = term(env, capture_frequency_hz=30.0, left_crop=1)
     assert torch.all(obs == 2.0)
     assert depth_calls == 2
 
     env.common_step_counter = 3
-    env.frame = torch.stack((torch.full((2, 3), 3.0), torch.full((2, 3), 4.0)))
-    term.reset(torch.tensor([1]))
-    obs = term(env, capture_frequency_hz=25.0)
-    assert torch.all(obs[0] == 2.0)
-    assert torch.all(obs[1] == 4.0)
+    env.frame = torch.full((2, 2, 3), 3.0)
+    obs = term(env, capture_frequency_hz=30.0, left_crop=1)
+    assert torch.all(obs == 2.0)
+    assert depth_calls == 2
+
+    env.common_step_counter = 4
+    obs = term(env, capture_frequency_hz=30.0, left_crop=1)
+    assert torch.all(obs == 3.0)
     assert depth_calls == 3
+    assert left_crops == [1, 1, 1]
+
+
+def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None:
+    env = SimpleNamespace(common_step_counter=0, step_dt=0.02, frame=torch.ones(2, 2, 3))
+    term = observation_mdp.async_depth_buffer(cfg=None, env=env)
+    depth_calls = 0
+
+    def get_depth(env, sensor_name, left_crop=0):
+        nonlocal depth_calls
+        depth_calls += 1
+        return env.frame[..., left_crop:]
+
+    monkeypatch.setattr(observation_mdp, "depth_image", get_depth)
+
+    obs = term(
+        env,
+        capture_frequency_hz=30.0,
+        system_delay_range_s=(0.0, 0.020),
+    )
+    assert obs.shape == (2, 1, 2, 3)
+    assert term._delay_s is not None
+    term._delay_s.copy_(torch.tensor([0.005, 0.015], device=term._delay_s.device))
+
+    env.common_step_counter = 2
+    env.frame = torch.full((2, 2, 3), 2.0)
+    obs = term(
+        env,
+        capture_frequency_hz=30.0,
+        system_delay_range_s=(0.0, 0.020),
+    )
+    assert torch.all(obs[0] == 2.0)
+    assert torch.all(obs[1] == 1.0)
+
+    env.common_step_counter = 3
+    obs = term(
+        env,
+        capture_frequency_hz=30.0,
+        system_delay_range_s=(0.0, 0.020),
+    )
+    assert torch.all(obs == 2.0)
+
+    env.common_step_counter = 4
+    env.frame = torch.full((2, 2, 3), 3.0)
+    obs = term(
+        env,
+        capture_frequency_hz=30.0,
+        system_delay_range_s=(0.0, 0.020),
+    )
+    assert torch.all(obs[0] == 3.0)
+    assert torch.all(obs[1] == 2.0)
+
+    def fixed_delay(count, device):
+        return torch.full((count,), 0.012, device=device, dtype=torch.float64)
+
+    monkeypatch.setattr(term, "_sample_delay", fixed_delay)
+    env.common_step_counter = 5
+    env.frame = torch.stack((torch.full((2, 3), 4.0), torch.full((2, 3), 9.0)))
+    term.reset(torch.tensor([1]))
+    obs = term(
+        env,
+        capture_frequency_hz=30.0,
+        system_delay_range_s=(0.0, 0.020),
+    )
+    assert torch.all(obs[0] == 3.0)
+    assert torch.all(obs[1] == 9.0)
+    assert term._delay_s is not None
+    assert term._delay_s[0].item() == pytest.approx(0.005)
+    assert term._delay_s[1].item() == pytest.approx(0.012)
+
+    env.common_step_counter = 6
+    env.frame = torch.stack((torch.full((2, 3), 5.0), torch.full((2, 3), 11.0)))
+    term.reset(torch.tensor([1]))
+    obs = term(
+        env,
+        capture_frequency_hz=30.0,
+        system_delay_range_s=(0.0, 0.020),
+    )
+    assert torch.all(obs[0] == 4.0)
+    assert torch.all(obs[1] == 11.0)
+    assert depth_calls == 5
+
+
+def test_async_depth_buffer_validates_clock_and_delay_ranges() -> None:
+    env = SimpleNamespace(common_step_counter=0, step_dt=0.02)
+    term = observation_mdp.async_depth_buffer(cfg=None, env=env)
+
+    with pytest.raises(ValueError, match="capture_frequency_hz must be positive"):
+        term(env, capture_frequency_hz=0.0)
+    with pytest.raises(ValueError, match="system_delay_range_s must be non-negative"):
+        term(env, system_delay_range_s=(-0.001, 0.020))
+    with pytest.raises(ValueError, match="must be ordered"):
+        term(env, system_delay_range_s=(0.020, 0.010))
+
+    env.step_dt = 0.0
+    with pytest.raises(ValueError, match="env.step_dt must be positive"):
+        term(env)
 
 
 def test_foot_contact_forces_are_rotated_to_body_frame() -> None:

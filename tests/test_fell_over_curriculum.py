@@ -32,9 +32,6 @@ from wheeled_legged_mjlab.tasks.velocity.mdp.curriculums import (
     terrain_levels_vel,
 )
 from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import variable_posture
-from wheeled_legged_mjlab.tasks.velocity.mdp.terminations import (
-    out_of_terrain_bounds,
-)
 
 
 @dataclass

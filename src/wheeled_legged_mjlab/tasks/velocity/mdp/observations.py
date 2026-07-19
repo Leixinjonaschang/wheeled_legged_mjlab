@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -71,11 +72,22 @@ def foot_contact_forces(
   return torch.sign(forces_flat) * torch.log1p(torch.abs(forces_flat))
 
 
-def depth_image(env: ManagerBasedRlEnv, sensor_name: str = "depth_camera") -> torch.Tensor:
+def depth_image(
+  env: ManagerBasedRlEnv,
+  sensor_name: str = "depth_camera",
+  left_crop: int = 0,
+) -> torch.Tensor:
   """Depth image from the forward-facing camera."""
   camera: CameraSensor = env.scene[sensor_name]
   assert camera.data.depth is not None, f"Sensor '{sensor_name}' has no depth data"
-  return camera.data.depth.squeeze(-1)
+  depth = camera.data.depth.squeeze(-1)
+  if left_crop < 0 or left_crop >= depth.shape[-1]:
+    raise ValueError(
+      f"left_crop must be in [0, {depth.shape[-1] - 1}], got {left_crop}"
+    )
+  if left_crop > 0:
+    depth = depth[..., left_crop:].contiguous()
+  return depth
 
 
 class DepthBuffer:
@@ -93,6 +105,7 @@ class DepthBuffer:
     sensor_name: str = "depth_camera",
     buffer_size: int = 5,
     update_period: int = 5,
+    left_crop: int = 0,
   ) -> torch.Tensor:
     if buffer_size < 1:
       raise ValueError(f"buffer_size must be >= 1, got {buffer_size}")
@@ -111,7 +124,7 @@ class DepthBuffer:
       assert self._buffer is not None
       return self._buffer
 
-    frame = depth_image(env, sensor_name=sensor_name)
+    frame = depth_image(env, sensor_name=sensor_name, left_crop=left_crop)
 
     if needs_init:
       self._buffer = frame.unsqueeze(1).repeat(
@@ -157,19 +170,25 @@ depth_buffer = DepthBuffer
 
 
 class AsyncDepthBuffer:
-  """Latest depth frame captured on a clock independent of the policy rate."""
+  """Depth frames captured on a nominal clock with per-environment delay."""
 
   def __init__(self, cfg, env: ManagerBasedRlEnv) -> None:
     del cfg, env
-    self._latest_frame: torch.Tensor | None = None
+    self._frames: torch.Tensor | None = None
+    self._capture_times_s: torch.Tensor | None = None
     self._next_capture_time_s: float | None = None
+    self._capture_period_s: float | None = None
+    self._delay_s: torch.Tensor | None = None
+    self._delay_range_s: tuple[float, float] | None = None
     self._invalid_env_ids: torch.Tensor | None = None
 
   def __call__(
     self,
     env: ManagerBasedRlEnv,
     sensor_name: str = "depth_camera",
-    capture_frequency_hz: float = 25.0,
+    capture_frequency_hz: float = 30.0,
+    system_delay_range_s: tuple[float, float] = (0.0, 0.0),
+    left_crop: int = 0,
   ) -> torch.Tensor:
     if capture_frequency_hz <= 0.0:
       raise ValueError(
@@ -179,9 +198,31 @@ class AsyncDepthBuffer:
     if step_dt <= 0.0:
       raise ValueError(f"env.step_dt must be positive, got {step_dt}")
 
+    delay_min_s = float(system_delay_range_s[0])
+    delay_max_s = float(system_delay_range_s[1])
+    if delay_min_s < 0.0:
+      raise ValueError(
+        f"system_delay_range_s must be non-negative, got {system_delay_range_s}"
+      )
+    if delay_min_s > delay_max_s:
+      raise ValueError(
+        "system_delay_range_s must be ordered min <= max, "
+        f"got {system_delay_range_s}"
+      )
+
     current_time_s = int(getattr(env, "common_step_counter", 0)) * step_dt
     capture_period_s = 1.0 / capture_frequency_hz
-    needs_init = self._latest_frame is None
+    delay_range_s = (delay_min_s, delay_max_s)
+    history_size = max(1, math.ceil(delay_max_s / capture_period_s) + 1)
+    config_changed = (
+      self._capture_period_s != capture_period_s
+      or self._delay_range_s != delay_range_s
+    )
+    needs_init = (
+      self._frames is None
+      or self._frames.shape[0] != history_size
+      or config_changed
+    )
     capture_due = (
       self._next_capture_time_s is None
       or current_time_s + 1.0e-9 >= self._next_capture_time_s
@@ -189,20 +230,41 @@ class AsyncDepthBuffer:
     needs_reset_fill = self._invalid_env_ids is not None
 
     if not (needs_init or capture_due or needs_reset_fill):
-      assert self._latest_frame is not None
-      return self._latest_frame
+      return self._select(current_time_s)
 
-    frame = depth_image(env, sensor_name=sensor_name).unsqueeze(1)
+    frame = depth_image(
+      env,
+      sensor_name=sensor_name,
+      left_crop=left_crop,
+    ).unsqueeze(1)
 
     if needs_init:
-      self._latest_frame = frame.clone()
+      self._capture_period_s = capture_period_s
+      self._delay_range_s = delay_range_s
+      self._frames = frame.unsqueeze(0).repeat(
+        history_size, *([1] * frame.ndim)
+      )
+      self._capture_times_s = current_time_s - torch.arange(
+        history_size,
+        device=frame.device,
+        dtype=torch.float64,
+      ) * capture_period_s
       self._next_capture_time_s = current_time_s + capture_period_s
+      self._delay_s = self._sample_delay(frame.shape[0], frame.device)
       self._invalid_env_ids = None
-      return self._latest_frame
+      return self._select(current_time_s)
+
+    reset_env_ids = None
+    if needs_reset_fill:
+      assert self._invalid_env_ids is not None
+      reset_env_ids = self._invalid_env_ids.to(
+        device=frame.device,
+        dtype=torch.long,
+      )
 
     if capture_due:
-      assert self._latest_frame is not None
-      self._latest_frame.copy_(frame)
+      assert self._frames is not None
+      assert self._capture_times_s is not None
       assert self._next_capture_time_s is not None
       periods_elapsed = max(
         1,
@@ -212,26 +274,66 @@ class AsyncDepthBuffer:
         )
         + 1,
       )
+      capture_time_s = (
+        self._next_capture_time_s + (periods_elapsed - 1) * capture_period_s
+      )
+      self._frames = torch.roll(self._frames, shifts=1, dims=0)
+      self._frames[0].copy_(frame)
+      self._capture_times_s = torch.roll(
+        self._capture_times_s,
+        shifts=1,
+        dims=0,
+      )
+      self._capture_times_s[0] = capture_time_s
       self._next_capture_time_s += periods_elapsed * capture_period_s
-      self._invalid_env_ids = None
-    elif needs_reset_fill:
-      assert self._invalid_env_ids is not None
-      env_ids = self._invalid_env_ids.to(device=frame.device, dtype=torch.long)
-      assert self._latest_frame is not None
-      self._latest_frame[env_ids] = frame[env_ids]
+
+    if reset_env_ids is not None:
+      assert self._frames is not None
+      assert self._delay_s is not None
+      self._frames[:, reset_env_ids] = frame[reset_env_ids].unsqueeze(0)
+      self._delay_s[reset_env_ids] = self._sample_delay(
+        reset_env_ids.numel(),
+        frame.device,
+      )
       self._invalid_env_ids = None
 
-    return self._latest_frame
+    return self._select(current_time_s)
+
+  def _sample_delay(self, count: int, device: torch.device) -> torch.Tensor:
+    assert self._delay_range_s is not None
+    delay_min_s, delay_max_s = self._delay_range_s
+    return delay_min_s + (delay_max_s - delay_min_s) * torch.rand(
+      count,
+      device=device,
+      dtype=torch.float64,
+    )
+
+  def _select(self, current_time_s: float) -> torch.Tensor:
+    assert self._frames is not None
+    assert self._capture_times_s is not None
+    assert self._delay_s is not None
+
+    target_times_s = current_time_s - self._delay_s
+    too_new = self._capture_times_s.unsqueeze(0) > (
+      target_times_s.unsqueeze(1) + 1.0e-9
+    )
+    frame_indices = too_new.sum(dim=1).clamp_max(self._frames.shape[0] - 1)
+    env_indices = torch.arange(self._frames.shape[1], device=self._frames.device)
+    return self._frames[frame_indices, env_indices]
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     if env_ids is None or isinstance(env_ids, slice):
-      self._latest_frame = None
+      self._frames = None
+      self._capture_times_s = None
       self._next_capture_time_s = None
+      self._capture_period_s = None
+      self._delay_s = None
+      self._delay_range_s = None
       self._invalid_env_ids = None
       return
-    if self._latest_frame is None or env_ids.numel() == 0:
+    if self._frames is None or env_ids.numel() == 0:
       return
-    env_ids = env_ids.to(device=self._latest_frame.device, dtype=torch.long)
+    env_ids = env_ids.to(device=self._frames.device, dtype=torch.long)
     if self._invalid_env_ids is None:
       self._invalid_env_ids = env_ids
     else:
