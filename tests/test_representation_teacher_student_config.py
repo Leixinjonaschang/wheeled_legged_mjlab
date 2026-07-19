@@ -205,13 +205,17 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         ":DepthRepresentationVelocityPredictorActorCritic"
     )
     assert predict_agent["actor"]["latent_dynamics_hidden_dims"] == (128, 256, 256, 128)
-    assert predict_agent["actor"]["latent_dynamics_horizons"] == (1, 5)
+    assert predict_agent["actor"]["latent_dynamics_horizons"] == (1, 5, 10)
     assert predict_agent["algorithm"]["class_name"].endswith(
         ":RepresentationVelocityPredictorTeacherStudentPPO"
     )
-    assert predict_agent["algorithm"]["latent_dynamics_loss_coef"] == 50.0
-    assert predict_agent["algorithm"]["latent_dynamics_horizons"] == (1, 5)
-    assert predict_agent["algorithm"]["latent_dynamics_horizon_weights"] == (1.0, 0.5)
+    assert predict_agent["algorithm"]["latent_dynamics_loss_coef"] == 100.0
+    assert predict_agent["algorithm"]["latent_dynamics_horizons"] == (1, 5, 10)
+    assert predict_agent["algorithm"]["latent_dynamics_horizon_weights"] == (
+        1.0,
+        0.75,
+        0.5,
+    )
     assert predict_agent["algorithm"]["latent_dynamics_detach_source"] is False
     assert predict_agent["algorithm"]["latent_rollout_horizon"] == 5
     assert predict_agent["algorithm"]["latent_rollout_loss_coef"] == 0.75

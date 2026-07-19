@@ -110,6 +110,7 @@ def make_depth_model(obs: TensorDict | None = None) -> DepthRepresentationVeloci
 
 def make_depth_predictor_model(
     obs: TensorDict | None = None,
+    latent_dynamics_horizons: tuple[int, ...] = (1, 5),
 ) -> DepthRepresentationVelocityPredictorActorCritic:
     obs = make_depth_rep_obs() if obs is None else obs
     obs_groups = {
@@ -130,7 +131,7 @@ def make_depth_predictor_model(
         depth_feature_dim=8,
         depth_gru_hidden_dim=8,
         depth_channels=(4, 4),
-        latent_dynamics_horizons=(1, 5),
+        latent_dynamics_horizons=latent_dynamics_horizons,
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
     )
 
@@ -343,14 +344,21 @@ def test_depth_student_losses_update_depth_and_student_encoder_side() -> None:
 
 def test_depth_latent_dynamics_prediction_is_normalized_and_has_isolated_gradients() -> None:
     obs_t = make_depth_rep_obs()
-    obs_tp1 = make_depth_rep_obs()
-    model = make_depth_predictor_model(obs_t)
-    applied_action_block = torch.randn(NUM_ENVS, 5 * NUM_ACTIONS)
+    obs_tp10 = make_depth_rep_obs()
+    model = make_depth_predictor_model(
+        obs_t,
+        latent_dynamics_horizons=(1, 5, 10),
+    )
+    applied_action_block = torch.randn(NUM_ENVS, 10 * NUM_ACTIONS)
 
     latent_t = model.get_privileged_latent(obs_t)
-    prediction = model.predict_privileged_latent(latent_t, applied_action_block, horizon=5)
+    prediction = model.predict_privileged_latent(
+        latent_t,
+        applied_action_block,
+        horizon=10,
+    )
     assert torch.allclose(prediction.norm(dim=-1), torch.ones(NUM_ENVS), atol=1.0e-6)
-    assert set(model.latent_dynamics_predictors) == {"1", "5"}
+    assert set(model.latent_dynamics_predictors) == {"1", "5", "10"}
 
     captured_latents: list[torch.Tensor] = []
     original_get_privileged_latent = model.get_privileged_latent
@@ -365,15 +373,16 @@ def test_depth_latent_dynamics_prediction_is_normalized_and_has_isolated_gradien
     dynamics_loss = model.compute_latent_dynamics_loss(
         obs_t,
         applied_action_block,
-        obs_tp1,
-        horizon=5,
+        obs_tp10,
+        horizon=10,
     )
     dynamics_loss.backward()
 
     assert captured_latents[0].requires_grad
     assert not captured_latents[1].requires_grad
     assert all(param.grad is None for param in model.latent_dynamics_predictors["1"].parameters())
-    assert any(param.grad is not None for param in model.latent_dynamics_predictors["5"].parameters())
+    assert all(param.grad is None for param in model.latent_dynamics_predictors["5"].parameters())
+    assert any(param.grad is not None for param in model.latent_dynamics_predictors["10"].parameters())
     assert any(param.grad is not None for param in model.privileged_encoder.parameters())
     assert all(param.grad is None for param in model.actor_head.parameters())
     assert all(param.grad is None for param in model.critic_head.parameters())

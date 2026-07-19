@@ -879,7 +879,7 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
     if rough:
         terminations["out_of_terrain_bounds"] = TerminationTermCfg(
             func=mdp.out_of_terrain_bounds,
-            params={"margin": 1.5},
+            params={"margin": 0.05},
             time_out=True,
         )
     return terminations
@@ -988,7 +988,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
 
     twist_cmd = cfg.commands[COMMAND_NAME]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-    twist_cmd.ranges.lin_vel_x = (-1.0, 2.5)
+    twist_cmd.ranges.lin_vel_x = (-1.0, 1.0)
     twist_cmd.ranges.lin_vel_y = (-1.0, 1.0)
     twist_cmd.ranges.ang_vel_z = (-math.pi / 2, math.pi / 2)
 
@@ -1012,7 +1012,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
             terrain.terrain_generator.curriculum = True
             terrain.terrain_generator.num_cols = len(terrain.terrain_generator.sub_terrains)
             terrain.terrain_generator.num_rows = 5
-            terrain.terrain_generator.border_width = 10.0
+            terrain.terrain_generator.border_width = 5.0
 
 
 def wf_tron1b_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:

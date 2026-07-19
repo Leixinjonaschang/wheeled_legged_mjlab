@@ -158,8 +158,10 @@ def out_of_terrain_bounds(
   margin: float = 0.3,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Truncate if robot leaves the generated terrain footprint.
+  """Truncate shortly after the robot leaves the effective generated terrain.
 
+  ``margin`` is the allowed root displacement beyond the patch grid edge. The
+  generator's flat outer border is excluded from the effective terrain footprint.
   Returns all-false for non-generator terrains (e.g. plane).
   """
   terrain = env.scene.terrain
@@ -182,12 +184,12 @@ def out_of_terrain_bounds(
   root_xy_w = asset.data.root_link_pos_w[:, :2]
 
   # Use the generated grid shape (curriculum mode overrides cfg.num_cols with
-  # len(sub_terrains)), and include the flat border around the patch grid.
+  # len(sub_terrains)); the flat outer border is only a physical safety surface.
   num_rows, num_cols = terrain.terrain_origins.shape[:2]
-  half_x = 0.5 * (num_rows * terrain_generator.size[0]) + terrain_generator.border_width
-  half_y = 0.5 * (num_cols * terrain_generator.size[1]) + terrain_generator.border_width
-  limit_x = max(0.0, half_x - margin)
-  limit_y = max(0.0, half_y - margin)
+  half_x = 0.5 * (num_rows * terrain_generator.size[0])
+  half_y = 0.5 * (num_cols * terrain_generator.size[1])
+  limit_x = half_x + margin
+  limit_y = half_y + margin
 
   return (root_xy_w[:, 0].abs() > limit_x) | (root_xy_w[:, 1].abs() > limit_y)
 
