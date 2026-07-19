@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+# ruff: noqa: D103
+
 """Tests for the representation-level actor-critic model."""
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from rsl_rl.models import RepresentationActorCritic
 NUM_ENVS = 4
 ACTOR_DIM = 6
 CRITIC_DIM = 10
+DYNAMICS_CONTEXT_DIM = 13
 HISTORY_LENGTH = 5
 LATENT_DIM = 3
 NUM_ACTIONS = 2
@@ -27,6 +30,7 @@ def make_rep_obs(include_privileged: bool = True) -> TensorDict:
     if include_privileged:
         data["teacher_actor"] = torch.randn(NUM_ENVS, ACTOR_DIM)
         data["critic"] = torch.randn(NUM_ENVS, CRITIC_DIM)
+        data["dynamics_context"] = torch.randn(NUM_ENVS, DYNAMICS_CONTEXT_DIM)
     return TensorDict(data, batch_size=[NUM_ENVS])
 
 
@@ -36,7 +40,7 @@ def make_model(obs: TensorDict | None = None) -> RepresentationActorCritic:
         "teacher_actor": ["teacher_actor"],
         "critic": ["critic"],
         "student_history": ["student_history"],
-        "privileged_encoder": ["critic"],
+        "privileged_encoder": ["critic", "dynamics_context"],
     }
     return RepresentationActorCritic(
         obs,
@@ -71,6 +75,7 @@ def test_actor_history_dim_is_five_frames_of_actor_dim() -> None:
     model = make_model(obs)
 
     assert model.proprio_encoder_obs_dim == HISTORY_LENGTH * model.student_actor_obs_dim
+    assert model.privileged_encoder_obs_dim == CRITIC_DIM + DYNAMICS_CONTEXT_DIM
 
 
 def test_student_actor_is_the_latest_frame_of_student_history() -> None:

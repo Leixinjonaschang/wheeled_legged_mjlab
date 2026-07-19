@@ -23,6 +23,7 @@ COMMAND_DIM = 3
 LIN_VEL_DIM = 3
 CRITIC_DIM = 16
 PRIVILEGED_DIM = 11
+DYNAMICS_CONTEXT_DIM = 13
 HISTORY_LENGTH = 5
 LATENT_DIM = 4
 NUM_ACTIONS = 2
@@ -40,6 +41,7 @@ def make_rep_obs(include_privileged: bool = True) -> TensorDict:
                 "lin_vel_target": torch.randn(NUM_ENVS, LIN_VEL_DIM),
                 "critic": torch.randn(NUM_ENVS, CRITIC_DIM),
                 "privileged_encoder": torch.randn(NUM_ENVS, PRIVILEGED_DIM),
+                "dynamics_context": torch.randn(NUM_ENVS, DYNAMICS_CONTEXT_DIM),
             }
         )
     return TensorDict(data, batch_size=[NUM_ENVS])
@@ -52,7 +54,7 @@ def make_model(obs: TensorDict | None = None, *, obs_normalization: bool = False
         "actor_command": ["actor_command"],
         "lin_vel_target": ["lin_vel_target"],
         "critic": ["critic"],
-        "privileged_encoder": ["privileged_encoder"],
+        "privileged_encoder": ["privileged_encoder", "dynamics_context"],
     }
     return RepresentationVelocityActorCritic(
         obs,
@@ -160,6 +162,7 @@ def test_teacher_student_value_and_velocity_paths_have_expected_shapes() -> None
     assert privileged_latent.shape == (NUM_ENVS, LATENT_DIM)
     assert proprio_latent.shape == (NUM_ENVS, LATENT_DIM)
     assert predicted_lin_vel.shape == (NUM_ENVS, LIN_VEL_DIM)
+    assert model.privileged_encoder_obs_dim == PRIVILEGED_DIM + DYNAMICS_CONTEXT_DIM
 
 
 def test_current_proprio_is_latest_frame_of_history() -> None:
