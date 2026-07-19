@@ -760,6 +760,10 @@ class _DummyEnv:
         self.render_mode = render_mode
         self.closed = False
 
+    @property
+    def unwrapped(self):
+        return self
+
     def close(self):
         self.closed = True
 

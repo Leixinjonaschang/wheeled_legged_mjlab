@@ -415,7 +415,7 @@ def make_observations(
                 enable_corruption=False,
             ),
         }
-    
+
     observations["dynamics_context"] = ObservationGroupCfg(
         terms=dynamics_context_terms,
         concatenate_terms=True,
