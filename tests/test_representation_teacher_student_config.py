@@ -72,7 +72,7 @@ def test_representation_teacher_student_tasks_are_registered() -> None:
     assert rough_agent["actor"]["class_name"] == "RepresentationActorCritic"
     assert rough_agent["obs_groups"] == {
         "teacher_actor": ("actor",),
-        "critic": ("critic",),
+        "critic": ("critic", "dynamics_context"),
         "student_history": ("actor_history",),
         "privileged_encoder": ("critic", "dynamics_context"),
     }
@@ -99,7 +99,7 @@ def test_representation_velocity_tasks_are_registered() -> None:
         "proprio_history": ("proprio_history",),
         "actor_command": ("actor_command",),
         "lin_vel_target": ("lin_vel_target",),
-        "critic": ("critic",),
+        "critic": ("critic", "dynamics_context"),
         "privileged_encoder": ("privileged_encoder", "dynamics_context"),
     }
     assert "proprio_history" in flat_env.observations
@@ -204,7 +204,7 @@ def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
     _assert_dynamics_context_group(cfg)
     assert agent["obs_groups"] == {
         "teacher_actor": ("actor",),
-        "critic": ("critic",),
+        "critic": ("critic", "dynamics_context"),
         "student_history": ("actor_history",),
         "privileged_encoder": ("critic", "dynamics_context"),
     }
@@ -266,10 +266,11 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "proprio_history": ("proprio_history",),
         "actor_command": ("actor_command",),
         "lin_vel_target": ("lin_vel_target",),
-        "critic": ("critic",),
-        "privileged_encoder": ("privileged_encoder",),
+        "critic": ("critic", "dynamics_context"),
+        "privileged_encoder": ("privileged_encoder", "dynamics_context"),
         "depth_encoder": (DEPTH_CAMERA_NAME,),
     }
+    assert predict_agent["obs_groups"] == agent["obs_groups"]
 
 
 def test_plain_depth_task_loads_without_importing_predictor_modules() -> None:

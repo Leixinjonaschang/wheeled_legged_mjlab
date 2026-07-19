@@ -38,7 +38,7 @@ def make_model(obs: TensorDict | None = None) -> RepresentationActorCritic:
     obs = make_rep_obs() if obs is None else obs
     obs_groups = {
         "teacher_actor": ["teacher_actor"],
-        "critic": ["critic"],
+        "critic": ["critic", "dynamics_context"],
         "student_history": ["student_history"],
         "privileged_encoder": ["critic", "dynamics_context"],
     }
@@ -75,6 +75,7 @@ def test_actor_history_dim_is_five_frames_of_actor_dim() -> None:
     model = make_model(obs)
 
     assert model.proprio_encoder_obs_dim == HISTORY_LENGTH * model.student_actor_obs_dim
+    assert model.critic_obs_dim == CRITIC_DIM + DYNAMICS_CONTEXT_DIM
     assert model.privileged_encoder_obs_dim == CRITIC_DIM + DYNAMICS_CONTEXT_DIM
 
 
