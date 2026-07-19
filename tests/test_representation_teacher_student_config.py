@@ -37,6 +37,7 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     wf_tron1b_rough_depth_env_cfg,
     wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg,
     wf_tron1b_rough_rep_ts_lin_vel_env_cfg,
+    wf_tron1b_rough_env_cfg,
 )
 from wheeled_legged_mjlab.tasks.velocity.mdp import observations as observation_mdp
 
@@ -47,6 +48,15 @@ assert PLAY_SPEC is not None
 assert PLAY_SPEC.loader is not None
 play = importlib.util.module_from_spec(PLAY_SPEC)
 PLAY_SPEC.loader.exec_module(play)
+
+
+def _assert_dynamics_context_group(cfg) -> None:
+    dynamics_group = cfg.observations["dynamics_context"]
+    dynamics_terms = dynamics_group.terms
+
+    assert dynamics_group.enable_corruption is False
+    assert set(dynamics_terms) == {"domain_randomization_delta_quantity"}
+    assert dynamics_terms["domain_randomization_delta_quantity"].func is mdp.domain_randomization_delta_quantity
 
 
 def test_representation_teacher_student_tasks_are_registered() -> None:
