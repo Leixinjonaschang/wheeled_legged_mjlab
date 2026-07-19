@@ -182,7 +182,13 @@ class _DelayedActionMixin:
             self.action_dim,
             device=self.device,
         )
+        self._raw_action_fifo = torch.zeros_like(self._processed_action_fifo)
         self._delayed_processed_actions = torch.zeros_like(self._processed_actions)
+        self._delayed_raw_actions = torch.zeros_like(self._raw_actions)
+        self._applied_action_sum = torch.zeros_like(self._raw_actions)
+        self._applied_action_substeps = torch.zeros(
+            self.num_envs, 1, device=self.device, dtype=torch.long
+        )
         self._reset_delay_buffer(slice(None))
 
     @property
@@ -190,9 +196,16 @@ class _DelayedActionMixin:
         """Per-environment action delay in physics frames."""
         return self._delay_state.delay_steps
 
+    @property
+    def applied_action(self) -> torch.Tensor:
+        """Mean policy-space action actually applied during the current env step."""
+        return self._applied_action_sum / self._applied_action_substeps.clamp_min(1)
+
     def process_actions(self, actions: torch.Tensor) -> None:
         self._delay_state.prepare_for_policy_step(self._env)
         super().process_actions(actions)
+        self._applied_action_sum.zero_()
+        self._applied_action_substeps.zero_()
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         if env_ids is None:
@@ -200,6 +213,9 @@ class _DelayedActionMixin:
         super().reset(env_ids)
         self._reset_processed_actions(env_ids)
         self._reset_delay_buffer(env_ids)
+        self._delayed_raw_actions[env_ids] = self._raw_actions[env_ids]
+        self._applied_action_sum[env_ids] = 0.0
+        self._applied_action_substeps[env_ids] = 0
         if self._owns_delay_state:
             self._delay_state.reset(
                 env_ids, current_policy_step=_policy_step(self._env)
@@ -209,17 +225,25 @@ class _DelayedActionMixin:
         self._processed_action_fifo = torch.roll(
             self._processed_action_fifo, shifts=1, dims=1
         )
+        self._raw_action_fifo = torch.roll(self._raw_action_fifo, shifts=1, dims=1)
         self._processed_action_fifo[:, 0, :] = self._processed_actions
+        self._raw_action_fifo[:, 0, :] = self._raw_actions
         env_ids = torch.arange(self.num_envs, device=self.device)
         self._delayed_processed_actions = self._processed_action_fifo[
             env_ids, self._delay_state.delay_steps
         ]
+        self._delayed_raw_actions = self._raw_action_fifo[
+            env_ids, self._delay_state.delay_steps
+        ]
+        self._applied_action_sum += self._delayed_raw_actions
+        self._applied_action_substeps += 1
         return self._delayed_processed_actions
 
     def _reset_delay_buffer(self, env_ids: torch.Tensor | slice) -> None:
         self._processed_action_fifo[env_ids] = self._processed_actions[
             env_ids
         ].unsqueeze(1)
+        self._raw_action_fifo[env_ids] = self._raw_actions[env_ids].unsqueeze(1)
 
     def _reset_processed_actions(self, env_ids: torch.Tensor | slice) -> None:
         raw_actions = self._raw_actions[env_ids]

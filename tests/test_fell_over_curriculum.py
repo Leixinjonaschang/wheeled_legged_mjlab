@@ -327,3 +327,57 @@ def test_terrain_curriculum_groups_repeated_flat_columns() -> None:
     assert result["rough"].item() == 5.0
     assert "flat__0" not in result
     assert "flat__1" not in result
+
+
+class DummyTerrainBoundsScene:
+    def __init__(self, root_xy: list[tuple[float, float]]) -> None:
+        self.terrain = SimpleNamespace(
+            cfg=SimpleNamespace(
+                terrain_type="generator",
+                terrain_generator=SimpleNamespace(
+                    size=(8.0, 6.0),
+                    border_width=5.0,
+                ),
+            ),
+            terrain_origins=torch.zeros((2, 3, 3)),
+        )
+        root_pos = torch.zeros((len(root_xy), 3))
+        root_pos[:, :2] = torch.tensor(root_xy)
+        self._robot = SimpleNamespace(
+            data=SimpleNamespace(root_link_pos_w=root_pos)
+        )
+
+    def __getitem__(self, name: str) -> SimpleNamespace:
+        assert name == "robot"
+        return self._robot
+
+
+def test_out_of_terrain_bounds_margin_is_distance_beyond_effective_terrain() -> None:
+    root_xy = [
+        (8.04, 0.0),
+        (8.06, 0.0),
+        (-8.06, 0.0),
+        (0.0, 9.04),
+        (0.0, 9.06),
+    ]
+    env = SimpleNamespace(
+        num_envs=len(root_xy),
+        device="cpu",
+        scene=DummyTerrainBoundsScene(root_xy),
+    )
+
+    result = out_of_terrain_bounds(env, margin=0.05)
+
+    assert result.tolist() == [False, True, True, False, True]
+
+
+def test_rough_training_uses_small_timeout_margin() -> None:
+    cfg = wf_tron1b_rough_env_cfg()
+    term = cfg.terminations["out_of_terrain_bounds"]
+
+    assert term.params["margin"] == 0.05
+    assert term.time_out is True
+    assert cfg.scene.terrain.terrain_generator.border_width == 5.0
+
+    play_cfg = wf_tron1b_rough_env_cfg(play=True)
+    assert play_cfg.scene.terrain.terrain_generator.border_width == 5.0

@@ -33,8 +33,10 @@ class UniformVelocityCommand(CommandTerm):
 
     self.robot: Entity = env.scene[cfg.entity_name]
 
-    # High-level command is sampled in world yaw frame. The third column stores
-    # the yaw-rate command derived from heading_target when heading mode is on.
+    # Linear velocity is sampled in the target-heading frame when heading mode
+    # is on, then stored in world frame for tracking. The third world-command
+    # column stores the yaw-rate command derived from heading_target.
+    self.vel_command_h = torch.zeros(self.num_envs, 2, device=self.device)
     self.vel_command_w = torch.zeros(self.num_envs, 3, device=self.device)
     self.vel_command_b = torch.zeros(self.num_envs, 3, device=self.device)
     self.heading_target = torch.zeros(self.num_envs, device=self.device)
@@ -44,7 +46,6 @@ class UniformVelocityCommand(CommandTerm):
     )
     self.is_standing_env = torch.zeros_like(self.is_heading_env)
     self.is_forward_env = torch.zeros_like(self.is_heading_env)
-
     self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
     self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
 
@@ -90,8 +91,11 @@ class UniformVelocityCommand(CommandTerm):
 
   def _resample_command(self, env_ids: torch.Tensor) -> None:
     r = torch.empty(len(env_ids), device=self.device)
-    self.vel_command_w[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
-    self.vel_command_w[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
+    linear_command = (
+      self.vel_command_h if self.cfg.heading_command else self.vel_command_w
+    )
+    linear_command[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
+    linear_command[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
     self.vel_command_w[env_ids, 2] = r.uniform_(*self.cfg.ranges.ang_vel_z)
     if self.cfg.heading_command:
       assert self.cfg.ranges.heading is not None
@@ -99,21 +103,24 @@ class UniformVelocityCommand(CommandTerm):
       self.is_heading_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_heading_envs
     self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_standing_envs
 
-    # Straight-line envs: +x (50%), +y (25%), or -y (25%) in the world frame.
+    # Straight-line envs face +world-x (50%), +world-y (25%), or -world-y
+    # (25%) and receive a positive forward command in that heading frame.
     self.is_forward_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_forward_envs
     fwd_ids = env_ids[self.is_forward_env[env_ids]]
     if len(fwd_ids) > 0:
-      speed = (
-        self.vel_command_w[fwd_ids, 0].abs().clamp(min=0.3)
-      )
+      speed = linear_command[fwd_ids, 0].abs().clamp(min=0.3)
       direction = torch.empty(len(fwd_ids), device=self.device).uniform_(0.0, 1.0)
       positive_x = direction < 0.5
       positive_y = (direction >= 0.5) & (direction < 0.75)
 
-      self.vel_command_w[fwd_ids, 0] = torch.where(positive_x, speed, 0.0)
-      self.vel_command_w[fwd_ids, 1] = torch.where(
-        positive_y, speed, torch.where(positive_x, 0.0, -speed)
-      )
+      if self.cfg.heading_command:
+        self.vel_command_h[fwd_ids, 0] = speed
+        self.vel_command_h[fwd_ids, 1] = 0.0
+      else:
+        self.vel_command_w[fwd_ids, 0] = torch.where(positive_x, speed, 0.0)
+        self.vel_command_w[fwd_ids, 1] = torch.where(
+          positive_y, speed, torch.where(positive_x, 0.0, -speed)
+        )
       self.vel_command_w[fwd_ids, 2] = 0.0
       if self.cfg.heading_command:
         self.heading_target[fwd_ids] = torch.where(
@@ -141,6 +148,15 @@ class UniformVelocityCommand(CommandTerm):
   def _update_command(self) -> None:
     self.vel_command_b[:, 2] = self.vel_command_w[:, 2]
     if self.cfg.heading_command:
+      # Convert the sampled forward/lateral components into one fixed
+      # world-frame vector using the commanded heading.
+      cos_target = torch.cos(self.heading_target)
+      sin_target = torch.sin(self.heading_target)
+      vx_h = self.vel_command_h[:, 0]
+      vy_h = self.vel_command_h[:, 1]
+      self.vel_command_w[:, 0] = cos_target * vx_h - sin_target * vy_h
+      self.vel_command_w[:, 1] = sin_target * vx_h + cos_target * vy_h
+
       self.heading_error = wrap_to_pi(self.heading_target - self.robot.data.heading_w)
       env_ids = self.is_heading_env.nonzero(as_tuple=False).flatten()
       yaw_rate_cmd = torch.clip(
@@ -161,6 +177,7 @@ class UniformVelocityCommand(CommandTerm):
     self.vel_command_b[:, 1] = -sin_h * vx_w + cos_h * vy_w
 
     standing_env_ids = self.is_standing_env.nonzero(as_tuple=False).flatten()
+    self.vel_command_h[standing_env_ids, :] = 0.0
     self.vel_command_b[standing_env_ids, :] = 0.0
     self.vel_command_w[standing_env_ids, :] = 0.0
 
@@ -185,17 +202,18 @@ class UniformVelocityCommand(CommandTerm):
       if self.cfg.heading_command and ranges.heading is not None
       else ranges.ang_vel_z[1]
     )
+    linear_frame_suffix = "h" if self.cfg.heading_command else "w"
     axes = [
-      ("lin_vel_x_w", ranges.lin_vel_x[1]),
-      ("lin_vel_y_w", ranges.lin_vel_y[1]),
-      (yaw_label, yaw_max),
+      (f"lin_vel_x_{linear_frame_suffix}", *ranges.lin_vel_x, False),
+      (f"lin_vel_y_{linear_frame_suffix}", *ranges.lin_vel_y, False),
+      (yaw_label, -yaw_max, yaw_max, True),
     ]
     sliders: list = []
 
     with server.gui.add_folder(name.capitalize()):
       enabled = server.gui.add_checkbox("Enable", initial_value=False)
 
-      for label, max_val in axes:
+      for label, min_val, max_val, symmetric in axes:
         max_input = server.gui.add_slider(
           f"Max {label}",
           initial_value=max_val,
@@ -205,15 +223,16 @@ class UniformVelocityCommand(CommandTerm):
         )
         slider = server.gui.add_slider(
           label,
-          min=-max_val,
+          min=min_val,
           max=max_val,
           step=0.05,
           initial_value=0.0,
         )
 
         @max_input.on_update
-        def _(_ev, _s=slider, _m=max_input) -> None:
-          _s.min = -_m.value
+        def _(_ev, _s=slider, _m=max_input, _symmetric=symmetric) -> None:
+          if _symmetric:
+            _s.min = -_m.value
           _s.max = _m.value
 
         sliders.append(slider)
@@ -237,7 +256,10 @@ class UniformVelocityCommand(CommandTerm):
       idx = self._joystick_get_env_idx()
       for i, s in enumerate(self._joystick_sliders):
         if i < 2:
-          self.vel_command_w[idx, i] = s.value
+          if self.cfg.heading_command:
+            self.vel_command_h[idx, i] = s.value
+          else:
+            self.vel_command_w[idx, i] = s.value
         elif self.cfg.heading_command:
           self.heading_target[idx] = s.value
           self.is_heading_env[idx] = True
@@ -324,14 +346,19 @@ class UniformVelocityCommandCfg(CommandTermCfg):
   rel_standing_envs: float = 0.0
   rel_heading_envs: float = 1.0
   rel_forward_envs: float = 0.0
-  """Fraction of environments that receive axis-aligned straight-line commands:
-  +world-x with 50% probability, +world-y with 25%, and -world-y with 25%."""
+  """Fraction of environments that receive positive-forward, axis-aligned
+  straight-line commands: +world-x with 50% probability, +world-y with 25%,
+  and -world-y with 25%."""
   init_velocity_prob: float = 0.0
 
   @dataclass
   class Ranges:
     lin_vel_x: tuple[float, float]
+    """Forward velocity range in the target-heading frame when heading_command
+    is enabled, otherwise the world-x velocity range."""
     lin_vel_y: tuple[float, float]
+    """Lateral velocity range in the target-heading frame when heading_command
+    is enabled, otherwise the world-y velocity range."""
     ang_vel_z: tuple[float, float]
     heading: tuple[float, float] | None = None
 

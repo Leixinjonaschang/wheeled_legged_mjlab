@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from mjlab.envs.mdp.actions import JointPositionActionCfg, JointVelocityActionCfg
+from wheeled_legged_mjlab.rl.vecenv_wrapper import get_applied_actions
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     wf_tron1b_flat_env_cfg,
     wf_tron1b_rough_depth_env_cfg,
@@ -122,6 +123,43 @@ def test_fixed_delay_waits_for_elapsed_physics_substeps() -> None:
     assert torch.allclose(env.entity.velocity_targets[-1], torch.zeros(1, 1))
     term.apply_actions()
     assert torch.allclose(env.entity.velocity_targets[-1], torch.tensor([[3.0]]))
+
+
+def test_applied_action_averages_the_actions_executed_across_substeps() -> None:
+    env = DummyEnv(physics_dt=0.005, decimation=4)
+    term = DelayedJointVelocityActionCfg(
+        entity_name="robot",
+        actuator_names=("joint_0",),
+        scale=10.0,
+        use_default_offset=False,
+        delay_range_s=(0.01, 0.01),
+        delay_group="test",
+    ).build(env)
+
+    term.process_actions(torch.tensor([[3.0]]))
+    for _ in range(4):
+        term.apply_actions()
+
+    # Two substeps execute the old zero action, then two execute the new action.
+    assert torch.allclose(term.applied_action, torch.tensor([[1.5]]))
+
+
+def test_applied_actions_follow_action_manager_term_order() -> None:
+    first = SimpleNamespace(
+        applied_action=torch.tensor([[1.0, 2.0]]),
+        raw_action=torch.tensor([[9.0, 9.0]]),
+    )
+    second = SimpleNamespace(raw_action=torch.tensor([[3.0]]))
+    terms = {"first": first, "second": second}
+    action_manager = SimpleNamespace(
+        active_terms=["first", "second"],
+        get_term=terms.__getitem__,
+    )
+
+    assert torch.equal(
+        get_applied_actions(action_manager),
+        torch.tensor([[1.0, 2.0, 3.0]]),
+    )
 
 
 def test_reset_clears_delayed_targets_and_raw_action_stays_latest() -> None:

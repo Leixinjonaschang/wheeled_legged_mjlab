@@ -485,7 +485,7 @@ def make_actions(
 
 
 def make_commands() -> dict[str, CommandTermCfg]:
-    """Sample world-frame velocity commands with standing and heading modes."""
+    """Sample heading-frame linear velocities and track them in world frame."""
     return {
         COMMAND_NAME: UniformVelocityCommandCfg(
             entity_name=ROBOT_ENTITY,
@@ -497,7 +497,7 @@ def make_commands() -> dict[str, CommandTermCfg]:
             heading_control_stiffness=1.0,
             debug_vis=True,
             ranges=UniformVelocityCommandCfg.Ranges(
-                lin_vel_x=(-1.0, 1.0),
+                lin_vel_x=(-1.0, 1.5),
                 lin_vel_y=(-1.0, 1.0),
                 ang_vel_z=(-math.pi / 2, math.pi / 2),
                 heading=(-math.pi, math.pi),
@@ -854,7 +854,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
-                    weight=-2.0e-2,
+                    weight=-3.0e-2,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_joint_cfg,
@@ -878,7 +878,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "rough_contact_pattern": RewardTermCfg(
                     func=mdp.rough_contact_pattern,
-                    weight=0.25,
+                    weight=0.3,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
@@ -941,7 +941,7 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
     if rough:
         terminations["out_of_terrain_bounds"] = TerminationTermCfg(
             func=mdp.out_of_terrain_bounds,
-            params={"margin": 1.5},
+            params={"margin": 0.05},
             time_out=True,
         )
     return terminations
@@ -1080,7 +1080,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
             terrain.terrain_generator.curriculum = True
             terrain.terrain_generator.num_cols = len(terrain.terrain_generator.sub_terrains)
             terrain.terrain_generator.num_rows = 5
-            terrain.terrain_generator.border_width = 10.0
+            terrain.terrain_generator.border_width = 5.0
 
 
 def wf_tron1b_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:

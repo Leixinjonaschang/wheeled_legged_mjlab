@@ -12,7 +12,7 @@ from mjlab.terrains import (
 
 TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
-    border_width=35.0,
+    border_width=5.0,
     num_rows=50,
     num_cols=13,
     sub_terrains={

@@ -7,9 +7,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import torch
 import torch.nn as nn
-from collections.abc import Iterable
 from tensordict import TensorDict
 
 from rsl_rl.env import VecEnv
@@ -119,7 +120,11 @@ class RepresentationVelocityTeacherStudentPPO:
         return self.transition.actions
 
     def process_env_step(
-        self, obs: TensorDict, rewards: torch.Tensor, dones: torch.Tensor, extras: dict[str, torch.Tensor]
+        self,
+        obs: TensorDict,
+        rewards: torch.Tensor,
+        dones: torch.Tensor,
+        extras: dict[str, torch.Tensor],
     ) -> None:
         self.actor.update_normalization(obs)
         self.transition.rewards = rewards.clone()
@@ -158,7 +163,9 @@ class RepresentationVelocityTeacherStudentPPO:
             original_batch_size = batch.observations.batch_size[0]
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
-                    batch.advantages = (batch.advantages - batch.advantages.mean()) / (batch.advantages.std() + 1e-8)
+                    batch.advantages = (batch.advantages - batch.advantages.mean()) / (
+                        batch.advantages.std() + 1e-8
+                    )
 
             self.actor.act_teacher(
                 batch.observations,
@@ -195,7 +202,9 @@ class RepresentationVelocityTeacherStudentPPO:
             ratio = torch.exp(actions_log_prob - torch.squeeze(batch.old_actions_log_prob))
             surrogate = -torch.squeeze(batch.advantages) * ratio
             surrogate_clipped = -torch.squeeze(batch.advantages) * torch.clamp(
-                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+                ratio,
+                1.0 - self.clip_param,
+                1.0 + self.clip_param,
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
@@ -238,7 +247,8 @@ class RepresentationVelocityTeacherStudentPPO:
                         hidden_state=batch.hidden_states[0],
                     )
                     student_loss = (
-                        self.representation_loss_coef * representation_loss + self.lin_vel_loss_coef * lin_vel_loss
+                        self.representation_loss_coef * representation_loss
+                        + self.lin_vel_loss_coef * lin_vel_loss
                     )
                     self.student_optimizer.zero_grad()
                     student_loss.backward()
@@ -257,7 +267,8 @@ class RepresentationVelocityTeacherStudentPPO:
                 for _ in range(self.num_student_substeps):
                     _, representation_loss, lin_vel_loss = self.actor.compute_student_losses(batch.observations)
                     student_loss = (
-                        self.representation_loss_coef * representation_loss + self.lin_vel_loss_coef * lin_vel_loss
+                        self.representation_loss_coef * representation_loss
+                        + self.lin_vel_loss_coef * lin_vel_loss
                     )
                     self.student_optimizer.zero_grad()
                     student_loss.backward()
@@ -320,7 +331,10 @@ class RepresentationVelocityTeacherStudentPPO:
 
     @staticmethod
     def construct_algorithm(
-        obs: TensorDict, env: VecEnv, cfg: dict, device: str
+        obs: TensorDict,
+        env: VecEnv,
+        cfg: dict,
+        device: str,
     ) -> RepresentationVelocityTeacherStudentPPO:
         alg_class: type[RepresentationVelocityTeacherStudentPPO] = resolve_callable(  # type: ignore
             cfg["algorithm"].pop("class_name")
@@ -345,7 +359,13 @@ class RepresentationVelocityTeacherStudentPPO:
         print(f"Representation Velocity Actor-Critic Model: {model}")
 
         storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
-        alg = alg_class(model, storage, device=device, **cfg["algorithm"], multi_gpu_cfg=cfg["multi_gpu"])
+        alg = alg_class(
+            model,
+            storage,
+            device=device,
+            **cfg["algorithm"],
+            multi_gpu_cfg=cfg["multi_gpu"],
+        )
         alg.compile(cfg.get("torch_compile_mode"))
         return alg
 
