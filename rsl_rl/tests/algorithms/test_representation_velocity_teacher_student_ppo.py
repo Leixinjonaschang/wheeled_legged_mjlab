@@ -339,6 +339,8 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "Update/policy_kl_ppo_only",
         "Update/joint_step_fraction",
         "latent_dynamics_loss",
+        "latent_dynamics_representation_loss",
+        "latent_dynamics_velocity_loss",
         "latent_identity_loss",
         "latent_prediction_identity_ratio",
         "latent_shuffled_action_loss",
@@ -346,6 +348,10 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "latent_dynamics_valid_fraction",
         "latent_dynamics_loss_k1",
         "latent_dynamics_loss_k5",
+        "latent_dynamics_representation_loss_k1",
+        "latent_dynamics_representation_loss_k5",
+        "latent_dynamics_velocity_loss_k1",
+        "latent_dynamics_velocity_loss_k5",
         "latent_identity_loss_k1",
         "latent_identity_loss_k5",
         "latent_prediction_identity_ratio_k1",
@@ -361,9 +367,12 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "latent_reversed_action_loss_k5",
         "latent_reversed_action_ratio_k5",
         "latent_rollout_loss",
+        "latent_rollout_representation_loss",
+        "latent_rollout_velocity_loss",
         "latent_rollout_valid_fraction",
         "latent_direct_rollout_cosine_k5",
         "latent_direct_rollout_mse_k5",
+        "latent_direct_rollout_velocity_loss_k5",
     } <= set(losses)
     assert losses["Grad/privileged_encoder_ppo_norm"] > 0.0
     assert losses["Grad/privileged_encoder_dynamics_norm"] > 0.0
@@ -382,6 +391,8 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
     for step in range(1, 6):
         assert {
             f"latent_rollout_loss_k{step}",
+            f"latent_rollout_representation_loss_k{step}",
+            f"latent_rollout_velocity_loss_k{step}",
             f"latent_rollout_identity_ratio_k{step}",
             f"latent_rollout_shuffled_action_loss_k{step}",
             f"latent_rollout_shuffled_action_ratio_k{step}",
@@ -436,15 +447,24 @@ def test_depth_dynamics_updates_predictor_and_records_applied_actions() -> None:
         horizon: {name: param.detach().clone() for name, param in predictor.named_parameters()}
         for horizon, predictor in alg.actor.latent_dynamics_predictors.items()
     }
+    target_encoder_before = {
+        name: param.detach().clone()
+        for name, param in alg.actor.latent_dynamics_target_encoder.named_parameters()
+    }
     losses = alg.update()
 
     for horizon, predictor in alg.actor.latent_dynamics_predictors.items():
         assert any_param_changed(predictor_before[horizon], predictor)
+    assert not any_param_changed(target_encoder_before, alg.actor.latent_dynamics_target_encoder)
     assert losses["latent_dynamics_valid_fraction"] == pytest.approx(1.0)
     assert losses["latent_dynamics_valid_fraction_k1"] == pytest.approx(1.0)
     assert losses["latent_dynamics_valid_fraction_k5"] == pytest.approx(1.0)
     assert losses["latent_dynamics_loss"] == pytest.approx(
         (losses["latent_dynamics_loss_k1"] + 0.5 * losses["latent_dynamics_loss_k5"]) / 1.5
+    )
+    assert losses["latent_dynamics_loss"] == pytest.approx(
+        losses["latent_dynamics_representation_loss"]
+        + alg.latent_dynamics_velocity_loss_coef * losses["latent_dynamics_velocity_loss"]
     )
 
 
@@ -584,16 +604,23 @@ def test_latent_dynamics_sequence_generator_returns_all_ordered_steps() -> None:
     assert storage.latent_dynamics_sequence_valid_fraction == pytest.approx(5.0 / 6.0)
 
 
-def test_latent_rollout_keeps_recursive_gradient_chain() -> None:
+def test_latent_velocity_rollout_keeps_recursive_gradient_chain() -> None:
     model = make_depth_predictor_model(make_depth_rep_obs())
     latent = torch.randn(NUM_ENVS, model.latent_dim, requires_grad=True)
+    normalized_lin_vel = torch.randn(NUM_ENVS, LIN_VEL_DIM, requires_grad=True)
     applied_actions = torch.randn(5, NUM_ENVS, NUM_ACTIONS)
 
-    rollout = model.rollout_privileged_latent(latent, applied_actions)
-    rollout[-1, :, 0].sum().backward()
+    latent_rollout, velocity_rollout = model.rollout_privileged_state(
+        latent,
+        normalized_lin_vel,
+        applied_actions,
+    )
+    (latent_rollout[-1, :, 0].sum() + velocity_rollout[-1, :, 0].sum()).backward()
 
-    assert rollout.shape == (5, NUM_ENVS, model.latent_dim)
+    assert latent_rollout.shape == (5, NUM_ENVS, model.latent_dim)
+    assert velocity_rollout.shape == (5, NUM_ENVS, LIN_VEL_DIM)
     assert latent.grad is not None and torch.count_nonzero(latent.grad) > 0
+    assert normalized_lin_vel.grad is not None and torch.count_nonzero(normalized_lin_vel.grad) > 0
     assert any(
         param.grad is not None and torch.count_nonzero(param.grad) > 0
         for param in model.latent_dynamics_predictors["1"].parameters()

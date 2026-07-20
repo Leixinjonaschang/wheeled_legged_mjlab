@@ -57,7 +57,7 @@ class RslRlDepthRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelC
 class RslRlDepthRepresentationVelocityPredictorModelCfg(
     RslRlDepthRepresentationVelocityModelCfg
 ):
-    """Config for the depth model with latent dynamics prediction."""
+    """Config for the depth model with latent-and-velocity dynamics prediction."""
 
     latent_dynamics_hidden_dims: Tuple[int, ...] = (128, 256, 256, 128)
     latent_dynamics_horizons: Tuple[int, ...] = (1, 5)
@@ -85,9 +85,12 @@ class RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithm
 class RslRlRepresentationVelocityPredictorTeacherStudentPpoAlgorithmCfg(
     RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg
 ):
-    """Config for velocity representation PPO with latent dynamics prediction."""
+    """Config for velocity representation PPO with latent-and-velocity dynamics prediction."""
 
-    latent_dynamics_loss_coef: float = 50.0
+    latent_dynamics_loss_coef: float = 3.0
+    latent_dynamics_velocity_loss_coef: float = 1.0
+    latent_dynamics_use_ema_target: bool = False
+    latent_dynamics_ema_decay: float = 0.99
     latent_dynamics_horizons: Tuple[int, ...] = (1, 5)
     latent_dynamics_horizon_weights: Tuple[float, ...] = (1.0, 0.5)
     latent_dynamics_detach_source: bool = False
@@ -250,7 +253,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
 
 
 def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
-    """Create the depth runner with multi-horizon latent dynamics prediction."""
+    """Create the depth runner with multi-horizon latent-and-velocity dynamics prediction."""
     cfg = wf_tron1b_rep_ts_lin_vel_depth_runner_cfg()
     cfg.actor = RslRlDepthRepresentationVelocityPredictorModelCfg(
         hidden_dims=(512, 256, 256, 128),
@@ -290,7 +293,10 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
         representation_chunk_length=12,
         representation_loss_coef=1.0,
         lin_vel_loss_coef=1.0,
-        latent_dynamics_loss_coef=100.0,
+        latent_dynamics_loss_coef=3.0,
+        latent_dynamics_velocity_loss_coef=1.0,
+        latent_dynamics_use_ema_target=False,
+        latent_dynamics_ema_decay=0.99,
         latent_dynamics_horizons=(1, 5, 10),
         latent_dynamics_horizon_weights=(1.0, 0.75, 0.5),
         latent_dynamics_detach_source=False,

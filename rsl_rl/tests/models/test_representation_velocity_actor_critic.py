@@ -349,7 +349,7 @@ def test_depth_student_losses_update_depth_and_student_encoder_side() -> None:
     assert all(param.grad is None for param in model.privileged_encoder.parameters())
 
 
-def test_depth_latent_dynamics_prediction_is_normalized_and_has_isolated_gradients() -> None:
+def test_depth_dynamics_predicts_latent_and_velocity_with_isolated_gradients() -> None:
     obs_t = make_depth_rep_obs()
     obs_tp10 = make_depth_rep_obs()
     model = make_depth_predictor_model(
@@ -359,38 +359,57 @@ def test_depth_latent_dynamics_prediction_is_normalized_and_has_isolated_gradien
     applied_action_block = torch.randn(NUM_ENVS, 10 * NUM_ACTIONS)
 
     latent_t = model.get_privileged_latent(obs_t)
-    prediction = model.predict_privileged_latent(
+    normalized_lin_vel_t = model.get_normalized_lin_vel_target(obs_t)
+    predicted_latent, predicted_normalized_lin_vel = model.predict_privileged_state(
         latent_t,
+        normalized_lin_vel_t,
         applied_action_block,
         horizon=10,
     )
-    assert torch.allclose(prediction.norm(dim=-1), torch.ones(NUM_ENVS), atol=1.0e-6)
+    assert torch.allclose(predicted_latent.norm(dim=-1), torch.ones(NUM_ENVS), atol=1.0e-6)
+    assert predicted_normalized_lin_vel.shape == (NUM_ENVS, LIN_VEL_DIM)
+    assert model.latent_dynamics_state_dim == LATENT_DIM + LIN_VEL_DIM
     assert set(model.latent_dynamics_predictors) == {"1", "5", "10"}
 
-    captured_latents: list[torch.Tensor] = []
+    captured_source_latents: list[torch.Tensor] = []
+    captured_target_latents: list[torch.Tensor] = []
     original_get_privileged_latent = model.get_privileged_latent
+    original_get_latent_dynamics_target = model.get_latent_dynamics_target
 
-    def capture_latent(obs: TensorDict) -> torch.Tensor:
+    def capture_source_latent(obs: TensorDict) -> torch.Tensor:
         latent = original_get_privileged_latent(obs)
-        captured_latents.append(latent)
+        captured_source_latents.append(latent)
         return latent
 
-    model.get_privileged_latent = capture_latent  # type: ignore[method-assign]
+    def capture_target(
+        obs: TensorDict,
+        use_ema_target: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        latent, normalized_lin_vel = original_get_latent_dynamics_target(
+            obs,
+            use_ema_target=use_ema_target,
+        )
+        captured_target_latents.append(latent)
+        return latent, normalized_lin_vel
+
+    model.get_privileged_latent = capture_source_latent  # type: ignore[method-assign]
+    model.get_latent_dynamics_target = capture_target  # type: ignore[method-assign]
     model.zero_grad()
-    dynamics_loss = model.compute_latent_dynamics_loss(
+    representation_loss, velocity_loss = model.compute_latent_dynamics_losses(
         obs_t,
         applied_action_block,
         obs_tp10,
         horizon=10,
     )
-    dynamics_loss.backward()
+    (representation_loss + velocity_loss).backward()
 
-    assert captured_latents[0].requires_grad
-    assert not captured_latents[1].requires_grad
+    assert captured_source_latents[0].requires_grad
+    assert not captured_target_latents[0].requires_grad
     assert all(param.grad is None for param in model.latent_dynamics_predictors["1"].parameters())
     assert all(param.grad is None for param in model.latent_dynamics_predictors["5"].parameters())
     assert any(param.grad is not None for param in model.latent_dynamics_predictors["10"].parameters())
     assert any(param.grad is not None for param in model.privileged_encoder.parameters())
+    assert all(param.grad is None for param in model.latent_dynamics_target_encoder.parameters())
     assert all(param.grad is None for param in model.actor_head.parameters())
     assert all(param.grad is None for param in model.critic_head.parameters())
     assert all(param.grad is None for param in model.depth_encoder.parameters())
@@ -420,17 +439,57 @@ def test_depth_latent_dynamics_can_detach_source_for_representation_ablation() -
     applied_action_block = torch.randn(NUM_ENVS, 5 * NUM_ACTIONS)
 
     model.zero_grad()
-    loss = model.compute_latent_dynamics_loss(
+    representation_loss, velocity_loss = model.compute_latent_dynamics_losses(
         obs_t,
         applied_action_block,
         obs_future,
         horizon=5,
         detach_source=True,
     )
-    loss.backward()
+    (representation_loss + velocity_loss).backward()
 
     assert all(param.grad is None for param in model.privileged_encoder.parameters())
     assert any(param.grad is not None for param in model.latent_dynamics_predictors["5"].parameters())
+
+
+def test_depth_dynamics_uses_ground_truth_velocity_and_keeps_optional_ema_target() -> None:
+    obs = make_depth_rep_obs()
+    model = make_depth_predictor_model(obs)
+    obs["lin_vel_target"] = torch.full((NUM_ENVS, LIN_VEL_DIM), 2.0)
+    with torch.no_grad():
+        model.lin_vel_head.bias.fill_(100.0)
+
+    normalized_target = model.get_normalized_lin_vel_target(obs)
+    student_prediction = model.get_predicted_lin_vel(obs)
+
+    assert torch.equal(normalized_target, obs["lin_vel_target"])
+    assert not torch.equal(normalized_target, student_prediction)
+    assert all(not parameter.requires_grad for parameter in model.latent_dynamics_target_encoder.parameters())
+
+    online_target_before, _ = model.get_latent_dynamics_target(obs, use_ema_target=False)
+    ema_target_before, _ = model.get_latent_dynamics_target(obs, use_ema_target=True)
+    assert torch.allclose(online_target_before, ema_target_before)
+
+    target_before = [
+        parameter.detach().clone() for parameter in model.latent_dynamics_target_encoder.parameters()
+    ]
+    with torch.no_grad():
+        for parameter in model.privileged_encoder.parameters():
+            parameter.add_(1.0)
+    online_after = [parameter.detach().clone() for parameter in model.privileged_encoder.parameters()]
+    online_target_after, _ = model.get_latent_dynamics_target(obs, use_ema_target=False)
+    ema_target_after, _ = model.get_latent_dynamics_target(obs, use_ema_target=True)
+    assert not torch.allclose(online_target_after, ema_target_after)
+
+    model.update_latent_dynamics_target(decay=0.5)
+
+    for target_parameter, previous_target, online_parameter in zip(
+        model.latent_dynamics_target_encoder.parameters(),
+        target_before,
+        online_after,
+        strict=True,
+    ):
+        assert torch.allclose(target_parameter, 0.5 * previous_target + 0.5 * online_parameter)
 
 
 def test_depth_sequence_student_losses_use_continuous_depth_state() -> None:
