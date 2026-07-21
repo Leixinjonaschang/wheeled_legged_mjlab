@@ -7,11 +7,15 @@ import torch
 
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     COMMAND_NAME,
+    WORLD_COMMAND_TRACKING_ACTIVATION_STEPS,
     wf_tron1b_flat_env_cfg,
 )
 from wheeled_legged_mjlab.tasks.velocity.mdp.commands import (
     UniformVelocityCommand,
     UniformVelocityCommandCfg,
+)
+from wheeled_legged_mjlab.tasks.velocity.mdp.terminations import (
+    world_command_tracking_failure,
 )
 
 
@@ -79,3 +83,173 @@ def test_training_and_play_configs_use_2_5_forward_speed_limit() -> None:
         command_cfg = cfg.commands[COMMAND_NAME]
         assert isinstance(command_cfg, UniformVelocityCommandCfg)
         assert command_cfg.ranges.lin_vel_x == (-1.0, 2.5)
+
+
+def _make_tracking_termination_env(
+    *,
+    command_xy: torch.Tensor,
+    actual_xy: torch.Tensor,
+    heading_target: torch.Tensor | None = None,
+    heading: torch.Tensor | None = None,
+    grounded: torch.Tensor | None = None,
+    common_step_counter: int = 10,
+) -> tuple[SimpleNamespace, UniformVelocityCommand]:
+    num_envs = command_xy.shape[0]
+    if heading_target is None:
+        heading_target = torch.zeros(num_envs)
+    if heading is None:
+        heading = torch.zeros(num_envs)
+    if grounded is None:
+        grounded = torch.ones(num_envs, dtype=torch.bool)
+
+    robot_data = SimpleNamespace(
+        root_link_lin_vel_w=torch.cat(
+            (actual_xy, torch.zeros(num_envs, 1)), dim=1
+        ),
+        heading_w=heading,
+    )
+    command_term = UniformVelocityCommand.__new__(UniformVelocityCommand)
+    command_term.vel_command_w = torch.cat(
+        (command_xy, torch.zeros(num_envs, 1)), dim=1
+    )
+    command_term.command_counter = torch.zeros(num_envs, dtype=torch.long)
+    command_term.heading_target = heading_target
+    command_term.robot = SimpleNamespace(data=robot_data)
+    command_term.is_heading_env = torch.ones(num_envs, dtype=torch.bool)
+    command_term.is_standing_env = torch.zeros(num_envs, dtype=torch.bool)
+
+    env = SimpleNamespace(
+        num_envs=num_envs,
+        device="cpu",
+        step_dt=0.1,
+        common_step_counter=common_step_counter,
+        scene={
+            "robot": SimpleNamespace(data=robot_data),
+            "wheels_ground_contact": SimpleNamespace(
+                data=SimpleNamespace(found=grounded[:, None])
+            ),
+        },
+        command_manager=SimpleNamespace(get_term=lambda _: command_term),
+        extras={},
+    )
+    return env, command_term
+
+
+def _tracking_termination_params(**overrides) -> dict:
+    params = {
+        "command_name": COMMAND_NAME,
+        "activation_step": 10,
+        "command_grace_s": 0.0,
+        "progress_deficit_threshold": 0.45,
+        "min_progress_ratio": 0.55,
+        "progress_duration_s": 0.4,
+        "actual_speed_threshold": 0.2,
+        "direction_angle_threshold_deg": 70.0,
+        "direction_duration_s": 10.0,
+        "heading_error_threshold_deg": 55.0,
+        "heading_duration_s": 10.0,
+        "heading_alignment_gate_deg": 45.0,
+    }
+    params.update(overrides)
+    return params
+
+
+def test_world_command_tracking_is_disabled_before_activation() -> None:
+    env, _ = _make_tracking_termination_env(
+        command_xy=torch.tensor([[1.0, 0.0]]),
+        actual_xy=torch.zeros(1, 2),
+        common_step_counter=9,
+    )
+    termination = world_command_tracking_failure(None, env)
+
+    for _ in range(6):
+        assert not termination(env, **_tracking_termination_params()).item()
+
+
+def test_world_command_tracking_terminates_sustained_progress_deficit() -> None:
+    env, _ = _make_tracking_termination_env(
+        command_xy=torch.tensor([[1.0, 0.0]]),
+        actual_xy=torch.zeros(1, 2),
+    )
+    termination = world_command_tracking_failure(None, env)
+
+    for _ in range(3):
+        assert not termination(env, **_tracking_termination_params()).item()
+    assert termination(env, **_tracking_termination_params()).item()
+
+
+def test_world_command_tracking_terminates_sustained_wrong_direction() -> None:
+    env, _ = _make_tracking_termination_env(
+        command_xy=torch.tensor([[1.0, 0.0]]),
+        actual_xy=torch.tensor([[0.0, 1.0]]),
+    )
+    termination = world_command_tracking_failure(None, env)
+
+    params = _tracking_termination_params(
+        progress_duration_s=10.0,
+        direction_duration_s=0.3,
+    )
+    for _ in range(2):
+        assert not termination(env, **params).item()
+    assert termination(env, **params).item()
+
+
+def test_world_command_tracking_terminates_sustained_heading_error() -> None:
+    env, _ = _make_tracking_termination_env(
+        command_xy=torch.tensor([[0.0, 1.0]]),
+        actual_xy=torch.tensor([[0.0, 1.0]]),
+        heading_target=torch.tensor([math.pi / 2]),
+    )
+    termination = world_command_tracking_failure(None, env)
+
+    params = _tracking_termination_params(heading_duration_s=0.6)
+    for _ in range(5):
+        assert not termination(env, **params).item()
+    assert termination(env, **params).item()
+
+
+def test_world_command_tracking_clears_failures_while_both_wheels_airborne() -> None:
+    env, _ = _make_tracking_termination_env(
+        command_xy=torch.tensor([[1.0, 0.0]]),
+        actual_xy=torch.zeros(1, 2),
+        grounded=torch.zeros(1, dtype=torch.bool),
+    )
+    termination = world_command_tracking_failure(None, env)
+
+    for _ in range(6):
+        assert not termination(env, **_tracking_termination_params()).item()
+    assert termination._progress_bad_steps.item() == 0
+    assert termination._direction_bad_steps.item() == 0
+    assert termination._heading_bad_steps.item() == 0
+
+
+def test_world_command_tracking_restarts_grace_after_command_change() -> None:
+    env, command_term = _make_tracking_termination_env(
+        command_xy=torch.tensor([[1.0, 0.0]]),
+        actual_xy=torch.zeros(1, 2),
+    )
+    termination = world_command_tracking_failure(None, env)
+    params = _tracking_termination_params(progress_duration_s=0.1, command_grace_s=0.2)
+
+    assert not termination(env, **params).item()
+    assert not termination(env, **params).item()
+    assert termination(env, **params).item()
+
+    command_term.command_counter += 1
+    assert not termination(env, **params).item()
+    assert termination._progress_bad_steps.item() == 0
+
+
+def test_tracking_failure_is_not_timeout_and_is_disabled_for_play() -> None:
+    training_cfg = wf_tron1b_flat_env_cfg()
+    play_cfg = wf_tron1b_flat_env_cfg(play=True)
+    term_cfg = training_cfg.terminations["world_command_tracking_failure"]
+
+    assert term_cfg.time_out is False
+    assert (
+        term_cfg.params["activation_step"]
+        == WORLD_COMMAND_TRACKING_ACTIVATION_STEPS
+        == 5_000 * 24
+    )
+    assert term_cfg.params["contact_sensor_name"] == "wheels_ground_contact"
+    assert "world_command_tracking_failure" not in play_cfg.terminations

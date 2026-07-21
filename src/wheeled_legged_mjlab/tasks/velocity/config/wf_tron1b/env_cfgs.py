@@ -105,6 +105,8 @@ ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 5_000 * 24
 FELL_OVER_LIMIT_ANGLE_INITIAL = math.radians(65.0)
 FELL_OVER_LIMIT_ANGLE_FINAL = math.radians(85.0)
 FELL_OVER_LIMIT_ANGLE_RAMP_STEPS = 5_000 * 24
+# The RSL-RL runner collects 24 policy steps per learning iteration.
+WORLD_COMMAND_TRACKING_ACTIVATION_STEPS = 5_000 * 24
 
 
 def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
@@ -502,7 +504,7 @@ def make_commands() -> dict[str, CommandTermCfg]:
     return {
         COMMAND_NAME: UniformVelocityCommandCfg(
             entity_name=ROBOT_ENTITY,
-            resampling_time_range=(5.0, 9.0),
+            resampling_time_range=(6.0, 10.0),
             rel_standing_envs=0.1,
             rel_heading_envs=1.0,
             rel_forward_envs=0.2,
@@ -950,6 +952,27 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
             func=mdp.illegal_contact,
             params={"sensor_name": "illegal_ground_contact"},
         ),
+        "world_command_tracking_failure": TerminationTermCfg(
+            func=mdp.world_command_tracking_failure,
+            time_out=False,
+            params={
+                "command_name": COMMAND_NAME,
+                "activation_step": WORLD_COMMAND_TRACKING_ACTIVATION_STEPS,
+                "command_norm_threshold": 0.35,
+                "progress_deficit_threshold": 0.45,
+                "min_progress_ratio": 0.55,
+                "progress_duration_s": 0.4,
+                "actual_speed_threshold": 0.2,
+                "direction_angle_threshold_deg": 70.0,
+                "direction_duration_s": 0.3,
+                "heading_error_threshold_deg": 55.0,
+                "heading_duration_s": 0.6,
+                "heading_alignment_gate_deg": 45.0,
+                "command_grace_s": 2.5,
+                "contact_sensor_name": "wheels_ground_contact",
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+            },
+        ),
     }
     if rough:
         terminations["out_of_terrain_bounds"] = TerminationTermCfg(
@@ -1066,6 +1089,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
     cfg.terminations["fell_over"].params["limit_angle"] = (
         FELL_OVER_LIMIT_ANGLE_FINAL
     )
+    cfg.terminations.pop("world_command_tracking_failure", None)
 
     twist_cmd = cfg.commands[COMMAND_NAME]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
@@ -1082,7 +1106,6 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
                 reward_term.params["roughness_gate_threshold_ramp_steps"] = 0
 
         cfg.terminations.pop("out_of_terrain_bounds", None)
-        cfg.terminations.pop("velocity_direction_deviation", None)
         cfg.events["randomize_terrain"] = EventTermCfg(
             func=mdp.randomize_terrain,
             mode="reset",
