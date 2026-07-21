@@ -502,7 +502,7 @@ def make_commands() -> dict[str, CommandTermCfg]:
     return {
         COMMAND_NAME: UniformVelocityCommandCfg(
             entity_name=ROBOT_ENTITY,
-            resampling_time_range=(3.0, 8.0),
+            resampling_time_range=(5.0, 9.0),
             rel_standing_envs=0.1,
             rel_heading_envs=1.0,
             rel_forward_envs=0.2,
@@ -510,7 +510,7 @@ def make_commands() -> dict[str, CommandTermCfg]:
             heading_control_stiffness=1.0,
             debug_vis=True,
             ranges=UniformVelocityCommandCfg.Ranges(
-                lin_vel_x=(-1.0, 1.5),
+                lin_vel_x=(-1.0, 2.0),
                 lin_vel_y=(-1.0, 1.0),
                 ang_vel_z=(-math.pi / 2, math.pi / 2),
                 heading=(-math.pi, math.pi),
