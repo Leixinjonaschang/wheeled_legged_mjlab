@@ -7,10 +7,12 @@
 
 from __future__ import annotations
 
+import warnings
+from collections.abc import Iterable
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from collections.abc import Iterable
 from tensordict import TensorDict
 
 from rsl_rl.env import VecEnv
@@ -35,6 +37,7 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
         value_loss_coef: float = 1.0,
         entropy_coef: float = 0.01,
         learning_rate: float = 0.001,
+        predictor_learning_rate: float = 0.001,
         student_learning_rate: float = 0.001,
         num_student_substeps: int = 1,
         num_representation_epochs: int | None = None,
@@ -142,7 +145,18 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
             raise ValueError("Latent rollout is only supported by a model with a one-step rollout method.")
 
         optimizer_cls = resolve_optimizer(optimizer)
-        self.optimizer = optimizer_cls(self.actor.ppo_parameters(), lr=learning_rate)  # type: ignore
+        ppo_parameters = list(self.actor.ppo_parameters())
+        predictor_parameters = list(self.actor.predictor_parameters())
+        ppo_parameter_ids = {id(parameter) for parameter in ppo_parameters}
+        predictor_parameter_ids = {id(parameter) for parameter in predictor_parameters}
+        assert ppo_parameter_ids.isdisjoint(predictor_parameter_ids), (
+            "PPO and latent dynamics predictor parameter groups must not overlap."
+        )
+        self.optimizer = optimizer_cls(ppo_parameters, lr=learning_rate)  # type: ignore
+        self.predictor_optimizer = optimizer_cls(  # type: ignore
+            predictor_parameters,
+            lr=predictor_learning_rate,
+        )
         self.student_optimizer = optimizer_cls(  # type: ignore
             self.actor.student_parameters(),
             lr=student_learning_rate,
@@ -163,6 +177,7 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
         self.desired_kl = desired_kl
         self.schedule = schedule
         self.learning_rate = learning_rate
+        self.predictor_learning_rate = predictor_learning_rate
         self.student_learning_rate = student_learning_rate
         self.num_student_substeps = num_student_substeps
         self.num_representation_epochs = (
@@ -239,7 +254,10 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
         mean_entropy = 0.0
         mean_ppo_grad_norm = 0.0
         mean_privileged_encoder_ppo_grad_norm = 0.0
-        ppo_grad_clip_count = 0
+        mean_ppo_joint_grad_norm = 0.0
+        mean_predictor_grad_norm = 0.0
+        ppo_joint_grad_clip_count = 0
+        predictor_grad_clip_count = 0
         mean_latent_dynamics_loss = {horizon: 0.0 for horizon in self.latent_dynamics_horizons}
         mean_latent_dynamics_representation_loss = {
             horizon: 0.0 for horizon in self.latent_dynamics_horizons
@@ -266,10 +284,7 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
         mean_latent_dynamics_grad_norm = 0.0
         mean_privileged_encoder_dynamics_grad_norm = 0.0
         mean_privileged_encoder_ppo_dynamics_cosine = 0.0
-        latent_dynamics_grad_clip_count = 0
         latent_dynamics_updates = 0
-        mean_combined_grad_norm = 0.0
-        combined_grad_clip_count = 0
         mean_joint_encoder_update_norm = 0.0
         mean_ppo_only_encoder_update_norm = 0.0
         mean_joint_policy_kl = 0.0
@@ -417,15 +432,17 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
                 tuple(param.detach().clone() for param in distribution_params) if collect_update_diagnostics else None
             )
 
-            self.optimizer.zero_grad()
+            ppo_parameters = list(self.actor.ppo_parameters())
+            predictor_parameters = list(self.actor.predictor_parameters())
+            self.optimizer.zero_grad(set_to_none=True)
+            self.predictor_optimizer.zero_grad(set_to_none=True)
             ppo_loss.backward()
             if self.is_multi_gpu:
-                self.reduce_parameters(self.actor.ppo_parameters())
-            ppo_grad_norm = self._grad_norm(self.actor.ppo_parameters())
+                self.reduce_parameters(ppo_parameters)
+            ppo_grad_norm = self._grad_norm(ppo_parameters)
             privileged_encoder_ppo_grad_norm = self._grad_norm(self.actor.privileged_encoder.parameters())
             mean_ppo_grad_norm += ppo_grad_norm
             mean_privileged_encoder_ppo_grad_norm += privileged_encoder_ppo_grad_norm
-            ppo_grad_clip_count += ppo_grad_norm > self.max_grad_norm
 
             if dynamics_loss is not None:
                 dynamics_parameters = list(self.actor.latent_dynamics_parameters())
@@ -448,16 +465,18 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
                 mean_latent_dynamics_grad_norm += latent_dynamics_grad_norm
                 mean_privileged_encoder_dynamics_grad_norm += privileged_encoder_dynamics_grad_norm
                 mean_privileged_encoder_ppo_dynamics_cosine += privileged_encoder_ppo_dynamics_cosine
-                latent_dynamics_grad_clip_count += latent_dynamics_grad_norm > self.max_grad_norm
                 latent_dynamics_updates += 1
 
-            combined_grad_norm = nn.utils.clip_grad_norm_(
-                self.actor.ppo_parameters(),
-                self.max_grad_norm,
-            ).item()
-            mean_combined_grad_norm += combined_grad_norm
-            combined_grad_clip_count += combined_grad_norm > self.max_grad_norm
+            ppo_joint_grad_norm = nn.utils.clip_grad_norm_(ppo_parameters, self.max_grad_norm).item()
+            predictor_grad_norm = nn.utils.clip_grad_norm_(predictor_parameters, self.max_grad_norm).item()
+            mean_ppo_joint_grad_norm += ppo_joint_grad_norm
+            ppo_joint_grad_clip_count += ppo_joint_grad_norm > self.max_grad_norm
+            if dynamics_loss is not None:
+                mean_predictor_grad_norm += predictor_grad_norm
+                predictor_grad_clip_count += predictor_grad_norm > self.max_grad_norm
             self.optimizer.step()
+            if dynamics_loss is not None:
+                self.predictor_optimizer.step()
             if self.latent_dynamics_enabled and self.latent_dynamics_use_ema_target:
                 self._raw_actor.update_latent_dynamics_target(self.latent_dynamics_ema_decay)
 
@@ -538,7 +557,9 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
         num_ppo_updates = self.num_learning_epochs * self.num_mini_batches
         mean_ppo_grad_norm /= num_ppo_updates
         mean_privileged_encoder_ppo_grad_norm /= num_ppo_updates
-        mean_combined_grad_norm /= num_ppo_updates
+        mean_ppo_joint_grad_norm /= num_ppo_updates
+        if latent_dynamics_updates > 0:
+            mean_predictor_grad_norm /= latent_dynamics_updates
         loss_dict = {
             "value": mean_value_loss / num_ppo_updates,
             "surrogate": mean_surrogate_loss / num_ppo_updates,
@@ -548,9 +569,12 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
             "lin_vel": mean_lin_vel_loss / student_updates,
             "Grad/ppo_total_norm": mean_ppo_grad_norm,
             "Grad/privileged_encoder_ppo_norm": mean_privileged_encoder_ppo_grad_norm,
-            "Grad/ppo_clip_fraction": ppo_grad_clip_count / num_ppo_updates,
-            "Grad/combined_total_norm": mean_combined_grad_norm,
-            "Grad/combined_clip_fraction": combined_grad_clip_count / num_ppo_updates,
+            "Grad/ppo_joint_total_norm": mean_ppo_joint_grad_norm,
+            "Grad/ppo_joint_clip_fraction": ppo_joint_grad_clip_count / num_ppo_updates,
+            "Grad/predictor_total_norm": mean_predictor_grad_norm,
+            "Grad/predictor_clip_fraction": predictor_grad_clip_count / max(latent_dynamics_updates, 1),
+            "Learning/ppo_lr": self.optimizer.param_groups[0]["lr"],
+            "Learning/predictor_lr": self.predictor_optimizer.param_groups[0]["lr"],
             "Update/privileged_encoder_norm_joint": (mean_joint_encoder_update_norm / max(joint_update_diagnostics, 1)),
             "Update/privileged_encoder_norm_ppo_only": (
                 mean_ppo_only_encoder_update_norm / max(ppo_only_update_diagnostics, 1)
@@ -571,7 +595,6 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
                     mean_privileged_encoder_dynamics_grad_norm / (mean_privileged_encoder_ppo_grad_norm + 1.0e-8)
                 ),
                 "Grad/privileged_encoder_ppo_dynamics_cosine": mean_privileged_encoder_ppo_dynamics_cosine,
-                "Grad/dynamics_clip_fraction": (latent_dynamics_grad_clip_count / max(latent_dynamics_updates, 1)),
             })
             for horizon in self.latent_dynamics_horizons:
                 if latent_dynamics_samples[horizon] > 0:
@@ -1162,6 +1185,7 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
             "actor_state_dict": self._raw_actor.state_dict(),
             "critic_state_dict": self._raw_actor.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
+            "predictor_optimizer_state_dict": self.predictor_optimizer.state_dict(),
             "student_optimizer_state_dict": self.student_optimizer.state_dict(),
         }
 
@@ -1172,7 +1196,24 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
             key = "actor_state_dict" if "actor_state_dict" in loaded_dict else "critic_state_dict"
             self._raw_actor.load_state_dict(loaded_dict[key], strict=strict)
         if load_cfg.get("optimizer"):
-            self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+            if "predictor_optimizer_state_dict" in loaded_dict:
+                self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+                self.predictor_optimizer.load_state_dict(loaded_dict["predictor_optimizer_state_dict"])
+            else:
+                self.optimizer = type(self.optimizer)(
+                    self._raw_actor.ppo_parameters(),
+                    lr=self.learning_rate,
+                )
+                self.predictor_optimizer = type(self.predictor_optimizer)(
+                    self._raw_actor.predictor_parameters(),
+                    lr=self.predictor_learning_rate,
+                )
+                warnings.warn(
+                    "Checkpoint contains the legacy joint PPO/predictor optimizer state; "
+                    "model weights were loaded, but the PPO and predictor optimizers were reinitialized.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             if "student_optimizer_state_dict" in loaded_dict:
                 self.student_optimizer.load_state_dict(loaded_dict["student_optimizer_state_dict"])
             elif "proprio_optimizer_state_dict" in loaded_dict:

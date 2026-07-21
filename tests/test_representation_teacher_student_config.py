@@ -249,6 +249,7 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     assert predict_agent["algorithm"]["class_name"].endswith(
         ":RepresentationVelocityPredictorTeacherStudentPPO"
     )
+    assert predict_agent["algorithm"]["predictor_learning_rate"] == 1.0e-3
     assert predict_agent["algorithm"]["latent_dynamics_loss_coef"] == 3.0
     assert predict_agent["algorithm"]["latent_dynamics_velocity_loss_coef"] == 1.0
     assert predict_agent["algorithm"]["latent_dynamics_use_ema_target"] is False

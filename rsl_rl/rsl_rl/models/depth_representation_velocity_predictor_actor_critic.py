@@ -77,12 +77,15 @@ class DepthRepresentationVelocityPredictorActorCritic(DepthRepresentationVelocit
         )
 
     def ppo_parameters(self):
-        """Yield teacher optimizer parameters, including the training-only predictors."""
+        """Yield teacher PPO parameters, excluding the training-only predictors."""
         yield from super().ppo_parameters()
+
+    def predictor_parameters(self):
+        """Yield parameters optimized only by the latent dynamics objective."""
         yield from self.latent_dynamics_predictors.parameters()
 
     def latent_dynamics_parameters(self):
-        """Yield parameters optimized by the direct multi-horizon dynamics loss."""
+        """Yield dynamics-gradient parameters for diagnostics and distributed reduction."""
         yield from self.privileged_encoder.parameters()
         yield from self.latent_dynamics_predictors.parameters()
 

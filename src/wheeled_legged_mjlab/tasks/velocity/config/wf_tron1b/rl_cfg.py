@@ -87,6 +87,7 @@ class RslRlRepresentationVelocityPredictorTeacherStudentPpoAlgorithmCfg(
 ):
     """Config for velocity representation PPO with latent-and-velocity dynamics prediction."""
 
+    predictor_learning_rate: float = 1.0e-3
     latent_dynamics_loss_coef: float = 3.0
     latent_dynamics_velocity_loss_coef: float = 1.0
     latent_dynamics_use_ema_target: bool = False
@@ -281,6 +282,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-3,
+        predictor_learning_rate=1.0e-3,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,

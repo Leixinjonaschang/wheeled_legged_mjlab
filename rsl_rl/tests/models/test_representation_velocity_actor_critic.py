@@ -432,6 +432,23 @@ def test_depth_ppo_path_does_not_backpropagate_into_dynamics_predictor() -> None
     assert all(param.grad is None for param in model.latent_dynamics_predictors.parameters())
 
 
+def test_depth_predictor_parameter_groups_are_disjoint() -> None:
+    model = make_depth_predictor_model()
+
+    ppo_parameter_ids = {id(parameter) for parameter in model.ppo_parameters()}
+    predictor_parameter_ids = {id(parameter) for parameter in model.predictor_parameters()}
+    privileged_encoder_parameter_ids = {
+        id(parameter) for parameter in model.privileged_encoder.parameters()
+    }
+    expected_predictor_parameter_ids = {
+        id(parameter) for parameter in model.latent_dynamics_predictors.parameters()
+    }
+
+    assert ppo_parameter_ids.isdisjoint(predictor_parameter_ids)
+    assert privileged_encoder_parameter_ids <= ppo_parameter_ids
+    assert predictor_parameter_ids == expected_predictor_parameter_ids
+
+
 def test_depth_latent_dynamics_can_detach_source_for_representation_ablation() -> None:
     obs_t = make_depth_rep_obs()
     obs_future = make_depth_rep_obs()
