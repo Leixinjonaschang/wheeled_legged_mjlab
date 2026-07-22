@@ -32,6 +32,7 @@ from wheeled_legged_mjlab.tasks.velocity.mdp.curriculums import (
     terrain_levels_vel,
 )
 from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import variable_posture
+from wheeled_legged_mjlab.tasks.velocity.mdp.terminations import out_of_terrain_bounds
 
 
 @dataclass
@@ -116,6 +117,14 @@ EXPECTED_TERRAIN_COLUMNS = (
     "flat__5",
     "pyramid_stair",
     "flat__6",
+    "random_stairs",
+    "flat__7",
+    "tilted_grid",
+    "flat__8",
+    "random_spread",
+    "flat__9",
+    "stepping_stones",
+    "flat__10",
 )
 
 
@@ -133,14 +142,39 @@ def test_interleaved_terrain_columns_preserve_logical_proportions() -> None:
 
     assert math.isclose(
         sum(cfg.proportion for name, cfg in sub_terrains.items() if name.startswith("flat__")),
-        0.3,
+        0.28,
     )
-    assert math.isclose(sub_terrains["discrete_obstacles"].proportion, 0.2)
-    assert math.isclose(sub_terrains["random_rough"].proportion, 0.2)
-    assert math.isclose(sub_terrains["hf_pyramid_slope"].proportion, 0.1)
-    assert math.isclose(sub_terrains["hf_pyramid_slope_inv"].proportion, 0.1)
-    assert math.isclose(sub_terrains["pyramid_stair_inv"].proportion, 0.2)
-    assert math.isclose(sub_terrains["pyramid_stair"].proportion, 0.1)
+    assert math.isclose(sum(cfg.proportion for cfg in sub_terrains.values()), 1.0)
+    for name in ("discrete_obstacles", "random_rough"):
+        assert math.isclose(sub_terrains[name].proportion, 0.10)
+    for name in (
+        "hf_pyramid_slope",
+        "hf_pyramid_slope_inv",
+        "pyramid_stair",
+        "random_stairs",
+        "tilted_grid",
+        "random_spread",
+    ):
+        assert math.isclose(sub_terrains[name].proportion, 0.05)
+    assert math.isclose(sub_terrains["pyramid_stair_inv"].proportion, 0.15)
+    assert math.isclose(sub_terrains["stepping_stones"].proportion, 0.07)
+
+    stepping_stones = sub_terrains["stepping_stones"]
+    assert stepping_stones.stone_distance_range == (0.0, 0.15)
+    assert stepping_stones.stone_size_range == (0.50, 0.75)
+    assert stepping_stones.stone_height == 0.0
+    assert math.isclose(
+        (stepping_stones.stone_distance_range[1] - stepping_stones.stone_distance_range[0])
+        / TERRAINS_CFG.num_rows,
+        0.003,
+    )
+    assert math.isclose(
+        (stepping_stones.stone_size_range[1] - stepping_stones.stone_size_range[0])
+        / TERRAINS_CFG.num_rows,
+        0.005,
+    )
+    assert stepping_stones.stone_height_variation / TERRAINS_CFG.num_rows <= 0.0015
+    assert stepping_stones.displacement_range / TERRAINS_CFG.num_rows <= 0.0015
 
 
 def test_play_config_uses_all_interleaved_terrain_columns() -> None:
