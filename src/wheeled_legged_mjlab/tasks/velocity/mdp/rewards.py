@@ -531,13 +531,16 @@ def base_height_l2(
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
   sensor_name: str | None = None,
   terrain_sample: str = "mean",
+  terrain_quantile: float = 0.5,
   deadband: float = 0.0,
 ) -> torch.Tensor:
   """Penalize base height error outside a symmetric deadband using an L2 kernel.
 
   When a terrain raycast sensor is provided, height is measured relative to the
-  local terrain under the scan instead of world z. Errors inside the deadband
-  produce zero cost; only the excess error is penalized.
+  local terrain under the scan instead of world z. ``terrain_sample="quantile"``
+  uses a height quantile over the scan and is robust to sparse deep holes such
+  as stepping-stone pits. Errors inside the deadband produce zero cost; only
+  the excess error is penalized.
   """
   asset: Entity = env.scene[asset_cfg.name]
   base_z = asset.data.root_link_pos_w[:, 2]
@@ -565,6 +568,14 @@ def base_height_l2(
       hit_count = valid_hit.float().sum(dim=1)
       ground_z = hit_z.sum(dim=1) / torch.clamp(hit_count, min=1.0)
       ground_z = torch.where(hit_count > 0, ground_z, torch.zeros_like(ground_z))
+    elif terrain_sample == "quantile":
+      if not 0.0 <= terrain_quantile <= 1.0:
+        raise ValueError(
+          f"terrain_quantile must be in [0, 1], got {terrain_quantile}"
+        )
+      valid_heights = torch.where(valid_hit, hit_z, torch.full_like(hit_z, torch.nan))
+      ground_z = torch.nanquantile(valid_heights, terrain_quantile, dim=1)
+      ground_z = torch.nan_to_num(ground_z, nan=0.0)
     else:
       raise ValueError(f"Unsupported terrain_sample: {terrain_sample}")
     base_height = base_z - ground_z

@@ -16,10 +16,10 @@ TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=5.0,
     num_rows=50,
-    num_cols=21,
+    num_cols=20,
     sub_terrains={
-        # Alternate flat and non-flat columns so world-y straight-line commands
-        # encounter terrain transitions at a fixed difficulty level.
+        # Alternate flat and non-flat columns; the tilted-grid column is last
+        # for focused parkour play.
         "flat__0": BoxFlatTerrainCfg(
             proportion=0.01,
         ),
@@ -78,7 +78,7 @@ TERRAINS_CFG = TerrainGeneratorCfg(
             platform_width=2.0,
         ),
         "flat__5": BoxFlatTerrainCfg(
-            proportion=0.02,
+            proportion=0.03,
         ),
         "pyramid_stair": BoxPyramidStairsTerrainCfg(
             proportion=0.05,
@@ -92,37 +92,25 @@ TERRAINS_CFG = TerrainGeneratorCfg(
         ),
         "random_stairs": BoxRandomStairsTerrainCfg(
             proportion=0.05,
-            step_width=0.5,
-            step_height_range=(0.015, 0.075),
+            step_width=0.35,
+            step_height_range=(0.03, 0.20),
             border_width=0.5,
             platform_width=2.0,
         ),
         "flat__7": BoxFlatTerrainCfg(
             proportion=0.03,
         ),
-        "tilted_grid": BoxTiltedGridTerrainCfg(
-            proportion=0.05,
-            grid_width=0.8,
-            tilt_range_deg=6.0,
-            height_range=0.04,
-            border_width=0.5,
-            platform_width=2.0,
-            floor_depth=0.8,
-        ),
-        "flat__8": BoxFlatTerrainCfg(
-            proportion=0.03,
-        ),
         "random_spread": BoxRandomSpreadTerrainCfg(
             proportion=0.05,
-            num_boxes=16,
-            box_width_range=(0.25, 0.45),
-            box_length_range=(0.25, 0.55),
-            box_height_range=(0.03, 0.20),
-            box_yaw_range=(-20.0, 20.0),
+            num_boxes=64,
+            box_width_range=(0.20, 0.70),
+            box_length_range=(0.20, 0.90),
+            box_height_range=(0.03, 0.22),
+            box_yaw_range=(-45.0, 45.0),
             border_width=0.5,
             platform_width=2.0,
         ),
-        "flat__9": BoxFlatTerrainCfg(
+        "flat__8": BoxFlatTerrainCfg(
             proportion=0.03,
         ),
         "stepping_stones": BoxSteppingStonesTerrainCfg(
@@ -139,8 +127,17 @@ TERRAINS_CFG = TerrainGeneratorCfg(
             platform_width=2.0,
             floor_depth=0.8,
         ),
-        "flat__10": BoxFlatTerrainCfg(
-            proportion=0.01,
+        "flat__9": BoxFlatTerrainCfg(
+            proportion=0.03,
+        ),
+        "tilted_grid": BoxTiltedGridTerrainCfg(
+            proportion=0.05,
+            grid_width=0.6,
+            tilt_range_deg=12.0,
+            height_range=0.12,
+            border_width=0.5,
+            platform_width=2.0,
+            floor_depth=0.8,
         ),
     }
 )

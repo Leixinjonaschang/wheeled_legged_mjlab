@@ -745,7 +745,8 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 "deadband": 0.04,
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
                 "sensor_name": "terrain_scan" if rough else None,
-                "terrain_sample": "center",
+                "terrain_sample": "quantile" if rough else "center",
+                "terrain_quantile": 0.75,
             },
         ),
         "pose": RewardTermCfg(

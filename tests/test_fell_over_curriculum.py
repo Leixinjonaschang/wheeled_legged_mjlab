@@ -31,7 +31,11 @@ from wheeled_legged_mjlab.tasks.velocity.mdp.curriculums import (
     fell_over_limit_angle,
     terrain_levels_vel,
 )
-from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import variable_posture
+from wheeled_legged_mjlab.tasks.velocity.mdp import rewards as reward_terms
+from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import (
+    base_height_l2,
+    variable_posture,
+)
 from wheeled_legged_mjlab.tasks.velocity.mdp.terminations import out_of_terrain_bounds
 
 
@@ -119,12 +123,11 @@ EXPECTED_TERRAIN_COLUMNS = (
     "flat__6",
     "random_stairs",
     "flat__7",
-    "tilted_grid",
-    "flat__8",
     "random_spread",
-    "flat__9",
+    "flat__8",
     "stepping_stones",
-    "flat__10",
+    "flat__9",
+    "tilted_grid",
 )
 
 
@@ -175,6 +178,19 @@ def test_interleaved_terrain_columns_preserve_logical_proportions() -> None:
     )
     assert stepping_stones.stone_height_variation / TERRAINS_CFG.num_rows <= 0.0015
     assert stepping_stones.displacement_range / TERRAINS_CFG.num_rows <= 0.0015
+
+    random_stairs = sub_terrains["random_stairs"]
+    assert random_stairs.step_width == 0.35
+    assert random_stairs.step_height_range == (0.03, 0.20)
+
+    tilted_grid = sub_terrains["tilted_grid"]
+    assert tilted_grid.grid_width == 0.6
+    assert tilted_grid.tilt_range_deg == 12.0
+    assert tilted_grid.height_range == 0.12
+
+    random_spread = sub_terrains["random_spread"]
+    assert random_spread.num_boxes == 64
+    assert random_spread.box_height_range == (0.03, 0.22)
 
 
 def test_play_config_uses_all_interleaved_terrain_columns() -> None:
@@ -265,6 +281,44 @@ def test_wf_tron1b_pose_target_matches_base_height_target() -> None:
     assert math.isclose(
         float(wheel_pos_b[0, 2]), float(wheel_pos_b[1, 2]), abs_tol=1.0e-6
     )
+
+
+def test_base_height_quantile_ignores_sparse_stepping_stone_pit_samples(
+    monkeypatch,
+) -> None:
+    class DummyRayCastSensor:
+        def __init__(self) -> None:
+            self.data = SimpleNamespace(
+                distances=torch.ones(1, 4),
+                hit_pos_w=torch.tensor(
+                    [[[[0.0, 0.0, -0.8], [0.0, 0.0, -0.8],
+                       [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]]]
+                ),
+            )
+
+    monkeypatch.setattr(reward_terms, "RayCastSensor", DummyRayCastSensor)
+    env = SimpleNamespace(
+        scene={
+            "robot": SimpleNamespace(
+                data=SimpleNamespace(root_link_pos_w=torch.tensor([[0.0, 0.0, 0.82]]))
+            ),
+            "terrain_scan": DummyRayCastSensor(),
+        }
+    )
+
+    mean_cost = base_height_l2(
+        env, target_height=0.82, sensor_name="terrain_scan", terrain_sample="mean"
+    )
+    support_cost = base_height_l2(
+        env,
+        target_height=0.82,
+        sensor_name="terrain_scan",
+        terrain_sample="quantile",
+        terrain_quantile=0.75,
+    )
+
+    assert mean_cost.item() > 0.1
+    assert torch.allclose(support_cost, torch.zeros(1))
 
 
 class DummyPostureAsset:
