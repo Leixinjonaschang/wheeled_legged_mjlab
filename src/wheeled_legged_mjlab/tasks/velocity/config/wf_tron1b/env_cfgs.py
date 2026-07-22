@@ -965,7 +965,7 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
                 "actual_speed_threshold": 0.2,
                 "direction_angle_threshold_deg": 70.0,
                 "direction_duration_s": 0.3,
-                "heading_error_threshold_deg": 55.0,
+                "heading_error_threshold_deg": 45.0,
                 "heading_duration_s": 0.6,
                 "heading_alignment_gate_deg": 45.0,
                 "command_grace_s": 2.5,

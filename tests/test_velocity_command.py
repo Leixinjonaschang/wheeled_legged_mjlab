@@ -252,4 +252,5 @@ def test_tracking_failure_is_not_timeout_and_is_disabled_for_play() -> None:
         == 5_000 * 24
     )
     assert term_cfg.params["contact_sensor_name"] == "wheels_ground_contact"
+    assert term_cfg.params["heading_error_threshold_deg"] == 45.0
     assert "world_command_tracking_failure" not in play_cfg.terminations
