@@ -798,7 +798,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "leg_joint_vel": RewardTermCfg(
             func=mdp.joint_vel_l2,
-            weight=-0.02,
+            weight=-0.015,
             params={"asset_cfg": leg_joint_cfg},
         ),
         "leg_joint_torque": RewardTermCfg(
@@ -808,7 +808,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "wheel_joint_vel": RewardTermCfg(
             func=mdp.joint_vel_l2,
-            weight=-0.002,
+            weight=-0.0005,
             params={"asset_cfg": wheel_joint_cfg},
         ),
         "joint_acc": RewardTermCfg(
@@ -869,7 +869,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
-                    weight=-3.0e-2,
+                    weight=-2.0e-2,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_joint_cfg,
