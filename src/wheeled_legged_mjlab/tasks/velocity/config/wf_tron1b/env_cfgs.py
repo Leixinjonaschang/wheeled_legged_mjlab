@@ -722,8 +722,8 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-0.15,
             params={
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
-                "roll_weight": 1.0,
-                "pitch_weight": 2.0,
+                "roll_weight": 2.0,
+                "pitch_weight": 1.0,
             },
         ),
         "track_heading": RewardTermCfg(
