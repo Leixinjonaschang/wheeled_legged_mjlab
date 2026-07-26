@@ -344,6 +344,31 @@ def test_depth_student_hidden_state_persists_and_resets_per_environment() -> Non
     assert model.get_hidden_state() is None
 
 
+def test_depth_predicted_velocity_preview_uses_internal_hidden_state_without_advancing() -> None:
+    obs = make_depth_rep_obs()
+    model = make_depth_model(obs)
+    internal_hidden_state = torch.full(
+        (NUM_ENVS, model.depth_gru_hidden_dim),
+        0.25,
+    )
+    model.reset(hidden_state=internal_hidden_state)
+    observed_gru_inputs: list[torch.Tensor] = []
+
+    def capture_gru_hidden_state(_module, inputs) -> None:
+        observed_gru_inputs.append(inputs[1].detach().clone())
+
+    hook = model.depth_gru.register_forward_pre_hook(capture_gru_hidden_state)
+    try:
+        predicted_lin_vel = model.get_predicted_lin_vel(obs)
+    finally:
+        hook.remove()
+
+    assert predicted_lin_vel.shape == (NUM_ENVS, LIN_VEL_DIM)
+    assert len(observed_gru_inputs) == 1
+    torch.testing.assert_close(observed_gru_inputs[0], internal_hidden_state)
+    torch.testing.assert_close(model.get_hidden_state(), internal_hidden_state)
+
+
 def test_depth_student_losses_update_depth_and_student_encoder_side() -> None:
     obs = make_depth_rep_obs()
     model = make_depth_model(obs)
