@@ -33,8 +33,9 @@ class DepthRepresentationVelocityPredictorActorCritic(DepthRepresentationVelocit
         normalize_latent: bool = True,
         distribution_cfg: dict | None = None,
         depth_feature_dim: int = 64,
-        depth_gru_hidden_dim: int = 64,
+        depth_gru_hidden_dim: int = 128,
         depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
+        depth_conv_strides: tuple[int, ...] | list[int] | None = None,
         latent_dynamics_hidden_dims: tuple[int, ...] | list[int] = (128, 256, 256, 128),
         latent_dynamics_horizons: tuple[int, ...] | list[int] = (1,),
     ) -> None:
@@ -52,6 +53,7 @@ class DepthRepresentationVelocityPredictorActorCritic(DepthRepresentationVelocit
             depth_feature_dim=depth_feature_dim,
             depth_gru_hidden_dim=depth_gru_hidden_dim,
             depth_channels=depth_channels,
+            depth_conv_strides=depth_conv_strides,
         )
         self.latent_dynamics_horizons = tuple(int(horizon) for horizon in latent_dynamics_horizons)
         if not self.latent_dynamics_horizons:

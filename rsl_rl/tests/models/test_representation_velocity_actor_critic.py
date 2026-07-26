@@ -147,6 +147,18 @@ def test_depth_model_has_no_latent_dynamics_interface() -> None:
     assert not hasattr(model, "compute_latent_dynamics_loss")
 
 
+def test_student_representation_loss_is_cosine_distance() -> None:
+    obs = make_rep_obs()
+    model = make_model(obs)
+
+    _, representation_loss, _ = model.compute_student_losses(obs)
+    student_latent, _ = model.get_proprio_outputs(obs)
+    teacher_latent = model.get_privileged_latent(obs)
+    expected = (1.0 - torch.nn.functional.cosine_similarity(student_latent, teacher_latent, dim=-1)).mean()
+
+    torch.testing.assert_close(representation_loss, expected)
+
+
 def test_teacher_student_value_and_velocity_paths_have_expected_shapes() -> None:
     obs = make_rep_obs()
     model = make_model(obs)
@@ -344,6 +356,38 @@ def test_depth_student_losses_update_depth_and_student_encoder_side() -> None:
     assert any(param.grad is not None for param in model.depth_encoder.parameters())
     assert any(param.grad is not None for param in model.depth_gru.parameters())
     assert any(param.grad is not None for param in model.proprio_encoder.parameters())
+
+
+def test_depth_student_roughness_head_is_trained_when_target_is_configured() -> None:
+    obs = make_depth_rep_obs()
+    obs["wheel_roughness"] = torch.rand(NUM_ENVS, 2)
+    model = DepthRepresentationVelocityActorCritic(
+        obs,
+        {
+            "proprio_history": ["proprio_history"],
+            "actor_command": ["actor_command"],
+            "lin_vel_target": ["lin_vel_target"],
+            "critic": ["critic", "dynamics_context"],
+            "privileged_encoder": ["privileged_encoder", "dynamics_context"],
+            "depth_encoder": ["depth_camera"],
+            "wheel_roughness": ["wheel_roughness"],
+        },
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        encoder_hidden_dims=[16],
+        latent_dim=LATENT_DIM,
+        depth_feature_dim=8,
+        depth_gru_hidden_dim=8,
+        depth_channels=(4, 4),
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+    student_loss, _, _, roughness_loss = model.compute_student_losses_with_roughness(obs)
+    model.zero_grad()
+    student_loss.backward()
+
+    assert roughness_loss > 0.0
+    assert any(parameter.grad is not None for parameter in model.wheel_roughness_head.parameters())
     assert any(param.grad is not None for param in model.student_latent_head.parameters())
     assert any(param.grad is not None for param in model.lin_vel_head.parameters())
     assert all(param.grad is None for param in model.privileged_encoder.parameters())

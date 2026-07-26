@@ -136,7 +136,7 @@ class RepresentationActorCritic(nn.Module):
         proprio_latent = self.get_proprio_latent(obs)
         with torch.no_grad():
             privileged_latent = self.get_privileged_latent(obs)
-        return F.mse_loss(proprio_latent, privileged_latent)
+        return (1.0 - F.cosine_similarity(proprio_latent, privileged_latent, dim=-1)).mean()
 
     def ppo_parameters(self):
         """Yield parameters optimized by PPO."""

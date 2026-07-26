@@ -289,7 +289,7 @@ def test_update_returns_student_losses_and_updates_parameter_groups() -> None:
 
     losses = alg.update()
 
-    assert {"value", "surrogate", "entropy", "student", "representation", "lin_vel"} <= set(losses)
+    assert {"value", "surrogate", "entropy", "student", "representation", "lin_vel", "roughness"} <= set(losses)
     assert any_param_changed(actor_before, alg.actor.actor_head)
     assert any_param_changed(critic_before, alg.actor.critic_head)
     assert any_param_changed(privileged_before, alg.actor.privileged_encoder)
@@ -328,7 +328,7 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
     fill_rollout(alg, obs)
     calls = {"flat": 0, "sequence": 0}
     original_compute_student_losses = alg.actor.compute_student_losses
-    original_compute_student_losses_sequence = alg.actor.compute_student_losses_sequence
+    original_compute_student_losses_sequence = alg.actor.compute_student_losses_sequence_with_roughness
 
     def counted_compute_student_losses(*args, **kwargs):
         calls["flat"] += 1
@@ -339,7 +339,7 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         return original_compute_student_losses_sequence(*args, **kwargs)
 
     alg.actor.compute_student_losses = counted_compute_student_losses  # type: ignore[method-assign]
-    alg.actor.compute_student_losses_sequence = counted_compute_student_losses_sequence  # type: ignore[method-assign]
+    alg.actor.compute_student_losses_sequence_with_roughness = counted_compute_student_losses_sequence  # type: ignore[method-assign]
 
     losses = alg.update()
 
@@ -347,6 +347,7 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "student",
         "representation",
         "lin_vel",
+        "roughness",
         "Grad/ppo_total_norm",
         "Grad/privileged_encoder_ppo_norm",
         "Grad/ppo_joint_total_norm",
@@ -438,7 +439,7 @@ def test_plain_depth_update_has_no_predictor_dependency() -> None:
     assert alg.storage.applied_actions is None
     losses = alg.update()
 
-    assert {"student", "representation", "lin_vel"} <= set(losses)
+    assert {"student", "representation", "lin_vel", "roughness"} <= set(losses)
     assert all("latent" not in name for name in losses)
     assert not hasattr(alg.actor, "latent_dynamics_predictors")
 

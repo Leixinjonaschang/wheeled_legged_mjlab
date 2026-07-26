@@ -48,8 +48,9 @@ class RslRlDepthRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelC
     """Config for depth velocity representation teacher-student actor-critic."""
 
     depth_feature_dim: int = 64
-    depth_gru_hidden_dim: int = 64
+    depth_gru_hidden_dim: int = 128
     depth_channels: Tuple[int, ...] = (16, 32, 32)
+    depth_conv_strides: Tuple[int, ...] = (2, 2, 1)
     class_name: str = "DepthRepresentationVelocityActorCritic"
 
 
@@ -75,9 +76,10 @@ class RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithm
     num_student_substeps: int = 1
     num_representation_epochs: int | None = None
     num_representation_mini_batches: int | None = None
-    representation_chunk_length: int = 12
+    representation_chunk_length: int = 24
     representation_loss_coef: float = 1.0
     lin_vel_loss_coef: float = 1.0
+    roughness_loss_coef: float = 0.2
     class_name: str = "RepresentationVelocityTeacherStudentPPO"
 
 
@@ -207,8 +209,9 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             latent_dim=64,
             normalize_latent=True,
             depth_feature_dim=64,
-            depth_gru_hidden_dim=64,
+            depth_gru_hidden_dim=128,
             depth_channels=(16, 32, 32),
+            depth_conv_strides=(2, 2, 1),
             distribution_cfg={
                 "class_name": "GaussianDistribution",
                 "init_std": 1.0,
@@ -232,7 +235,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             num_student_substeps=1,
             num_representation_epochs=1,
             num_representation_mini_batches=4,
-            representation_chunk_length=12,
+            representation_chunk_length=24,
             representation_loss_coef=1.0,
             lin_vel_loss_coef=1.0,
         ),
@@ -243,6 +246,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             "critic": ("critic", "dynamics_context"),
             "privileged_encoder": ("privileged_encoder", "dynamics_context"),
             "depth_encoder": ("depth_camera",),
+            "wheel_roughness": ("wheel_roughness",),
         },
         experiment_name="wf_tron1b_velocity_rep_ts_lin_vel_depth_latent64",
         save_interval=200,
@@ -264,8 +268,9 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
         latent_dim=64,
         normalize_latent=True,
         depth_feature_dim=64,
-        depth_gru_hidden_dim=64,
+        depth_gru_hidden_dim=128,
         depth_channels=(16, 32, 32),
+        depth_conv_strides=(2, 2, 1),
         latent_dynamics_hidden_dims=(128, 256, 256, 128),
         latent_dynamics_horizons=(1, 5, 10),
         distribution_cfg={
@@ -292,7 +297,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
         num_student_substeps=1,
         num_representation_epochs=1,
         num_representation_mini_batches=4,
-        representation_chunk_length=12,
+        representation_chunk_length=24,
         representation_loss_coef=1.0,
         lin_vel_loss_coef=1.0,
         latent_dynamics_loss_coef=3.0,

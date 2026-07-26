@@ -397,6 +397,23 @@ def make_observations(
                 enable_corruption=False,
             ),
         }
+        if rough:
+            observations["wheel_roughness"] = ObservationGroupCfg(
+                terms={
+                    "wheel_roughness": ObservationTermCfg(
+                        func=mdp.wheel_roughness_gate,
+                        params={
+                            "sensor_name": "wheel_height_scan",
+                            "wheel_radius": WHEEL_RADIUS,
+                            "gate_min": 0.00,
+                            "gate_max": 0.50,
+                            "grid_shape": WHEEL_HEIGHT_GRID_SHAPE,
+                        },
+                    )
+                },
+                concatenate_terms=True,
+                enable_corruption=False,
+            )
     else:
         observations = {
             "actor": ObservationGroupCfg(

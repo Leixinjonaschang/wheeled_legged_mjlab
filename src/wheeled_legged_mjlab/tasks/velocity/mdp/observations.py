@@ -453,6 +453,62 @@ def terrain_roughness_indicator(
   return gate.unsqueeze(-1)
 
 
+def wheel_roughness_gate(
+  env: ManagerBasedRlEnv,
+  sensor_name: str = "wheel_height_scan",
+  wheel_radius: float = 0.127,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  grid_shape: tuple[int, int] | None = None,
+) -> torch.Tensor:
+  """Continuous roughness gates for left and right wheel terrain patches."""
+  sensor = env.scene[sensor_name]
+  height_samples = _terrain_clearance_samples(sensor)
+  if height_samples.shape[1] != 2:
+    raise ValueError(
+      "wheel_roughness_gate requires exactly two wheel frames ordered [left, right], "
+      f"got shape {tuple(height_samples.shape)}"
+    )
+  if wheel_radius <= 0.0:
+    raise ValueError(f"wheel_radius ({wheel_radius}) must be positive")
+  if gate_max <= gate_min:
+    raise ValueError(
+      f"gate_max ({gate_max}) must be greater than gate_min ({gate_min})"
+    )
+
+  height_samples = torch.nan_to_num(height_samples, nan=0.0, posinf=0.0, neginf=0.0)
+  rows, cols = _resolve_grid_shape(height_samples.shape[-1], grid_shape)
+  grid = height_samples.view(height_samples.shape[0], 2, rows, cols)
+  zeros = torch.zeros_like(height_samples[..., 0])
+
+  if cols > 1:
+    jump_x = torch.abs(grid[..., 1:] - grid[..., :-1]).amax(dim=(-1, -2))
+  else:
+    jump_x = zeros
+  if rows > 1:
+    jump_y = torch.abs(grid[..., 1:, :] - grid[..., :-1, :]).amax(dim=(-1, -2))
+  else:
+    jump_y = zeros
+  jump = torch.maximum(jump_x, jump_y)
+
+  if cols > 2:
+    curvature_x = torch.abs(
+      grid[..., :, 2:] - 2.0 * grid[..., :, 1:-1] + grid[..., :, :-2]
+    ).amax(dim=(-1, -2))
+  else:
+    curvature_x = zeros
+  if rows > 2:
+    curvature_y = torch.abs(
+      grid[..., 2:, :] - 2.0 * grid[..., 1:-1, :] + grid[..., :-2, :]
+    ).amax(dim=(-1, -2))
+  else:
+    curvature_y = zeros
+  curvature = torch.maximum(curvature_x, curvature_y)
+  roughness = torch.maximum(jump, curvature) / wheel_radius
+  u = torch.clamp((roughness - gate_min) / (gate_max - gate_min), 0.0, 1.0)
+  return u * u * (3.0 - 2.0 * u)
+
+
 def _normalize_to_unit_range(
   value: torch.Tensor, lower: float, upper: float
 ) -> torch.Tensor:
