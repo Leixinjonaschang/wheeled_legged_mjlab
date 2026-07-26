@@ -8,7 +8,11 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
-from rsl_rl.models import RepresentationActorCritic, RepresentationVelocityActorCritic
+from rsl_rl.models import (
+    DepthRepresentationVelocityActorCritic,
+    RepresentationActorCritic,
+    RepresentationVelocityActorCritic,
+)
 
 
 def _action_scale_values(action_term) -> list[float]:
@@ -71,7 +75,20 @@ def get_wheeled_legged_metadata(
                 "student_history_order": "oldest_to_newest",
             }
         )
-    if isinstance(policy, RepresentationVelocityActorCritic):
+    if isinstance(policy, DepthRepresentationVelocityActorCritic):
+        proprio_history_cfg = env.cfg.observations["proprio_history"]
+        metadata.update(
+            {
+                "policy_input_names": ["proprio_history", "actor_command", "depth", "hidden_state_in"],
+                "policy_output_names": ["actions", "predicted_lin_vel", "hidden_state_out"],
+                "student_observation_names": env.observation_manager.active_terms["proprio_history"],
+                "command_observation_names": env.observation_manager.active_terms["actor_command"],
+                "student_history_length": str(proprio_history_cfg.history_length),
+                "student_history_flatten_dim": str(proprio_history_cfg.flatten_history_dim).lower(),
+                "student_history_order": "oldest_to_newest",
+            }
+        )
+    elif isinstance(policy, RepresentationVelocityActorCritic):
         proprio_history_cfg = env.cfg.observations["proprio_history"]
         metadata.update(
             {

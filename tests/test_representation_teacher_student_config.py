@@ -17,7 +17,11 @@ from tensordict import TensorDict
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, list_tasks
 
 import wheeled_legged_mjlab  # noqa: F401
-from rsl_rl.models import RepresentationActorCritic, RepresentationVelocityActorCritic
+from rsl_rl.models import (
+    DepthRepresentationVelocityActorCritic,
+    RepresentationActorCritic,
+    RepresentationVelocityActorCritic,
+)
 from wheeled_legged_mjlab.rl.runner import get_wheeled_legged_metadata
 from wheeled_legged_mjlab.tasks.velocity import mdp
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
@@ -739,6 +743,39 @@ def _make_velocity_representation_policy() -> RepresentationVelocityActorCritic:
     )
 
 
+def _make_depth_velocity_representation_policy() -> DepthRepresentationVelocityActorCritic:
+    obs = TensorDict(
+        {
+            "proprio_history": torch.randn(2, 5, 3),
+            "actor_command": torch.randn(2, 3),
+            "lin_vel_target": torch.randn(2, 3),
+            "critic": torch.randn(2, 5),
+            "privileged_encoder": torch.randn(2, 4),
+            "dynamics_context": torch.randn(2, 13),
+            "depth_camera": torch.randn(2, 1, 32, 24),
+        },
+        batch_size=[2],
+    )
+    return DepthRepresentationVelocityActorCritic(
+        obs,
+        {
+            "proprio_history": ["proprio_history"],
+            "actor_command": ["actor_command"],
+            "lin_vel_target": ["lin_vel_target"],
+            "critic": ["critic"],
+            "privileged_encoder": ["privileged_encoder", "dynamics_context"],
+            "depth_encoder": ["depth_camera"],
+        },
+        output_dim=2,
+        hidden_dims=[8],
+        encoder_hidden_dims=[8],
+        depth_feature_dim=8,
+        depth_gru_hidden_dim=8,
+        depth_channels=(4, 4),
+        distribution_cfg={"class_name": "GaussianDistribution"},
+    )
+
+
 def test_representation_metadata_describes_single_history_input() -> None:
     metadata = get_wheeled_legged_metadata(_make_dummy_metadata_env(), "local", _make_representation_policy())
 
@@ -769,6 +806,15 @@ def test_velocity_representation_metadata_describes_history_and_command_inputs()
     assert metadata["student_history_length"] == "5"
     assert metadata["student_history_flatten_dim"] == "false"
     assert metadata["student_history_order"] == "oldest_to_newest"
+
+
+def test_depth_velocity_representation_metadata_matches_onnx_io() -> None:
+    policy = _make_depth_velocity_representation_policy()
+    metadata = get_wheeled_legged_metadata(_make_velocity_metadata_env(), "local", policy)
+    onnx_policy = policy.as_onnx(verbose=False)
+
+    assert metadata["policy_input_names"] == onnx_policy.input_names
+    assert metadata["policy_output_names"] == onnx_policy.output_names
 
 
 def test_non_representation_metadata_stays_legacy_shape() -> None:
