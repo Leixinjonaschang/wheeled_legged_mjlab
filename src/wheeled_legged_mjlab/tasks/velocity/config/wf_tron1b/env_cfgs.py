@@ -943,15 +943,13 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "standing_forward_wheel_air_time": RewardTermCfg(
                     func=mdp.standing_forward_wheel_air_time,
-                    weight=-4.0,
+                    weight=-10.0,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
                         "command_name": COMMAND_NAME,
                         "max_time": 0.5,
                         "air_time_offset": 0.05,
-                        "standing_scale": 2.5,
-                        "forward_scale": 2.0,
                     },
                 ),
             }

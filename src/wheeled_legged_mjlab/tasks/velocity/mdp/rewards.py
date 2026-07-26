@@ -806,15 +806,13 @@ def standing_forward_wheel_air_time(
   grid_shape: tuple[int, int] | None = None,
   max_time: float = 0.5,
   air_time_offset: float = 0.05,
-  standing_scale: float = 2.5,
-  forward_scale: float = 1.0,
   lin_threshold: float = 0.05,
   ang_threshold: float = 0.05,
   forward_speed_threshold: float = 0.05,
   forward_lateral_threshold: float = 0.05,
   forward_ang_threshold: float = 0.05,
 ) -> torch.Tensor:
-  """Penalize standing air time globally and forward air time only on non-rough terrain."""
+  """Penalize standing air time globally and forward air time on non-rough terrain."""
   stats = _terrain_roughness_from_sensor(
     env,
     roughness_sensor_name,
@@ -861,8 +859,8 @@ def standing_forward_wheel_air_time(
       & ~standing
     )
 
-  standing_cost = air_time * standing.float() * standing_scale
-  forward_cost = air_time * forward.float() * forward_scale * non_rough_active
+  standing_cost = air_time * standing.float()
+  forward_cost = air_time * forward.float() * non_rough_active
   cost = standing_cost + forward_cost
 
   log_data = env.extras.setdefault("log", {})
