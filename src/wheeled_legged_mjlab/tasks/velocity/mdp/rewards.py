@@ -305,58 +305,6 @@ def track_heading(
   return reward * active.float()
 
 
-class heading_progress:
-  """Reward reductions in absolute heading error between consecutive steps."""
-
-  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-    del cfg  # Parameters are passed to __call__ by the manager.
-    self._prev_abs_heading_error = torch.zeros(
-      env.num_envs, device=env.device, dtype=torch.float32
-    )
-    self._has_prev = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
-    self._last_command_counter = torch.full(
-      (env.num_envs,), -1, device=env.device, dtype=torch.long
-    )
-
-  def __call__(
-    self,
-    env: ManagerBasedRlEnv,
-    command_name: str,
-    max_progress: float = 0.05,
-  ) -> torch.Tensor:
-    command_term = env.command_manager.get_term(command_name)
-    assert isinstance(command_term, UniformVelocityCommand)
-    assert command_term.cfg.heading_command
-
-    heading_error = wrap_to_pi(
-      command_term.heading_target - command_term.robot.data.heading_w
-    )
-    abs_heading_error = torch.abs(heading_error)
-
-    command_changed = command_term.command_counter != self._last_command_counter
-    active = command_term.is_heading_env & ~command_term.is_standing_env
-    valid = self._has_prev & ~command_changed & active
-
-    progress_scale = max(max_progress, 1.0e-6)
-    progress = self._prev_abs_heading_error - abs_heading_error
-    progress_reward = torch.clamp(progress, min=0.0, max=progress_scale)
-    progress_reward = progress_reward / progress_scale
-    progress_reward = progress_reward * valid.float()
-
-    log_data = env.extras.setdefault("log", {})
-    log_data["Metrics/heading_progress_mean"] = progress_reward.mean()
-
-    self._prev_abs_heading_error = abs_heading_error.detach()
-    self._has_prev[:] = True
-    self._last_command_counter = command_term.command_counter.clone()
-    return progress_reward
-
-  def reset(self, env_ids: torch.Tensor) -> None:
-    self._prev_abs_heading_error[env_ids] = 0.0
-    self._has_prev[env_ids] = False
-    self._last_command_counter[env_ids] = -1
-
-
 def stand_still(
   env: ManagerBasedRlEnv,
   command_name: str,
@@ -692,6 +640,39 @@ def non_rough_wheel_x_alignment(
   )
   non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
   return non_rough_active * wheel_x_alignment(env, asset_cfg)
+
+
+def non_rough_flat_orientation(
+  env: ManagerBasedRlEnv,
+  roughness_sensor_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  wheel_radius: float = 0.127,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
+  grid_shape: tuple[int, int] | None = None,
+) -> torch.Tensor:
+  """Penalize base tilt only when terrain is not rough."""
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
+  )
+  non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
+  asset: Entity = env.scene[asset_cfg.name]
+  tilt_squared = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+  return non_rough_active * tilt_squared
 
 
 def wheel_distance(

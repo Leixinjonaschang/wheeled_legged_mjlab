@@ -735,11 +735,6 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 "command_norm_threshold": 0.05,
             },
         ),
-        "heading_progress": RewardTermCfg(
-            func=mdp.heading_progress,
-            weight=0.0,
-            params={"command_name": COMMAND_NAME, "max_progress": 0.05},
-        ),
         "upright": RewardTermCfg(
             func=mdp.upright,
             weight=1.0,
@@ -936,6 +931,14 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_body_cfg,
+                    },
+                ),
+                "non_rough_flat_orientation": RewardTermCfg(
+                    func=mdp.non_rough_flat_orientation,
+                    weight=-12.0,
+                    params={
+                        **roughness_params,
+                        "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
                     },
                 ),
                 "standing_forward_wheel_air_time": RewardTermCfg(
