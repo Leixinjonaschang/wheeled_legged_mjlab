@@ -119,7 +119,7 @@ def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
         terrain=terrain,
         entities={ROBOT_ENTITY: WF_TRON1B_ROBOT_CFG},
         sensors=make_sensors(rough=rough, depth=depth),
-        num_envs=2048,
+        num_envs=1536,
         extent=1.0,
     )
 
@@ -913,9 +913,8 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                         "command_name": COMMAND_NAME,
                         "command_threshold": 0.05,
                     },
-                
-                # wheeled motion
                 ),
+                # wheeled motion
                 "non_rough_wheel_lateral_symmetry": RewardTermCfg(
                     func=mdp.non_rough_wheel_lateral_symmetry,
                     weight=0.5,
@@ -933,12 +932,14 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                         "asset_cfg": wheel_body_cfg,
                     },
                 ),
-                "non_rough_flat_orientation": RewardTermCfg(
-                    func=mdp.non_rough_flat_orientation,
-                    weight=-12.0,
+                "non_rough_base_ang_vel_xy": RewardTermCfg(
+                    func=mdp.non_rough_base_ang_vel_xy,
+                    weight=-0.15,
                     params={
                         **roughness_params,
                         "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                        "roll_weight": 4.0,
+                        "pitch_weight": 1.0,
                     },
                 ),
                 "standing_forward_wheel_air_time": RewardTermCfg(

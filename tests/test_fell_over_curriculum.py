@@ -371,6 +371,62 @@ def test_variable_posture_uses_configured_target_pose() -> None:
     assert torch.allclose(reward, torch.ones(1))
 
 
+def test_non_rough_base_ang_vel_xy_applies_only_on_non_rough_terrain(
+    monkeypatch,
+) -> None:
+    asset_cfg = SimpleNamespace(name="robot")
+    env = SimpleNamespace(
+        common_step_counter=0,
+        extras={},
+        scene={
+            "robot": SimpleNamespace(
+                data=SimpleNamespace(
+                    root_link_ang_vel_b=torch.tensor([[3.0, 4.0, 5.0]])
+                )
+            )
+        },
+    )
+
+    monkeypatch.setattr(
+        reward_terms,
+        "_terrain_roughness_from_sensor",
+        lambda *args, **kwargs: SimpleNamespace(gate=torch.tensor([0.0])),
+    )
+    flat_cost = reward_terms.non_rough_base_ang_vel_xy(
+        env,
+        roughness_sensor_name="terrain_scan",
+        asset_cfg=asset_cfg,
+        roll_weight=2.0,
+        pitch_weight=1.0,
+    )
+    assert torch.allclose(flat_cost, torch.tensor([34.0]))
+
+    monkeypatch.setattr(
+        reward_terms,
+        "_terrain_roughness_from_sensor",
+        lambda *args, **kwargs: SimpleNamespace(gate=torch.tensor([0.3])),
+    )
+    rough_cost = reward_terms.non_rough_base_ang_vel_xy(
+        env,
+        roughness_sensor_name="terrain_scan",
+        asset_cfg=asset_cfg,
+        roll_weight=2.0,
+        pitch_weight=1.0,
+    )
+    assert torch.allclose(rough_cost, torch.zeros(1))
+
+
+def test_non_rough_base_ang_vel_xy_replaces_flat_orientation_reward() -> None:
+    cfg = wf_tron1b_rough_env_cfg()
+
+    assert "non_rough_flat_orientation" not in cfg.rewards
+    term = cfg.rewards["non_rough_base_ang_vel_xy"]
+    assert term.func is reward_terms.non_rough_base_ang_vel_xy
+    assert math.isclose(term.weight, -0.15)
+    assert term.params["roll_weight"] == 2.0
+    assert term.params["pitch_weight"] == 1.0
+
+
 class DummyTerrain:
     def __init__(self) -> None:
         self.cfg = SimpleNamespace(
