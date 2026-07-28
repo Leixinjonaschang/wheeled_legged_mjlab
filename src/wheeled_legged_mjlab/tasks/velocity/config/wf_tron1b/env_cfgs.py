@@ -932,13 +932,13 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                         "asset_cfg": wheel_body_cfg,
                     },
                 ),
-                "non_rough_base_ang_vel_xy": RewardTermCfg(
-                    func=mdp.non_rough_base_ang_vel_xy,
-                    weight=-0.15,
+                "non_rough_flat_orientation": RewardTermCfg(
+                    func=mdp.non_rough_flat_orientation,
+                    weight=-20.0,
                     params={
                         **roughness_params,
                         "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
-                        "roll_weight": 4.0,
+                        "roll_weight": 2.0,
                         "pitch_weight": 1.0,
                     },
                 ),

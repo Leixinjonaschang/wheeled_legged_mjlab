@@ -642,7 +642,7 @@ def non_rough_wheel_x_alignment(
   return non_rough_active * wheel_x_alignment(env, asset_cfg)
 
 
-def non_rough_base_ang_vel_xy(
+def non_rough_flat_orientation(
   env: ManagerBasedRlEnv,
   roughness_sensor_name: str,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
@@ -656,7 +656,7 @@ def non_rough_base_ang_vel_xy(
   roughness_gate_threshold_ramp_steps: int = 0,
   grid_shape: tuple[int, int] | None = None,
 ) -> torch.Tensor:
-  """Penalize base roll/pitch angular velocity only when terrain is not rough."""
+  """Penalize static base roll/pitch tilt only when terrain is not rough."""
   stats = _terrain_roughness_from_sensor(
     env,
     roughness_sensor_name,
@@ -672,11 +672,11 @@ def non_rough_base_ang_vel_xy(
     roughness_gate_threshold_ramp_steps,
   )
   non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
-  return non_rough_active * base_ang_vel_xy_l2(
-    env,
-    asset_cfg=asset_cfg,
-    roll_weight=roll_weight,
-    pitch_weight=pitch_weight,
+  asset: Entity = env.scene[asset_cfg.name]
+  tilt_xy_sq = torch.square(asset.data.projected_gravity_b[:, :2])
+  pitch_tilt_sq, roll_tilt_sq = tilt_xy_sq.unbind(dim=1)
+  return non_rough_active * (
+    roll_weight * roll_tilt_sq + pitch_weight * pitch_tilt_sq
   )
 
 
