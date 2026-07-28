@@ -37,7 +37,7 @@ TERRAINS_CFG = TerrainGeneratorCfg(
             proportion=0.03,
         ),
         "random_rough": HfRandomUniformTerrainCfg(
-            proportion=0.10,
+            proportion=0.08,
             noise_range=(0.02, 0.10),
             noise_step=0.02,
             border_width=0.25,
@@ -93,7 +93,7 @@ TERRAINS_CFG = TerrainGeneratorCfg(
         "random_stairs": BoxRandomStairsTerrainCfg(
             proportion=0.05,
             step_width=0.35,
-            step_height_range=(0.03, 0.20),
+            step_height_range=(0.03, 0.25),
             border_width=0.5,
             platform_width=2.0,
         ),
@@ -101,11 +101,11 @@ TERRAINS_CFG = TerrainGeneratorCfg(
             proportion=0.03,
         ),
         "random_spread": BoxRandomSpreadTerrainCfg(
-            proportion=0.05,
+            proportion=0.07,
             num_boxes=64,
             box_width_range=(0.20, 0.70),
             box_length_range=(0.20, 0.90),
-            box_height_range=(0.03, 0.22),
+            box_height_range=(0.03, 0.25),
             box_yaw_range=(-45.0, 45.0),
             border_width=0.5,
             platform_width=2.0,
@@ -133,8 +133,8 @@ TERRAINS_CFG = TerrainGeneratorCfg(
         "tilted_grid": BoxTiltedGridTerrainCfg(
             proportion=0.05,
             grid_width=0.6,
-            tilt_range_deg=12.0,
-            height_range=0.12,
+            tilt_range_deg=15.0,
+            height_range=0.15,
             border_width=0.5,
             platform_width=2.0,
             floor_depth=0.8,
