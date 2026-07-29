@@ -316,6 +316,18 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
     return cfg
 
 
+def wf_tron1b_rep_ts_lin_vel_depth_predict_no_rough_runner_cfg() -> (
+    WFTRON1BRslRlOnPolicyRunnerCfg
+):
+    """Create the depth predictor ablation without wheel roughness supervision."""
+    cfg = wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg()
+    cfg.algorithm.roughness_loss_coef = 0.0
+    cfg.experiment_name = (
+        "wf_tron1b_velocity_rep_ts_lin_vel_depth_predict_no_rough_latent64"
+    )
+    return cfg
+
+
 def wf_tron1b_rep_ts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
     """Create representation-level teacher-student runner configuration."""
     return WFTRON1BRslRlOnPolicyRunnerCfg(

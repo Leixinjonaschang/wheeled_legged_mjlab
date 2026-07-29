@@ -223,11 +223,15 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
 
     assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth" in tasks
     assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict" in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict-NoRough" in tasks
 
     cfg = wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg()
     agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth"))
     predict_agent = asdict(
         load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict")
+    )
+    no_rough_agent = asdict(
+        load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict-NoRough")
     )
     depth_group = cfg.observations[DEPTH_CAMERA_NAME]
     depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
@@ -258,6 +262,9 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         ":RepresentationVelocityPredictorTeacherStudentPPO"
     )
     assert predict_agent["algorithm"]["predictor_learning_rate"] == 1.0e-3
+    assert predict_agent["algorithm"]["roughness_loss_coef"] == 0.2
+    assert no_rough_agent["algorithm"]["roughness_loss_coef"] == 0.0
+    assert no_rough_agent["experiment_name"].endswith("depth_predict_no_rough_latent64")
     assert predict_agent["algorithm"]["latent_dynamics_loss_coef"] == 3.0
     assert predict_agent["algorithm"]["latent_dynamics_velocity_loss_coef"] == 1.0
     assert predict_agent["algorithm"]["latent_dynamics_use_ema_target"] is False
