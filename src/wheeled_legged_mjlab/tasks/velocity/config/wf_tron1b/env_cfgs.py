@@ -119,7 +119,7 @@ def make_scene(*, rough: bool, depth: bool = False) -> SceneCfg:
         terrain=terrain,
         entities={ROBOT_ENTITY: WF_TRON1B_ROBOT_CFG},
         sensors=make_sensors(rough=rough, depth=depth),
-        num_envs=1536,
+        num_envs=4096,
         extent=1.0,
     )
 
