@@ -251,7 +251,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
         experiment_name="wf_tron1b_velocity_rep_ts_lin_vel_depth_latent64",
         save_interval=200,
         num_steps_per_env=24,
-        max_iterations=50_000,
+        max_iterations=30_000,
         clip_actions=2.0,
         upload_model=False,
     )
