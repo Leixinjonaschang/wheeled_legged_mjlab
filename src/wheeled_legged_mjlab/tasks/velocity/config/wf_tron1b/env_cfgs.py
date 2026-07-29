@@ -882,7 +882,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
-                    weight=-2.0e-2,
+                    weight=-1.5e-2,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_joint_cfg,
@@ -934,7 +934,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 ),
                 "non_rough_flat_orientation": RewardTermCfg(
                     func=mdp.non_rough_flat_orientation,
-                    weight=-20.0,
+                    weight=-10.0,
                     params={
                         **roughness_params,
                         "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
