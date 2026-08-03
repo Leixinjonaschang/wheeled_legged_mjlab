@@ -8,6 +8,7 @@ import torch
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
+from mjlab.utils.lab_api.math import wrap_to_pi
 
 from .commands import UniformVelocityCommand
 
@@ -78,25 +79,42 @@ def illegal_contact(
   return torch.any(data.found, dim=-1)
 
 
-class velocity_direction_deviation:
-  """Terminate sustained sideways/backward deviation from commanded xy velocity."""
+class world_command_tracking_failure:
+  """Terminate sustained world-frame command tracking failures.
+
+  Linear progress and velocity direction are measured in the fixed world frame
+  of :class:`UniformVelocityCommand`. Heading is evaluated separately against
+  its heading target. A command-change grace period and full-flight exemption
+  prevent planned turns and airborne parkour phases from being cut short.
+  """
 
   def __init__(self, cfg: TerminationTermCfg, env: ManagerBasedRlEnv):
     del cfg  # Parameters are passed to __call__ by the manager.
-    self._bad_steps = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
-    self._command_age_steps = torch.zeros_like(self._bad_steps)
-    self._last_command_counter = torch.full_like(self._bad_steps, -1)
+    self._progress_bad_steps = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.long
+    )
+    self._direction_bad_steps = torch.zeros_like(self._progress_bad_steps)
+    self._heading_bad_steps = torch.zeros_like(self._progress_bad_steps)
+    self._command_age_steps = torch.zeros_like(self._progress_bad_steps)
+    self._last_command_counter = torch.full_like(self._progress_bad_steps, -1)
 
   def __call__(
     self,
     env: ManagerBasedRlEnv,
     command_name: str,
     activation_step: int = 120_000,
-    command_norm_threshold: float = 0.2,
-    actual_speed_threshold: float = 0.15,
-    angle_threshold_deg: float = 35.0,
-    duration_s: float = 0.15,
-    command_grace_s: float = 0.5,
+    command_norm_threshold: float = 0.35,
+    progress_deficit_threshold: float = 0.45,
+    min_progress_ratio: float = 0.55,
+    progress_duration_s: float = 0.4,
+    actual_speed_threshold: float = 0.2,
+    direction_angle_threshold_deg: float = 70.0,
+    direction_duration_s: float = 0.3,
+    heading_error_threshold_deg: float = 55.0,
+    heading_duration_s: float = 0.6,
+    heading_alignment_gate_deg: float = 45.0,
+    command_grace_s: float = 2.5,
+    contact_sensor_name: str = "wheels_ground_contact",
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
   ) -> torch.Tensor:
     command_term = env.command_manager.get_term(command_name)
@@ -116,39 +134,102 @@ class velocity_direction_deviation:
 
     command_norm = torch.norm(command_xy, dim=1)
     actual_speed = torch.norm(actual_xy, dim=1)
-    dot = torch.sum(command_xy * actual_xy, dim=1)
-    cos_angle = dot / (command_norm * actual_speed + 1.0e-6)
+    command_direction = command_xy / command_norm.unsqueeze(1).clamp_min(1.0e-6)
+    progress_velocity = torch.sum(actual_xy * command_direction, dim=1)
+    progress_deficit = torch.clamp(command_norm - progress_velocity, min=0.0)
+    progress_ratio = progress_velocity / command_norm.clamp_min(1.0e-6)
+    cos_angle = progress_velocity / (actual_speed + 1.0e-6)
     cos_angle = torch.clamp(cos_angle, -1.0, 1.0)
 
-    cos_angle_threshold = math.cos(math.radians(angle_threshold_deg))
-    duration_steps = max(1, math.ceil(duration_s / env.step_dt))
+    heading_error = torch.abs(
+      wrap_to_pi(command_term.heading_target - command_term.robot.data.heading_w)
+    )
+    contact_sensor: ContactSensor = env.scene[contact_sensor_name]
+    assert contact_sensor.data.found is not None
+    grounded = torch.any(contact_sensor.data.found, dim=-1)
+
+    progress_duration_steps = max(1, math.ceil(progress_duration_s / env.step_dt))
+    direction_duration_steps = max(1, math.ceil(direction_duration_s / env.step_dt))
+    heading_duration_steps = max(1, math.ceil(heading_duration_s / env.step_dt))
     command_grace_steps = max(0, math.ceil(command_grace_s / env.step_dt))
-    check_active = (
+    command_active = (
       (env.common_step_counter >= activation_step)
       & (command_norm > command_norm_threshold)
-      & (actual_speed > actual_speed_threshold)
       & (self._command_age_steps >= command_grace_steps)
     )
-    bad = check_active & (cos_angle < cos_angle_threshold)
-    self._bad_steps = torch.where(
-      bad,
-      self._bad_steps + 1,
-      torch.zeros_like(self._bad_steps),
+    heading_aligned = heading_error < math.radians(heading_alignment_gate_deg)
+    linear_check_active = command_active & grounded & heading_aligned
+    heading_check_active = (
+      command_active
+      & grounded
+      & command_term.is_heading_env
+      & ~command_term.is_standing_env
+    )
+
+    bad_progress = linear_check_active & (
+      (progress_deficit > progress_deficit_threshold)
+      | (progress_ratio < min_progress_ratio)
+    )
+    bad_direction = (
+      linear_check_active
+      & (actual_speed > actual_speed_threshold)
+      & (cos_angle < math.cos(math.radians(direction_angle_threshold_deg)))
+    )
+    bad_heading = heading_check_active & (
+      heading_error > math.radians(heading_error_threshold_deg)
+    )
+    self._progress_bad_steps = torch.where(
+      bad_progress,
+      self._progress_bad_steps + 1,
+      torch.zeros_like(self._progress_bad_steps),
+    )
+    self._direction_bad_steps = torch.where(
+      bad_direction,
+      self._direction_bad_steps + 1,
+      torch.zeros_like(self._direction_bad_steps),
+    )
+    self._heading_bad_steps = torch.where(
+      bad_heading,
+      self._heading_bad_steps + 1,
+      torch.zeros_like(self._heading_bad_steps),
     )
 
     log_data = env.extras.setdefault("log", {})
     angle = torch.acos(cos_angle) * (180.0 / math.pi)
-    log_data["Metrics/velocity_direction_deviation_angle_mean"] = angle.mean()
-    log_data["Metrics/velocity_direction_deviation_bad_frac"] = bad.float().mean()
-    log_data["Metrics/velocity_direction_deviation_active"] = torch.tensor(
+    log_data["Metrics/world_command_tracking_progress_deficit_mean"] = (
+      progress_deficit.mean()
+    )
+    log_data["Metrics/world_command_tracking_progress_bad_frac"] = (
+      bad_progress.float().mean()
+    )
+    log_data["Metrics/world_command_tracking_direction_angle_mean"] = angle.mean()
+    log_data["Metrics/world_command_tracking_direction_bad_frac"] = (
+      bad_direction.float().mean()
+    )
+    log_data["Metrics/world_command_tracking_heading_error_deg_mean"] = (
+      heading_error.mean() * (180.0 / math.pi)
+    )
+    log_data["Metrics/world_command_tracking_heading_bad_frac"] = (
+      bad_heading.float().mean()
+    )
+    log_data["Metrics/world_command_tracking_airborne_frac"] = (
+      (~grounded).float().mean()
+    )
+    log_data["Metrics/world_command_tracking_active"] = torch.tensor(
       float(env.common_step_counter >= activation_step),
       device=env.device,
     )
 
-    return self._bad_steps >= duration_steps
+    return (
+      (self._progress_bad_steps >= progress_duration_steps)
+      | (self._direction_bad_steps >= direction_duration_steps)
+      | (self._heading_bad_steps >= heading_duration_steps)
+    )
 
   def reset(self, env_ids: torch.Tensor) -> None:
-    self._bad_steps[env_ids] = 0
+    self._progress_bad_steps[env_ids] = 0
+    self._direction_bad_steps[env_ids] = 0
+    self._heading_bad_steps[env_ids] = 0
     self._command_age_steps[env_ids] = 0
     self._last_command_counter[env_ids] = -1
 

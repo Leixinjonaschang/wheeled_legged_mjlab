@@ -170,6 +170,7 @@ def build_depth_algorithm() -> tuple[RepresentationVelocityPredictorTeacherStude
         num_learning_epochs=2,
         num_mini_batches=2,
         learning_rate=1.0e-3,
+        predictor_learning_rate=1.0e-3,
         student_learning_rate=1.0e-3,
         schedule="fixed",
         desired_kl=0.01,
@@ -210,6 +211,29 @@ def fill_rollout(
 
 def any_param_changed(before: dict[str, torch.Tensor], module: torch.nn.Module) -> bool:
     return any(not torch.equal(before[name], param) for name, param in module.named_parameters())
+
+
+def optimizer_parameter_ids(optimizer: torch.optim.Optimizer) -> set[int]:
+    return {
+        id(parameter)
+        for parameter_group in optimizer.param_groups
+        for parameter in parameter_group["params"]
+    }
+
+
+def assert_nested_equal(expected, actual) -> None:
+    if isinstance(expected, torch.Tensor):
+        assert torch.equal(expected, actual)
+    elif isinstance(expected, dict):
+        assert expected.keys() == actual.keys()
+        for key in expected:
+            assert_nested_equal(expected[key], actual[key])
+    elif isinstance(expected, (list, tuple)):
+        assert len(expected) == len(actual)
+        for expected_item, actual_item in zip(expected, actual, strict=True):
+            assert_nested_equal(expected_item, actual_item)
+    else:
+        assert expected == actual
 
 
 @pytest.mark.parametrize(
@@ -265,7 +289,7 @@ def test_update_returns_student_losses_and_updates_parameter_groups() -> None:
 
     losses = alg.update()
 
-    assert {"value", "surrogate", "entropy", "student", "representation", "lin_vel"} <= set(losses)
+    assert {"value", "surrogate", "entropy", "student", "representation", "lin_vel", "roughness"} <= set(losses)
     assert any_param_changed(actor_before, alg.actor.actor_head)
     assert any_param_changed(critic_before, alg.actor.critic_head)
     assert any_param_changed(privileged_before, alg.actor.privileged_encoder)
@@ -304,7 +328,7 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
     fill_rollout(alg, obs)
     calls = {"flat": 0, "sequence": 0}
     original_compute_student_losses = alg.actor.compute_student_losses
-    original_compute_student_losses_sequence = alg.actor.compute_student_losses_sequence
+    original_compute_student_losses_sequence = alg.actor.compute_student_losses_sequence_with_roughness
 
     def counted_compute_student_losses(*args, **kwargs):
         calls["flat"] += 1
@@ -315,7 +339,7 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         return original_compute_student_losses_sequence(*args, **kwargs)
 
     alg.actor.compute_student_losses = counted_compute_student_losses  # type: ignore[method-assign]
-    alg.actor.compute_student_losses_sequence = counted_compute_student_losses_sequence  # type: ignore[method-assign]
+    alg.actor.compute_student_losses_sequence_with_roughness = counted_compute_student_losses_sequence  # type: ignore[method-assign]
 
     losses = alg.update()
 
@@ -323,22 +347,27 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "student",
         "representation",
         "lin_vel",
+        "roughness",
         "Grad/ppo_total_norm",
         "Grad/privileged_encoder_ppo_norm",
-        "Grad/ppo_clip_fraction",
-        "Grad/combined_total_norm",
-        "Grad/combined_clip_fraction",
+        "Grad/ppo_joint_total_norm",
+        "Grad/ppo_joint_clip_fraction",
+        "Grad/predictor_total_norm",
+        "Grad/predictor_clip_fraction",
         "Grad/dynamics_total_norm",
         "Grad/privileged_encoder_dynamics_norm",
         "Grad/privileged_encoder_dynamics_to_ppo_ratio",
         "Grad/privileged_encoder_ppo_dynamics_cosine",
-        "Grad/dynamics_clip_fraction",
+        "Learning/ppo_lr",
+        "Learning/predictor_lr",
         "Update/privileged_encoder_norm_joint",
         "Update/privileged_encoder_norm_ppo_only",
         "Update/policy_kl_joint",
         "Update/policy_kl_ppo_only",
         "Update/joint_step_fraction",
         "latent_dynamics_loss",
+        "latent_dynamics_representation_loss",
+        "latent_dynamics_velocity_loss",
         "latent_identity_loss",
         "latent_prediction_identity_ratio",
         "latent_shuffled_action_loss",
@@ -346,6 +375,10 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "latent_dynamics_valid_fraction",
         "latent_dynamics_loss_k1",
         "latent_dynamics_loss_k5",
+        "latent_dynamics_representation_loss_k1",
+        "latent_dynamics_representation_loss_k5",
+        "latent_dynamics_velocity_loss_k1",
+        "latent_dynamics_velocity_loss_k5",
         "latent_identity_loss_k1",
         "latent_identity_loss_k5",
         "latent_prediction_identity_ratio_k1",
@@ -361,9 +394,12 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         "latent_reversed_action_loss_k5",
         "latent_reversed_action_ratio_k5",
         "latent_rollout_loss",
+        "latent_rollout_representation_loss",
+        "latent_rollout_velocity_loss",
         "latent_rollout_valid_fraction",
         "latent_direct_rollout_cosine_k5",
         "latent_direct_rollout_mse_k5",
+        "latent_direct_rollout_velocity_loss_k5",
     } <= set(losses)
     assert losses["Grad/privileged_encoder_ppo_norm"] > 0.0
     assert losses["Grad/privileged_encoder_dynamics_norm"] > 0.0
@@ -371,9 +407,12 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
         losses["Grad/privileged_encoder_dynamics_norm"] / (losses["Grad/privileged_encoder_ppo_norm"] + 1.0e-8)
     )
     assert -1.0 <= losses["Grad/privileged_encoder_ppo_dynamics_cosine"] <= 1.0
-    assert 0.0 <= losses["Grad/ppo_clip_fraction"] <= 1.0
-    assert 0.0 <= losses["Grad/combined_clip_fraction"] <= 1.0
-    assert 0.0 <= losses["Grad/dynamics_clip_fraction"] <= 1.0
+    assert 0.0 <= losses["Grad/ppo_joint_clip_fraction"] <= 1.0
+    assert 0.0 <= losses["Grad/predictor_clip_fraction"] <= 1.0
+    assert losses["Grad/predictor_total_norm"] > 0.0
+    assert losses["Learning/ppo_lr"] == pytest.approx(alg.learning_rate)
+    assert losses["Learning/predictor_lr"] == pytest.approx(alg.predictor_learning_rate)
+    assert all("combined" not in name for name in losses)
     assert losses["Update/privileged_encoder_norm_joint"] > 0.0
     assert losses["Update/privileged_encoder_norm_ppo_only"] > 0.0
     assert losses["Update/policy_kl_joint"] >= 0.0
@@ -382,6 +421,8 @@ def test_depth_student_update_uses_sequence_chunks() -> None:
     for step in range(1, 6):
         assert {
             f"latent_rollout_loss_k{step}",
+            f"latent_rollout_representation_loss_k{step}",
+            f"latent_rollout_velocity_loss_k{step}",
             f"latent_rollout_identity_ratio_k{step}",
             f"latent_rollout_shuffled_action_loss_k{step}",
             f"latent_rollout_shuffled_action_ratio_k{step}",
@@ -398,7 +439,7 @@ def test_plain_depth_update_has_no_predictor_dependency() -> None:
     assert alg.storage.applied_actions is None
     losses = alg.update()
 
-    assert {"student", "representation", "lin_vel"} <= set(losses)
+    assert {"student", "representation", "lin_vel", "roughness"} <= set(losses)
     assert all("latent" not in name for name in losses)
     assert not hasattr(alg.actor, "latent_dynamics_predictors")
 
@@ -436,34 +477,160 @@ def test_depth_dynamics_updates_predictor_and_records_applied_actions() -> None:
         horizon: {name: param.detach().clone() for name, param in predictor.named_parameters()}
         for horizon, predictor in alg.actor.latent_dynamics_predictors.items()
     }
+    target_encoder_before = {
+        name: param.detach().clone()
+        for name, param in alg.actor.latent_dynamics_target_encoder.named_parameters()
+    }
     losses = alg.update()
 
     for horizon, predictor in alg.actor.latent_dynamics_predictors.items():
         assert any_param_changed(predictor_before[horizon], predictor)
+    assert not any_param_changed(target_encoder_before, alg.actor.latent_dynamics_target_encoder)
     assert losses["latent_dynamics_valid_fraction"] == pytest.approx(1.0)
     assert losses["latent_dynamics_valid_fraction_k1"] == pytest.approx(1.0)
     assert losses["latent_dynamics_valid_fraction_k5"] == pytest.approx(1.0)
     assert losses["latent_dynamics_loss"] == pytest.approx(
         (losses["latent_dynamics_loss_k1"] + 0.5 * losses["latent_dynamics_loss_k5"]) / 1.5
     )
+    assert losses["latent_dynamics_loss"] == pytest.approx(
+        losses["latent_dynamics_representation_loss"]
+        + alg.latent_dynamics_velocity_loss_coef * losses["latent_dynamics_velocity_loss"]
+    )
+
+
+def test_depth_optimizer_groups_and_dynamics_only_step_ownership() -> None:
+    alg, obs = build_depth_algorithm()
+    ppo_parameter_ids = {id(parameter) for parameter in alg.actor.ppo_parameters()}
+    predictor_parameter_ids = {id(parameter) for parameter in alg.actor.predictor_parameters()}
+    privileged_encoder_parameter_ids = {
+        id(parameter) for parameter in alg.actor.privileged_encoder.parameters()
+    }
+
+    assert optimizer_parameter_ids(alg.optimizer) == ppo_parameter_ids
+    assert optimizer_parameter_ids(alg.predictor_optimizer) == predictor_parameter_ids
+    assert ppo_parameter_ids.isdisjoint(predictor_parameter_ids)
+    assert privileged_encoder_parameter_ids <= optimizer_parameter_ids(alg.optimizer)
+    assert privileged_encoder_parameter_ids.isdisjoint(
+        optimizer_parameter_ids(alg.predictor_optimizer)
+    )
+
+    representation_loss, velocity_loss = alg.actor.compute_latent_dynamics_losses(
+        obs,
+        torch.randn(NUM_ENVS, NUM_ACTIONS),
+        make_depth_rep_obs(),
+        horizon=1,
+        detach_source=False,
+    )
+    alg.optimizer.zero_grad(set_to_none=True)
+    alg.predictor_optimizer.zero_grad(set_to_none=True)
+    (representation_loss + velocity_loss).backward()
+
+    assert any(
+        parameter.grad is not None and torch.count_nonzero(parameter.grad) > 0
+        for parameter in alg.actor.privileged_encoder.parameters()
+    )
+    assert any(
+        parameter.grad is not None and torch.count_nonzero(parameter.grad) > 0
+        for parameter in alg.actor.latent_dynamics_predictors["1"].parameters()
+    )
+    assert all(
+        parameter.grad is None
+        for parameter in alg.actor.latent_dynamics_target_encoder.parameters()
+    )
+
+    privileged_before = {
+        name: parameter.detach().clone()
+        for name, parameter in alg.actor.privileged_encoder.named_parameters()
+    }
+    predictor_before = {
+        name: parameter.detach().clone()
+        for name, parameter in alg.actor.latent_dynamics_predictors.named_parameters()
+    }
+    alg.optimizer.step()
+
+    assert any_param_changed(privileged_before, alg.actor.privileged_encoder)
+    assert not any_param_changed(predictor_before, alg.actor.latent_dynamics_predictors)
+
+    alg.predictor_optimizer.step()
+    assert any_param_changed(predictor_before, alg.actor.latent_dynamics_predictors)
+
+
+def test_predictor_gradient_magnitude_does_not_change_ppo_clipping_scale() -> None:
+    alg, _ = build_depth_algorithm()
+    ppo_parameters = list(alg.actor.ppo_parameters())
+    predictor_parameters = list(alg.actor.predictor_parameters())
+
+    def clip_with_predictor_scale(scale: float) -> tuple[float, list[torch.Tensor]]:
+        for parameter in ppo_parameters:
+            parameter.grad = torch.full_like(parameter, 2.0)
+        for parameter in predictor_parameters:
+            parameter.grad = torch.full_like(parameter, scale)
+        ppo_norm = torch.nn.utils.clip_grad_norm_(ppo_parameters, alg.max_grad_norm).item()
+        torch.nn.utils.clip_grad_norm_(predictor_parameters, alg.max_grad_norm)
+        return ppo_norm, [parameter.grad.detach().clone() for parameter in ppo_parameters]
+
+    baseline_norm, baseline_clipped_gradients = clip_with_predictor_scale(1.0)
+    amplified_norm, amplified_clipped_gradients = clip_with_predictor_scale(1.0e6)
+
+    assert amplified_norm == pytest.approx(baseline_norm)
+    for baseline_gradient, amplified_gradient in zip(
+        baseline_clipped_gradients,
+        amplified_clipped_gradients,
+        strict=True,
+    ):
+        assert torch.equal(baseline_gradient, amplified_gradient)
 
 
 def test_depth_dynamics_uses_joint_optimizer_steps_only() -> None:
     alg, obs = build_depth_algorithm()
     fill_rollout(alg, obs)
     optimizer_steps = 0
+    predictor_optimizer_steps = 0
     original_step = alg.optimizer.step
+    original_predictor_step = alg.predictor_optimizer.step
 
     def counted_step(*args, **kwargs):
         nonlocal optimizer_steps
         optimizer_steps += 1
         return original_step(*args, **kwargs)
 
+    def counted_predictor_step(*args, **kwargs):
+        nonlocal predictor_optimizer_steps
+        predictor_optimizer_steps += 1
+        return original_predictor_step(*args, **kwargs)
+
     alg.optimizer.step = counted_step
+    alg.predictor_optimizer.step = counted_predictor_step
 
     alg.update()
 
     assert optimizer_steps == alg.num_learning_epochs * alg.num_mini_batches
+    assert predictor_optimizer_steps == (
+        alg.num_latent_dynamics_epochs * alg.num_latent_dynamics_mini_batches
+    )
+
+
+def test_adaptive_kl_changes_only_ppo_learning_rate() -> None:
+    alg, obs = build_depth_algorithm()
+    alg.schedule = "adaptive"
+    alg.desired_kl = 1.0e-6
+    predictor_learning_rate = 2.0e-3
+    alg.predictor_learning_rate = predictor_learning_rate
+    for parameter_group in alg.predictor_optimizer.param_groups:
+        parameter_group["lr"] = predictor_learning_rate
+    fill_rollout(alg, obs)
+
+    def large_kl(*args, **kwargs) -> torch.Tensor:
+        return torch.tensor(1.0, device=alg.device)
+
+    alg.actor.get_kl_divergence = large_kl  # type: ignore[method-assign]
+    losses = alg.update()
+
+    assert alg.optimizer.param_groups[0]["lr"] < 1.0e-3
+    assert alg.predictor_optimizer.param_groups[0]["lr"] == pytest.approx(
+        predictor_learning_rate
+    )
+    assert losses["Learning/predictor_lr"] == pytest.approx(predictor_learning_rate)
 
 
 def test_joint_dynamics_respects_detached_source_encoder() -> None:
@@ -584,16 +751,23 @@ def test_latent_dynamics_sequence_generator_returns_all_ordered_steps() -> None:
     assert storage.latent_dynamics_sequence_valid_fraction == pytest.approx(5.0 / 6.0)
 
 
-def test_latent_rollout_keeps_recursive_gradient_chain() -> None:
+def test_latent_velocity_rollout_keeps_recursive_gradient_chain() -> None:
     model = make_depth_predictor_model(make_depth_rep_obs())
     latent = torch.randn(NUM_ENVS, model.latent_dim, requires_grad=True)
+    normalized_lin_vel = torch.randn(NUM_ENVS, LIN_VEL_DIM, requires_grad=True)
     applied_actions = torch.randn(5, NUM_ENVS, NUM_ACTIONS)
 
-    rollout = model.rollout_privileged_latent(latent, applied_actions)
-    rollout[-1, :, 0].sum().backward()
+    latent_rollout, velocity_rollout = model.rollout_privileged_state(
+        latent,
+        normalized_lin_vel,
+        applied_actions,
+    )
+    (latent_rollout[-1, :, 0].sum() + velocity_rollout[-1, :, 0].sum()).backward()
 
-    assert rollout.shape == (5, NUM_ENVS, model.latent_dim)
+    assert latent_rollout.shape == (5, NUM_ENVS, model.latent_dim)
+    assert velocity_rollout.shape == (5, NUM_ENVS, LIN_VEL_DIM)
     assert latent.grad is not None and torch.count_nonzero(latent.grad) > 0
+    assert normalized_lin_vel.grad is not None and torch.count_nonzero(normalized_lin_vel.grad) > 0
     assert any(
         param.grad is not None and torch.count_nonzero(param.grad) > 0
         for param in model.latent_dynamics_predictors["1"].parameters()
@@ -655,6 +829,54 @@ def test_multi_gpu_depth_update_reduces_latent_dynamics_gradients() -> None:
     alg.update()
 
     assert dynamics_reduced
+
+
+def test_predictor_optimizer_checkpoint_round_trip() -> None:
+    alg, obs = build_depth_algorithm()
+    alg.actor.act_teacher(obs, stochastic_output=True)
+    ppo_loss = (
+        alg.actor.evaluate_teacher(obs).square().mean()
+        - alg.actor.get_output_log_prob(torch.zeros(NUM_ENVS, NUM_ACTIONS)).mean()
+    )
+    representation_loss, velocity_loss = alg.actor.compute_latent_dynamics_losses(
+        obs,
+        torch.randn(NUM_ENVS, NUM_ACTIONS),
+        make_depth_rep_obs(),
+        horizon=1,
+        detach_source=False,
+    )
+    alg.optimizer.zero_grad(set_to_none=True)
+    alg.predictor_optimizer.zero_grad(set_to_none=True)
+    ppo_loss.backward()
+    (representation_loss + velocity_loss).backward()
+    alg.optimizer.step()
+    alg.predictor_optimizer.step()
+
+    saved = alg.save()
+    loaded_alg, _ = build_depth_algorithm()
+    loaded_alg.load(saved, load_cfg=None, strict=True)
+
+    assert "optimizer_state_dict" in saved
+    assert "predictor_optimizer_state_dict" in saved
+    assert "student_optimizer_state_dict" in saved
+    assert_nested_equal(saved["optimizer_state_dict"], loaded_alg.optimizer.state_dict())
+    assert_nested_equal(
+        saved["predictor_optimizer_state_dict"],
+        loaded_alg.predictor_optimizer.state_dict(),
+    )
+
+
+def test_legacy_joint_optimizer_checkpoint_warns_and_reinitializes_optimizers() -> None:
+    alg, _ = build_depth_algorithm()
+    legacy_checkpoint = alg.save()
+    del legacy_checkpoint["predictor_optimizer_state_dict"]
+
+    loaded_alg, _ = build_depth_algorithm()
+    with pytest.warns(UserWarning, match="legacy joint PPO/predictor optimizer"):
+        loaded_alg.load(legacy_checkpoint, load_cfg=None, strict=True)
+
+    assert not loaded_alg.optimizer.state
+    assert not loaded_alg.predictor_optimizer.state
 
 
 def test_save_includes_student_optimizer() -> None:

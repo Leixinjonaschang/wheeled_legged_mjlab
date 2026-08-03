@@ -17,7 +17,11 @@ from tensordict import TensorDict
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, list_tasks
 
 import wheeled_legged_mjlab  # noqa: F401
-from rsl_rl.models import RepresentationActorCritic, RepresentationVelocityActorCritic
+from rsl_rl.models import (
+    DepthRepresentationVelocityActorCritic,
+    RepresentationActorCritic,
+    RepresentationVelocityActorCritic,
+)
 from wheeled_legged_mjlab.rl.runner import get_wheeled_legged_metadata
 from wheeled_legged_mjlab.tasks.velocity import mdp
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
@@ -219,11 +223,15 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
 
     assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth" in tasks
     assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict" in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict-NoRough" in tasks
 
     cfg = wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg()
     agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth"))
     predict_agent = asdict(
         load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict")
+    )
+    no_rough_agent = asdict(
+        load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict-NoRough")
     )
     depth_group = cfg.observations[DEPTH_CAMERA_NAME]
     depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
@@ -235,8 +243,12 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "system_delay_range_s": DEPTH_SYSTEM_DELAY_RANGE_S,
         "left_crop": DEPTH_LEFT_CROP,
     }
+    assert cfg.observations["wheel_roughness"].terms["wheel_roughness"].func is mdp.wheel_roughness_gate
     assert agent["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
-    assert agent["algorithm"]["representation_chunk_length"] == 12
+    assert agent["actor"]["depth_gru_hidden_dim"] == 128
+    assert agent["actor"]["depth_conv_strides"] == (2, 2, 1)
+    assert agent["algorithm"]["representation_chunk_length"] == 24
+    assert agent["algorithm"]["roughness_loss_coef"] == 0.2
     assert all("latent_dynamics" not in name for name in agent["actor"])
     assert all("latent_dynamics" not in name for name in agent["algorithm"])
     assert all("latent_rollout" not in name for name in agent["algorithm"])
@@ -249,7 +261,14 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     assert predict_agent["algorithm"]["class_name"].endswith(
         ":RepresentationVelocityPredictorTeacherStudentPPO"
     )
-    assert predict_agent["algorithm"]["latent_dynamics_loss_coef"] == 100.0
+    assert predict_agent["algorithm"]["predictor_learning_rate"] == 1.0e-3
+    assert predict_agent["algorithm"]["roughness_loss_coef"] == 0.2
+    assert no_rough_agent["algorithm"]["roughness_loss_coef"] == 0.0
+    assert no_rough_agent["experiment_name"].endswith("depth_predict_no_rough_latent64")
+    assert predict_agent["algorithm"]["latent_dynamics_loss_coef"] == 3.0
+    assert predict_agent["algorithm"]["latent_dynamics_velocity_loss_coef"] == 1.0
+    assert predict_agent["algorithm"]["latent_dynamics_use_ema_target"] is False
+    assert predict_agent["algorithm"]["latent_dynamics_ema_decay"] == 0.99
     assert predict_agent["algorithm"]["latent_dynamics_horizons"] == (1, 5, 10)
     assert predict_agent["algorithm"]["latent_dynamics_horizon_weights"] == (
         1.0,
@@ -269,6 +288,7 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "critic": ("critic", "dynamics_context"),
         "privileged_encoder": ("privileged_encoder", "dynamics_context"),
         "depth_encoder": (DEPTH_CAMERA_NAME,),
+        "wheel_roughness": ("wheel_roughness",),
     }
     assert predict_agent["obs_groups"] == agent["obs_groups"]
 
@@ -474,6 +494,29 @@ def test_async_depth_buffer_updates_on_capture_clock(monkeypatch) -> None:
     assert torch.all(obs == 3.0)
     assert depth_calls == 3
     assert left_crops == [1, 1, 1]
+
+
+def test_wheel_roughness_preserves_left_right_order(monkeypatch) -> None:
+    height_samples = torch.zeros(1, 2, 25)
+    height_samples[0, 1, 0] = 0.20
+    env = SimpleNamespace(scene={"wheel_height_scan": object()})
+
+    monkeypatch.setattr(
+        observation_mdp,
+        "_terrain_clearance_samples",
+        lambda sensor: height_samples,
+    )
+    gate = observation_mdp.wheel_roughness_gate(
+        env,
+        wheel_radius=0.127,
+        gate_min=0.10,
+        gate_max=0.40,
+        grid_shape=(5, 5),
+    )
+
+    assert gate.shape == (1, 2)
+    assert gate[0, 0].item() == pytest.approx(0.0)
+    assert gate[0, 1].item() == pytest.approx(1.0)
 
 
 def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None:
@@ -707,6 +750,39 @@ def _make_velocity_representation_policy() -> RepresentationVelocityActorCritic:
     )
 
 
+def _make_depth_velocity_representation_policy() -> DepthRepresentationVelocityActorCritic:
+    obs = TensorDict(
+        {
+            "proprio_history": torch.randn(2, 5, 3),
+            "actor_command": torch.randn(2, 3),
+            "lin_vel_target": torch.randn(2, 3),
+            "critic": torch.randn(2, 5),
+            "privileged_encoder": torch.randn(2, 4),
+            "dynamics_context": torch.randn(2, 13),
+            "depth_camera": torch.randn(2, 1, 32, 24),
+        },
+        batch_size=[2],
+    )
+    return DepthRepresentationVelocityActorCritic(
+        obs,
+        {
+            "proprio_history": ["proprio_history"],
+            "actor_command": ["actor_command"],
+            "lin_vel_target": ["lin_vel_target"],
+            "critic": ["critic"],
+            "privileged_encoder": ["privileged_encoder", "dynamics_context"],
+            "depth_encoder": ["depth_camera"],
+        },
+        output_dim=2,
+        hidden_dims=[8],
+        encoder_hidden_dims=[8],
+        depth_feature_dim=8,
+        depth_gru_hidden_dim=8,
+        depth_channels=(4, 4),
+        distribution_cfg={"class_name": "GaussianDistribution"},
+    )
+
+
 def test_representation_metadata_describes_single_history_input() -> None:
     metadata = get_wheeled_legged_metadata(_make_dummy_metadata_env(), "local", _make_representation_policy())
 
@@ -737,6 +813,15 @@ def test_velocity_representation_metadata_describes_history_and_command_inputs()
     assert metadata["student_history_length"] == "5"
     assert metadata["student_history_flatten_dim"] == "false"
     assert metadata["student_history_order"] == "oldest_to_newest"
+
+
+def test_depth_velocity_representation_metadata_matches_onnx_io() -> None:
+    policy = _make_depth_velocity_representation_policy()
+    metadata = get_wheeled_legged_metadata(_make_velocity_metadata_env(), "local", policy)
+    onnx_policy = policy.as_onnx(verbose=False)
+
+    assert metadata["policy_input_names"] == onnx_policy.input_names
+    assert metadata["policy_output_names"] == onnx_policy.output_names
 
 
 def test_non_representation_metadata_stays_legacy_shape() -> None:

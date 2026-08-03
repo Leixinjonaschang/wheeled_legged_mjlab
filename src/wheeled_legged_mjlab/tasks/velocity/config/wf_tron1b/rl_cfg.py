@@ -48,8 +48,9 @@ class RslRlDepthRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelC
     """Config for depth velocity representation teacher-student actor-critic."""
 
     depth_feature_dim: int = 64
-    depth_gru_hidden_dim: int = 64
+    depth_gru_hidden_dim: int = 128
     depth_channels: Tuple[int, ...] = (16, 32, 32)
+    depth_conv_strides: Tuple[int, ...] = (2, 2, 1)
     class_name: str = "DepthRepresentationVelocityActorCritic"
 
 
@@ -57,7 +58,7 @@ class RslRlDepthRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelC
 class RslRlDepthRepresentationVelocityPredictorModelCfg(
     RslRlDepthRepresentationVelocityModelCfg
 ):
-    """Config for the depth model with latent dynamics prediction."""
+    """Config for the depth model with latent-and-velocity dynamics prediction."""
 
     latent_dynamics_hidden_dims: Tuple[int, ...] = (128, 256, 256, 128)
     latent_dynamics_horizons: Tuple[int, ...] = (1, 5)
@@ -75,9 +76,10 @@ class RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithm
     num_student_substeps: int = 1
     num_representation_epochs: int | None = None
     num_representation_mini_batches: int | None = None
-    representation_chunk_length: int = 12
+    representation_chunk_length: int = 24
     representation_loss_coef: float = 1.0
     lin_vel_loss_coef: float = 1.0
+    roughness_loss_coef: float = 0.2
     class_name: str = "RepresentationVelocityTeacherStudentPPO"
 
 
@@ -85,9 +87,13 @@ class RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg(RslRlPpoAlgorithm
 class RslRlRepresentationVelocityPredictorTeacherStudentPpoAlgorithmCfg(
     RslRlRepresentationVelocityTeacherStudentPpoAlgorithmCfg
 ):
-    """Config for velocity representation PPO with latent dynamics prediction."""
+    """Config for velocity representation PPO with latent-and-velocity dynamics prediction."""
 
-    latent_dynamics_loss_coef: float = 50.0
+    predictor_learning_rate: float = 1.0e-3
+    latent_dynamics_loss_coef: float = 3.0
+    latent_dynamics_velocity_loss_coef: float = 1.0
+    latent_dynamics_use_ema_target: bool = False
+    latent_dynamics_ema_decay: float = 0.99
     latent_dynamics_horizons: Tuple[int, ...] = (1, 5)
     latent_dynamics_horizon_weights: Tuple[float, ...] = (1.0, 0.5)
     latent_dynamics_detach_source: bool = False
@@ -203,8 +209,9 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             latent_dim=64,
             normalize_latent=True,
             depth_feature_dim=64,
-            depth_gru_hidden_dim=64,
+            depth_gru_hidden_dim=128,
             depth_channels=(16, 32, 32),
+            depth_conv_strides=(2, 2, 1),
             distribution_cfg={
                 "class_name": "GaussianDistribution",
                 "init_std": 1.0,
@@ -228,7 +235,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             num_student_substeps=1,
             num_representation_epochs=1,
             num_representation_mini_batches=4,
-            representation_chunk_length=12,
+            representation_chunk_length=24,
             representation_loss_coef=1.0,
             lin_vel_loss_coef=1.0,
         ),
@@ -239,6 +246,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
             "critic": ("critic", "dynamics_context"),
             "privileged_encoder": ("privileged_encoder", "dynamics_context"),
             "depth_encoder": ("depth_camera",),
+            "wheel_roughness": ("wheel_roughness",),
         },
         experiment_name="wf_tron1b_velocity_rep_ts_lin_vel_depth_latent64",
         save_interval=200,
@@ -250,7 +258,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCf
 
 
 def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
-    """Create the depth runner with multi-horizon latent dynamics prediction."""
+    """Create the depth runner with multi-horizon latent-and-velocity dynamics prediction."""
     cfg = wf_tron1b_rep_ts_lin_vel_depth_runner_cfg()
     cfg.actor = RslRlDepthRepresentationVelocityPredictorModelCfg(
         hidden_dims=(512, 256, 256, 128),
@@ -260,8 +268,9 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
         latent_dim=64,
         normalize_latent=True,
         depth_feature_dim=64,
-        depth_gru_hidden_dim=64,
+        depth_gru_hidden_dim=128,
         depth_channels=(16, 32, 32),
+        depth_conv_strides=(2, 2, 1),
         latent_dynamics_hidden_dims=(128, 256, 256, 128),
         latent_dynamics_horizons=(1, 5, 10),
         distribution_cfg={
@@ -278,6 +287,7 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-3,
+        predictor_learning_rate=1.0e-3,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
@@ -287,10 +297,13 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
         num_student_substeps=1,
         num_representation_epochs=1,
         num_representation_mini_batches=4,
-        representation_chunk_length=12,
+        representation_chunk_length=24,
         representation_loss_coef=1.0,
         lin_vel_loss_coef=1.0,
-        latent_dynamics_loss_coef=100.0,
+        latent_dynamics_loss_coef=3.0,
+        latent_dynamics_velocity_loss_coef=1.0,
+        latent_dynamics_use_ema_target=False,
+        latent_dynamics_ema_decay=0.99,
         latent_dynamics_horizons=(1, 5, 10),
         latent_dynamics_horizon_weights=(1.0, 0.75, 0.5),
         latent_dynamics_detach_source=False,
@@ -300,6 +313,18 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
         num_latent_dynamics_mini_batches=4,
     )
     cfg.experiment_name = "wf_tron1b_velocity_rep_ts_lin_vel_depth_predict_latent64"
+    return cfg
+
+
+def wf_tron1b_rep_ts_lin_vel_depth_predict_no_rough_runner_cfg() -> (
+    WFTRON1BRslRlOnPolicyRunnerCfg
+):
+    """Create the depth predictor ablation without wheel roughness supervision."""
+    cfg = wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg()
+    cfg.algorithm.roughness_loss_coef = 0.0
+    cfg.experiment_name = (
+        "wf_tron1b_velocity_rep_ts_lin_vel_depth_predict_no_rough_latent64"
+    )
     return cfg
 
 

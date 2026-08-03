@@ -39,9 +39,10 @@ class RepresentationVelocityTeacherStudentPPO:
         num_student_substeps: int = 1,
         num_representation_epochs: int | None = None,
         num_representation_mini_batches: int | None = None,
-        representation_chunk_length: int = 12,
+        representation_chunk_length: int = 24,
         representation_loss_coef: float = 1.0,
         lin_vel_loss_coef: float = 1.0,
+        roughness_loss_coef: float = 0.2,
         max_grad_norm: float = 1.0,
         optimizer: str = "adam",
         use_clipped_value_loss: bool = True,
@@ -107,6 +108,7 @@ class RepresentationVelocityTeacherStudentPPO:
         self.representation_chunk_length = representation_chunk_length
         self.representation_loss_coef = representation_loss_coef
         self.lin_vel_loss_coef = lin_vel_loss_coef
+        self.roughness_loss_coef = roughness_loss_coef
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
         self.rnd = None
 
@@ -232,6 +234,7 @@ class RepresentationVelocityTeacherStudentPPO:
         mean_student_loss = 0.0
         mean_representation_loss = 0.0
         mean_lin_vel_loss = 0.0
+        mean_roughness_loss = 0.0
         student_updates = 0
         if hasattr(self.actor, "compute_student_losses_sequence"):
             generator = self.storage.representation_chunk_generator(
@@ -241,14 +244,25 @@ class RepresentationVelocityTeacherStudentPPO:
             )
             for batch in generator:
                 for _ in range(self.num_student_substeps):
-                    _, representation_loss, lin_vel_loss = self.actor.compute_student_losses_sequence(
-                        batch.observations,
-                        batch.dones,
-                        hidden_state=batch.hidden_states[0],
-                    )
+                    if hasattr(self.actor, "compute_student_losses_sequence_with_roughness"):
+                        _, representation_loss, lin_vel_loss, roughness_loss = (
+                            self.actor.compute_student_losses_sequence_with_roughness(
+                                batch.observations,
+                                batch.dones,
+                                hidden_state=batch.hidden_states[0],
+                            )
+                        )
+                    else:
+                        _, representation_loss, lin_vel_loss = self.actor.compute_student_losses_sequence(
+                            batch.observations,
+                            batch.dones,
+                            hidden_state=batch.hidden_states[0],
+                        )
+                        roughness_loss = representation_loss.new_zeros(())
                     student_loss = (
                         self.representation_loss_coef * representation_loss
                         + self.lin_vel_loss_coef * lin_vel_loss
+                        + self.roughness_loss_coef * roughness_loss
                     )
                     self.student_optimizer.zero_grad()
                     student_loss.backward()
@@ -260,15 +274,23 @@ class RepresentationVelocityTeacherStudentPPO:
                     mean_student_loss += student_loss.item()
                     mean_representation_loss += representation_loss.item()
                     mean_lin_vel_loss += lin_vel_loss.item()
+                    mean_roughness_loss += roughness_loss.item()
                     student_updates += 1
         else:
             generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
             for batch in generator:
                 for _ in range(self.num_student_substeps):
-                    _, representation_loss, lin_vel_loss = self.actor.compute_student_losses(batch.observations)
+                    if hasattr(self.actor, "compute_student_losses_with_roughness"):
+                        _, representation_loss, lin_vel_loss, roughness_loss = self.actor.compute_student_losses_with_roughness(
+                            batch.observations
+                        )
+                    else:
+                        _, representation_loss, lin_vel_loss = self.actor.compute_student_losses(batch.observations)
+                        roughness_loss = representation_loss.new_zeros(())
                     student_loss = (
                         self.representation_loss_coef * representation_loss
                         + self.lin_vel_loss_coef * lin_vel_loss
+                        + self.roughness_loss_coef * roughness_loss
                     )
                     self.student_optimizer.zero_grad()
                     student_loss.backward()
@@ -280,6 +302,7 @@ class RepresentationVelocityTeacherStudentPPO:
                     mean_student_loss += student_loss.item()
                     mean_representation_loss += representation_loss.item()
                     mean_lin_vel_loss += lin_vel_loss.item()
+                    mean_roughness_loss += roughness_loss.item()
                     student_updates += 1
 
         num_ppo_updates = self.num_learning_epochs * self.num_mini_batches
@@ -290,6 +313,7 @@ class RepresentationVelocityTeacherStudentPPO:
             "student": mean_student_loss / student_updates,
             "representation": mean_representation_loss / student_updates,
             "lin_vel": mean_lin_vel_loss / student_updates,
+            "roughness": mean_roughness_loss / student_updates,
         }
         self.storage.clear()
         return loss_dict

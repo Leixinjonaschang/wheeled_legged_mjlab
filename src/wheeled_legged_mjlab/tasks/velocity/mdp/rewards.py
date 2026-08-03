@@ -305,58 +305,6 @@ def track_heading(
   return reward * active.float()
 
 
-class heading_progress:
-  """Reward reductions in absolute heading error between consecutive steps."""
-
-  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-    del cfg  # Parameters are passed to __call__ by the manager.
-    self._prev_abs_heading_error = torch.zeros(
-      env.num_envs, device=env.device, dtype=torch.float32
-    )
-    self._has_prev = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
-    self._last_command_counter = torch.full(
-      (env.num_envs,), -1, device=env.device, dtype=torch.long
-    )
-
-  def __call__(
-    self,
-    env: ManagerBasedRlEnv,
-    command_name: str,
-    max_progress: float = 0.05,
-  ) -> torch.Tensor:
-    command_term = env.command_manager.get_term(command_name)
-    assert isinstance(command_term, UniformVelocityCommand)
-    assert command_term.cfg.heading_command
-
-    heading_error = wrap_to_pi(
-      command_term.heading_target - command_term.robot.data.heading_w
-    )
-    abs_heading_error = torch.abs(heading_error)
-
-    command_changed = command_term.command_counter != self._last_command_counter
-    active = command_term.is_heading_env & ~command_term.is_standing_env
-    valid = self._has_prev & ~command_changed & active
-
-    progress_scale = max(max_progress, 1.0e-6)
-    progress = self._prev_abs_heading_error - abs_heading_error
-    progress_reward = torch.clamp(progress, min=0.0, max=progress_scale)
-    progress_reward = progress_reward / progress_scale
-    progress_reward = progress_reward * valid.float()
-
-    log_data = env.extras.setdefault("log", {})
-    log_data["Metrics/heading_progress_mean"] = progress_reward.mean()
-
-    self._prev_abs_heading_error = abs_heading_error.detach()
-    self._has_prev[:] = True
-    self._last_command_counter = command_term.command_counter.clone()
-    return progress_reward
-
-  def reset(self, env_ids: torch.Tensor) -> None:
-    self._prev_abs_heading_error[env_ids] = 0.0
-    self._has_prev[env_ids] = False
-    self._last_command_counter[env_ids] = -1
-
-
 def stand_still(
   env: ManagerBasedRlEnv,
   command_name: str,
@@ -531,13 +479,16 @@ def base_height_l2(
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
   sensor_name: str | None = None,
   terrain_sample: str = "mean",
+  terrain_quantile: float = 0.5,
   deadband: float = 0.0,
 ) -> torch.Tensor:
   """Penalize base height error outside a symmetric deadband using an L2 kernel.
 
   When a terrain raycast sensor is provided, height is measured relative to the
-  local terrain under the scan instead of world z. Errors inside the deadband
-  produce zero cost; only the excess error is penalized.
+  local terrain under the scan instead of world z. ``terrain_sample="quantile"``
+  uses a height quantile over the scan and is robust to sparse deep holes such
+  as stepping-stone pits. Errors inside the deadband produce zero cost; only
+  the excess error is penalized.
   """
   asset: Entity = env.scene[asset_cfg.name]
   base_z = asset.data.root_link_pos_w[:, 2]
@@ -565,6 +516,14 @@ def base_height_l2(
       hit_count = valid_hit.float().sum(dim=1)
       ground_z = hit_z.sum(dim=1) / torch.clamp(hit_count, min=1.0)
       ground_z = torch.where(hit_count > 0, ground_z, torch.zeros_like(ground_z))
+    elif terrain_sample == "quantile":
+      if not 0.0 <= terrain_quantile <= 1.0:
+        raise ValueError(
+          f"terrain_quantile must be in [0, 1], got {terrain_quantile}"
+        )
+      valid_heights = torch.where(valid_hit, hit_z, torch.full_like(hit_z, torch.nan))
+      ground_z = torch.nanquantile(valid_heights, terrain_quantile, dim=1)
+      ground_z = torch.nan_to_num(ground_z, nan=0.0)
     else:
       raise ValueError(f"Unsupported terrain_sample: {terrain_sample}")
     base_height = base_z - ground_z
@@ -681,6 +640,44 @@ def non_rough_wheel_x_alignment(
   )
   non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
   return non_rough_active * wheel_x_alignment(env, asset_cfg)
+
+
+def non_rough_flat_orientation(
+  env: ManagerBasedRlEnv,
+  roughness_sensor_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  roll_weight: float = 1.0,
+  pitch_weight: float = 1.0,
+  wheel_radius: float = 0.127,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
+  grid_shape: tuple[int, int] | None = None,
+) -> torch.Tensor:
+  """Penalize static base roll/pitch tilt only when terrain is not rough."""
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
+  )
+  non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
+  asset: Entity = env.scene[asset_cfg.name]
+  tilt_xy_sq = torch.square(asset.data.projected_gravity_b[:, :2])
+  pitch_tilt_sq, roll_tilt_sq = tilt_xy_sq.unbind(dim=1)
+  return non_rough_active * (
+    roll_weight * roll_tilt_sq + pitch_weight * pitch_tilt_sq
+  )
 
 
 def wheel_distance(
@@ -814,15 +811,13 @@ def standing_forward_wheel_air_time(
   grid_shape: tuple[int, int] | None = None,
   max_time: float = 0.5,
   air_time_offset: float = 0.05,
-  standing_scale: float = 2.5,
-  forward_scale: float = 1.0,
   lin_threshold: float = 0.05,
   ang_threshold: float = 0.05,
   forward_speed_threshold: float = 0.05,
   forward_lateral_threshold: float = 0.05,
   forward_ang_threshold: float = 0.05,
 ) -> torch.Tensor:
-  """Penalize standing air time globally and forward air time only on non-rough terrain."""
+  """Penalize standing air time globally and forward air time on non-rough terrain."""
   stats = _terrain_roughness_from_sensor(
     env,
     roughness_sensor_name,
@@ -869,8 +864,8 @@ def standing_forward_wheel_air_time(
       & ~standing
     )
 
-  standing_cost = air_time * standing.float() * standing_scale
-  forward_cost = air_time * forward.float() * forward_scale * non_rough_active
+  standing_cost = air_time * standing.float()
+  forward_cost = air_time * forward.float() * non_rough_active
   cost = standing_cost + forward_cost
 
   log_data = env.extras.setdefault("log", {})

@@ -31,7 +31,12 @@ from wheeled_legged_mjlab.tasks.velocity.mdp.curriculums import (
     fell_over_limit_angle,
     terrain_levels_vel,
 )
-from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import variable_posture
+from wheeled_legged_mjlab.tasks.velocity.mdp import rewards as reward_terms
+from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import (
+    base_height_l2,
+    variable_posture,
+)
+from wheeled_legged_mjlab.tasks.velocity.mdp.terminations import out_of_terrain_bounds
 
 
 @dataclass
@@ -116,6 +121,13 @@ EXPECTED_TERRAIN_COLUMNS = (
     "flat__5",
     "pyramid_stair",
     "flat__6",
+    "random_stairs",
+    "flat__7",
+    "random_spread",
+    "flat__8",
+    "stepping_stones",
+    "flat__9",
+    "tilted_grid",
 )
 
 
@@ -133,14 +145,52 @@ def test_interleaved_terrain_columns_preserve_logical_proportions() -> None:
 
     assert math.isclose(
         sum(cfg.proportion for name, cfg in sub_terrains.items() if name.startswith("flat__")),
-        0.3,
+        0.28,
     )
-    assert math.isclose(sub_terrains["discrete_obstacles"].proportion, 0.2)
-    assert math.isclose(sub_terrains["random_rough"].proportion, 0.2)
-    assert math.isclose(sub_terrains["hf_pyramid_slope"].proportion, 0.1)
-    assert math.isclose(sub_terrains["hf_pyramid_slope_inv"].proportion, 0.1)
-    assert math.isclose(sub_terrains["pyramid_stair_inv"].proportion, 0.2)
-    assert math.isclose(sub_terrains["pyramid_stair"].proportion, 0.1)
+    assert math.isclose(sum(cfg.proportion for cfg in sub_terrains.values()), 1.0)
+    for name in ("discrete_obstacles", "random_rough"):
+        assert math.isclose(sub_terrains[name].proportion, 0.10)
+    for name in (
+        "hf_pyramid_slope",
+        "hf_pyramid_slope_inv",
+        "pyramid_stair",
+        "random_stairs",
+        "tilted_grid",
+        "random_spread",
+    ):
+        assert math.isclose(sub_terrains[name].proportion, 0.05)
+    assert math.isclose(sub_terrains["pyramid_stair_inv"].proportion, 0.15)
+    assert math.isclose(sub_terrains["stepping_stones"].proportion, 0.07)
+
+    stepping_stones = sub_terrains["stepping_stones"]
+    assert stepping_stones.stone_distance_range == (0.0, 0.15)
+    assert stepping_stones.stone_size_range == (0.50, 0.75)
+    assert stepping_stones.stone_height == 0.0
+    assert math.isclose(
+        (stepping_stones.stone_distance_range[1] - stepping_stones.stone_distance_range[0])
+        / TERRAINS_CFG.num_rows,
+        0.003,
+    )
+    assert math.isclose(
+        (stepping_stones.stone_size_range[1] - stepping_stones.stone_size_range[0])
+        / TERRAINS_CFG.num_rows,
+        0.005,
+    )
+    assert stepping_stones.stone_height_variation / TERRAINS_CFG.num_rows <= 0.0015
+    assert stepping_stones.displacement_range / TERRAINS_CFG.num_rows <= 0.0015
+
+    random_stairs = sub_terrains["random_stairs"]
+    assert random_stairs.step_width == 0.35
+    assert random_stairs.step_height_range == (0.03, 0.20)
+
+    tilted_grid = sub_terrains["tilted_grid"]
+    assert tilted_grid.grid_width == 0.6
+    assert tilted_grid.tilt_range_deg == 12.0
+    assert tilted_grid.height_range == 0.12
+
+    random_spread = sub_terrains["random_spread"]
+    assert random_spread.num_boxes == 64
+    assert random_spread.box_height_range == (0.03, 0.22)
 
 
 def test_play_config_uses_all_interleaved_terrain_columns() -> None:
@@ -233,6 +283,44 @@ def test_wf_tron1b_pose_target_matches_base_height_target() -> None:
     )
 
 
+def test_base_height_quantile_ignores_sparse_stepping_stone_pit_samples(
+    monkeypatch,
+) -> None:
+    class DummyRayCastSensor:
+        def __init__(self) -> None:
+            self.data = SimpleNamespace(
+                distances=torch.ones(1, 4),
+                hit_pos_w=torch.tensor(
+                    [[[[0.0, 0.0, -0.8], [0.0, 0.0, -0.8],
+                       [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]]]
+                ),
+            )
+
+    monkeypatch.setattr(reward_terms, "RayCastSensor", DummyRayCastSensor)
+    env = SimpleNamespace(
+        scene={
+            "robot": SimpleNamespace(
+                data=SimpleNamespace(root_link_pos_w=torch.tensor([[0.0, 0.0, 0.82]]))
+            ),
+            "terrain_scan": DummyRayCastSensor(),
+        }
+    )
+
+    mean_cost = base_height_l2(
+        env, target_height=0.82, sensor_name="terrain_scan", terrain_sample="mean"
+    )
+    support_cost = base_height_l2(
+        env,
+        target_height=0.82,
+        sensor_name="terrain_scan",
+        terrain_sample="quantile",
+        terrain_quantile=0.75,
+    )
+
+    assert mean_cost.item() > 0.1
+    assert torch.allclose(support_cost, torch.zeros(1))
+
+
 class DummyPostureAsset:
     def __init__(self) -> None:
         self.data = SimpleNamespace(
@@ -281,6 +369,62 @@ def test_variable_posture_uses_configured_target_pose() -> None:
     )
 
     assert torch.allclose(reward, torch.ones(1))
+
+
+def test_non_rough_flat_orientation_applies_only_on_non_rough_terrain(
+    monkeypatch,
+) -> None:
+    asset_cfg = SimpleNamespace(name="robot")
+    env = SimpleNamespace(
+        common_step_counter=0,
+        extras={},
+        scene={
+            "robot": SimpleNamespace(
+                data=SimpleNamespace(
+                    projected_gravity_b=torch.tensor([[0.1, 0.2, -0.97]])
+                )
+            )
+        },
+    )
+
+    monkeypatch.setattr(
+        reward_terms,
+        "_terrain_roughness_from_sensor",
+        lambda *args, **kwargs: SimpleNamespace(gate=torch.tensor([0.0])),
+    )
+    flat_cost = reward_terms.non_rough_flat_orientation(
+        env,
+        roughness_sensor_name="terrain_scan",
+        asset_cfg=asset_cfg,
+        roll_weight=2.0,
+        pitch_weight=1.0,
+    )
+    assert torch.allclose(flat_cost, torch.tensor([0.09]))
+
+    monkeypatch.setattr(
+        reward_terms,
+        "_terrain_roughness_from_sensor",
+        lambda *args, **kwargs: SimpleNamespace(gate=torch.tensor([0.3])),
+    )
+    rough_cost = reward_terms.non_rough_flat_orientation(
+        env,
+        roughness_sensor_name="terrain_scan",
+        asset_cfg=asset_cfg,
+        roll_weight=2.0,
+        pitch_weight=1.0,
+    )
+    assert torch.allclose(rough_cost, torch.zeros(1))
+
+
+def test_non_rough_flat_orientation_replaces_base_ang_vel_reward() -> None:
+    cfg = wf_tron1b_rough_env_cfg()
+
+    assert "non_rough_base_ang_vel_xy" not in cfg.rewards
+    term = cfg.rewards["non_rough_flat_orientation"]
+    assert term.func is reward_terms.non_rough_flat_orientation
+    assert math.isclose(term.weight, -20.0)
+    assert term.params["roll_weight"] == 2.0
+    assert term.params["pitch_weight"] == 1.0
 
 
 class DummyTerrain:

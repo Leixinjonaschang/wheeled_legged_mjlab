@@ -34,8 +34,9 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         normalize_latent: bool = True,
         distribution_cfg: dict | None = None,
         depth_feature_dim: int = 64,
-        depth_gru_hidden_dim: int = 64,
+        depth_gru_hidden_dim: int = 128,
         depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
+        depth_conv_strides: tuple[int, ...] | list[int] | None = None,
     ) -> None:
         super().__init__(
             obs,
@@ -50,15 +51,20 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             distribution_cfg=distribution_cfg,
         )
         self.depth_obs_group, self.depth_shape = self._get_depth_group_and_shape(obs, obs_groups, "depth_encoder")
+        self.wheel_roughness_group = self._get_optional_wheel_roughness_group(obs, obs_groups)
         self.depth_feature_dim = depth_feature_dim
+        self.depth_gru_input_dim = depth_feature_dim + self.current_proprio_dim
         self.depth_gru_hidden_dim = depth_gru_hidden_dim
+        if depth_conv_strides is None:
+            depth_conv_strides = (*((2,) * (len(depth_channels) - 1)), 1)
         self.depth_encoder = _DepthCNN(
             input_shape=self.depth_shape,
             channels=depth_channels,
             output_dim=depth_feature_dim,
             activation=activation,
+            strides=depth_conv_strides,
         )
-        self.depth_gru = nn.GRUCell(depth_feature_dim, depth_gru_hidden_dim)
+        self.depth_gru = nn.GRUCell(self.depth_gru_input_dim, depth_gru_hidden_dim)
 
         encoder_hidden_dims = hidden_dims if encoder_hidden_dims is None else encoder_hidden_dims
         encoder_feature_dim = self._encoder_feature_dim(encoder_hidden_dims)
@@ -69,6 +75,8 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             encoder_hidden_dims,
             activation,
         )
+        self.wheel_roughness_dim = 2
+        self.wheel_roughness_head = nn.Linear(encoder_feature_dim, self.wheel_roughness_dim)
         self._student_hidden_state: torch.Tensor | None = None
 
     def forward(
@@ -111,12 +119,24 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
 
     def compute_student_losses(self, obs: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return combined student, latent-alignment, and velocity-regression losses."""
-        proprio_latent, predicted_lin_vel, _ = self._get_student_outputs(obs)
+        total_loss, representation_loss, lin_vel_loss, _ = self.compute_student_losses_with_roughness(obs)
+        return total_loss, representation_loss, lin_vel_loss
+
+    def compute_student_losses_with_roughness(
+        self, obs: TensorDict
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return student losses, including wheel roughness when configured."""
+        proprio_latent, predicted_lin_vel, predicted_wheel_roughness, _ = self._get_student_outputs_with_roughness(obs)
         with torch.no_grad():
             privileged_latent = self.get_privileged_latent(obs)
-        representation_loss = F.mse_loss(proprio_latent, privileged_latent)
+        representation_loss = (1.0 - F.cosine_similarity(proprio_latent, privileged_latent, dim=-1)).mean()
         lin_vel_loss = F.mse_loss(predicted_lin_vel, self.get_lin_vel_target(obs))
-        return representation_loss + lin_vel_loss, representation_loss, lin_vel_loss
+        roughness_loss = (
+            F.smooth_l1_loss(predicted_wheel_roughness, self.get_wheel_roughness(obs))
+            if self.wheel_roughness_group is not None
+            else representation_loss.new_zeros(())
+        )
+        return representation_loss + lin_vel_loss + roughness_loss, representation_loss, lin_vel_loss, roughness_loss
 
     def compute_student_losses_sequence(
         self,
@@ -125,6 +145,20 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         hidden_state: HiddenState = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute student losses over a continuous rollout chunk."""
+        total_loss, representation_loss, lin_vel_loss, _ = self.compute_student_losses_sequence_with_roughness(
+            obs,
+            dones,
+            hidden_state,
+        )
+        return total_loss, representation_loss, lin_vel_loss
+
+    def compute_student_losses_sequence_with_roughness(
+        self,
+        obs: TensorDict,
+        dones: torch.Tensor,
+        hidden_state: HiddenState = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute all student losses over a recurrent rollout chunk."""
         if len(obs.batch_size) != 2:
             raise ValueError(f"Expected sequence observations with [time, batch], got {obs.batch_size}")
         if hidden_state is not None and not isinstance(hidden_state, torch.Tensor):
@@ -135,11 +169,22 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         proprio_obs = self.proprio_history_obs_normalizer(
             self._flatten_proprio_history(proprio_history)
         )
-        depth_latent, _ = self._encode_depth_sequence(obs[self.depth_obs_group], dones, hidden_state)
+        current_proprio = self.current_proprio_obs_normalizer(
+            proprio_history[:, :, -1, :].flatten(0, 1)
+        ).view(time_steps, batch_size, self.current_proprio_dim)
+        depth_latent, _ = self._encode_depth_sequence(
+            obs[self.depth_obs_group],
+            current_proprio,
+            dones,
+            hidden_state,
+        )
         student_input = torch.cat((proprio_obs, depth_latent), dim=-1)
         features = self.proprio_encoder(student_input.flatten(0, 1))
         latent = self.student_latent_head(features).view(time_steps, batch_size, self.latent_dim)
         predicted_lin_vel = self.lin_vel_head(features).view(time_steps, batch_size, self.lin_vel_dim)
+        predicted_wheel_roughness = torch.sigmoid(
+            self.wheel_roughness_head(features)
+        ).view(time_steps, batch_size, self.wheel_roughness_dim)
         latent = self._normalize_latent(latent)
 
         privileged_obs = self.privileged_obs_normalizer(
@@ -149,14 +194,20 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             privileged_latent = self._normalize_latent(
                 self.privileged_encoder(privileged_obs.flatten(0, 1))
             ).view(time_steps, batch_size, self.latent_dim)
-        representation_loss = F.mse_loss(latent, privileged_latent)
+        representation_loss = (1.0 - F.cosine_similarity(latent, privileged_latent, dim=-1)).mean()
         lin_vel_loss = F.mse_loss(predicted_lin_vel, self.get_lin_vel_target(obs))
-        return representation_loss + lin_vel_loss, representation_loss, lin_vel_loss
+        roughness_loss = (
+            F.smooth_l1_loss(predicted_wheel_roughness, self.get_wheel_roughness(obs))
+            if self.wheel_roughness_group is not None
+            else representation_loss.new_zeros(())
+        )
+        return representation_loss + lin_vel_loss + roughness_loss, representation_loss, lin_vel_loss, roughness_loss
 
     def student_parameters(self):
         """Yield parameters optimized by student representation learning."""
         yield from self.depth_encoder.parameters()
         yield from self.depth_gru.parameters()
+        yield from self.wheel_roughness_head.parameters()
         yield from super().student_parameters()
 
     def get_proprio_outputs(
@@ -167,6 +218,15 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         latent, predicted_lin_vel, _ = self._get_student_outputs(obs, hidden_state)
         return latent, predicted_lin_vel
 
+    def get_predicted_lin_vel(self, obs: TensorDict) -> torch.Tensor:
+        """Preview the recurrent velocity estimate without advancing the internal GRU state."""
+        _, predicted_lin_vel, _ = self._get_student_outputs(
+            obs,
+            update_hidden_state=False,
+            use_internal_state=True,
+        )
+        return predicted_lin_vel
+
     def get_depth_obs(self, obs: TensorDict) -> torch.Tensor:
         if self.depth_obs_group not in obs:
             raise ValueError(f"missing depth observation group '{self.depth_obs_group}'")
@@ -175,6 +235,15 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         if tuple(depth.shape) != expected_shape:
             raise ValueError(f"expected depth shape {expected_shape}, got {tuple(depth.shape)}")
         return depth
+
+    def get_wheel_roughness(self, obs: TensorDict) -> torch.Tensor:
+        if self.wheel_roughness_group is None:
+            raise ValueError("wheel_roughness must be configured to train the roughness head.")
+        wheel_roughness = obs[self.wheel_roughness_group]
+        expected_shape = (*obs.batch_size, self.wheel_roughness_dim)
+        if tuple(wheel_roughness.shape) != expected_shape:
+            raise ValueError(f"expected wheel roughness shape {expected_shape}, got {tuple(wheel_roughness.shape)}")
+        return wheel_roughness
 
     def reset(self, dones: torch.Tensor | None = None, hidden_state: HiddenState = None) -> None:
         if dones is None:
@@ -211,6 +280,22 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         update_hidden_state: bool = False,
         use_internal_state: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        latent, predicted_lin_vel, _, next_hidden_state = self._get_student_outputs_with_roughness(
+            obs,
+            hidden_state,
+            update_hidden_state=update_hidden_state,
+            use_internal_state=use_internal_state,
+        )
+        return latent, predicted_lin_vel, next_hidden_state
+
+    def _get_student_outputs_with_roughness(
+        self,
+        obs: TensorDict,
+        hidden_state: HiddenState = None,
+        *,
+        update_hidden_state: bool = False,
+        use_internal_state: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if hidden_state is not None and not isinstance(hidden_state, torch.Tensor):
             raise ValueError("Depth velocity representation expects a tensor GRU hidden state")
         active_hidden_state = (
@@ -218,8 +303,10 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             if use_internal_state and hidden_state is None
             else hidden_state
         )
+        normalized_current_proprio = self.current_proprio_obs_normalizer(self.get_current_proprio(obs))
         depth_latent, next_hidden_state = self._encode_depth(
             self.get_depth_obs(obs),
+            normalized_current_proprio,
             active_hidden_state,
         )
         if update_hidden_state:
@@ -228,11 +315,13 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         features = self.proprio_encoder(proprio_depth_obs)
         latent = self.student_latent_head(features)
         predicted_lin_vel = self.lin_vel_head(features)
-        return self._normalize_latent(latent), predicted_lin_vel, next_hidden_state
+        predicted_wheel_roughness = torch.sigmoid(self.wheel_roughness_head(features))
+        return self._normalize_latent(latent), predicted_lin_vel, predicted_wheel_roughness, next_hidden_state
 
     def _encode_depth(
         self,
         depth: torch.Tensor,
+        normalized_current_proprio: torch.Tensor,
         hidden_state: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if depth.ndim != 4:
@@ -248,12 +337,19 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         expected_hidden_shape = (batch_size, self.depth_gru_hidden_dim)
         if tuple(hidden_state.shape) != expected_hidden_shape:
             raise ValueError(f"expected hidden_state shape {expected_hidden_shape}, got {tuple(hidden_state.shape)}")
-        next_hidden_state = self.depth_gru(self.depth_encoder(depth), hidden_state)
+        next_hidden_state = depth_proprio_gru_step(
+            self.depth_encoder,
+            self.depth_gru,
+            depth,
+            normalized_current_proprio,
+            hidden_state,
+        )
         return next_hidden_state, next_hidden_state
 
     def _encode_depth_sequence(
         self,
         depth: torch.Tensor,
+        normalized_current_proprio: torch.Tensor,
         dones: torch.Tensor,
         hidden_state: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -263,6 +359,11 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             raise ValueError(f"expected depth shape {self.depth_shape}, got {tuple(depth.shape[2:])}")
         if tuple(dones.shape[:2]) != tuple(depth.shape[:2]):
             raise ValueError(f"dones must share [time, batch] with depth, got {tuple(dones.shape)}")
+        if tuple(normalized_current_proprio.shape[:2]) != tuple(depth.shape[:2]):
+            raise ValueError(
+                "normalized_current_proprio must share [time, batch] with depth, got "
+                f"{tuple(normalized_current_proprio.shape)}"
+            )
 
         batch_size = depth.shape[1]
         if hidden_state is None:
@@ -274,7 +375,11 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             )
         latents = []
         for step in range(depth.shape[0]):
-            latent, hidden_state = self._encode_depth(depth[step], hidden_state)
+            latent, hidden_state = self._encode_depth(
+                depth[step],
+                normalized_current_proprio[step],
+                hidden_state,
+            )
             latents.append(latent)
             done_mask = dones[step].to(device=hidden_state.device, dtype=torch.bool).view(-1, 1)
             hidden_state = torch.where(done_mask, torch.zeros_like(hidden_state), hidden_state)
@@ -304,6 +409,32 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
             )
         return obs_group, tuple(obs[obs_group].shape[1:])
 
+    @staticmethod
+    def _get_optional_wheel_roughness_group(
+        obs: TensorDict,
+        obs_groups: dict[str, list[str]],
+    ) -> str | None:
+        groups = obs_groups.get("wheel_roughness")
+        if groups is None:
+            return None
+        if len(groups) != 1:
+            raise ValueError("'wheel_roughness' must contain exactly one observation group.")
+        group = groups[0]
+        if tuple(obs[group].shape[-1:]) != (2,):
+            raise ValueError(f"wheel roughness '{group}' must end in dimension 2, got {obs[group].shape}")
+        return group
+
+
+def depth_proprio_gru_step(
+    depth_encoder: nn.Module,
+    depth_gru: nn.GRUCell,
+    depth: torch.Tensor,
+    normalized_current_proprio: torch.Tensor,
+    hidden_state: torch.Tensor,
+) -> torch.Tensor:
+    """Advance the depth--proprio belief state."""
+    return depth_gru(torch.cat((depth_encoder(depth), normalized_current_proprio), dim=-1), hidden_state)
+
 
 class _DepthCNN(nn.Module):
     def __init__(
@@ -312,6 +443,8 @@ class _DepthCNN(nn.Module):
         channels: tuple[int, ...] | list[int],
         output_dim: int,
         activation: str,
+        final_stride: int = 2,
+        strides: tuple[int, ...] | list[int] | None = None,
     ) -> None:
         super().__init__()
         if len(input_shape) != 3:
@@ -324,9 +457,18 @@ class _DepthCNN(nn.Module):
         activation_cls = _resolve_activation(activation)
         in_channels = input_shape[0]
         layers: list[nn.Module] = []
+        if strides is None:
+            if final_stride <= 0:
+                raise ValueError(f"final_stride must be positive, got {final_stride}")
+            strides = (*((2,) * (len(channels) - 1)), final_stride)
+        if len(strides) != len(channels) or any(stride <= 0 for stride in strides):
+            raise ValueError(
+                "depth CNN strides must be positive and have one entry per channel, "
+                f"got {tuple(strides)} for {len(channels)} channels"
+            )
         for idx, out_channels in enumerate(channels):
             kernel_size = 5 if idx == 0 else 3
-            layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=2))
+            layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=strides[idx]))
             layers.append(activation_cls())
             in_channels = out_channels
         self.cnn = nn.Sequential(*layers)
@@ -374,7 +516,11 @@ class _TorchDepthRepresentationVelocityActorCritic(nn.Module):
         depth: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         proprio_obs = self.proprio_history_obs_normalizer(proprio_history.flatten(start_dim=1))
-        depth_latent = self.depth_gru(self.depth_encoder(depth), self.hidden_state)
+        current_proprio = self.current_proprio_obs_normalizer(proprio_history[:, -1, :])
+        depth_latent = self.depth_gru(
+            torch.cat((self.depth_encoder(depth), current_proprio), dim=-1),
+            self.hidden_state,
+        )
         self.hidden_state[:] = depth_latent.detach()
         return self._actor_from_student_inputs(proprio_history, actor_command, proprio_obs, depth_latent)
 
@@ -433,7 +579,11 @@ class _OnnxDepthRepresentationVelocityActorCritic(_TorchDepthRepresentationVeloc
         hidden_state_in: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         proprio_obs = self.proprio_history_obs_normalizer(proprio_history.flatten(start_dim=1))
-        hidden_state_out = self.depth_gru(self.depth_encoder(depth), hidden_state_in)
+        current_proprio = self.current_proprio_obs_normalizer(proprio_history[:, -1, :])
+        hidden_state_out = self.depth_gru(
+            torch.cat((self.depth_encoder(depth), current_proprio), dim=-1),
+            hidden_state_in,
+        )
         actions, predicted_lin_vel = self._actor_from_student_inputs(
             proprio_history,
             actor_command,

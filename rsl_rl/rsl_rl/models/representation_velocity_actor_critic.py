@@ -162,7 +162,7 @@ class RepresentationVelocityActorCritic(nn.Module):
         proprio_latent, predicted_lin_vel = self.get_proprio_outputs(obs)
         with torch.no_grad():
             privileged_latent = self.get_privileged_latent(obs)
-        representation_loss = F.mse_loss(proprio_latent, privileged_latent)
+        representation_loss = (1.0 - F.cosine_similarity(proprio_latent, privileged_latent, dim=-1)).mean()
         lin_vel_loss = F.mse_loss(predicted_lin_vel, self.get_lin_vel_target(obs))
         return representation_loss + lin_vel_loss, representation_loss, lin_vel_loss
 

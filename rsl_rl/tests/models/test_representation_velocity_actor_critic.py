@@ -147,6 +147,18 @@ def test_depth_model_has_no_latent_dynamics_interface() -> None:
     assert not hasattr(model, "compute_latent_dynamics_loss")
 
 
+def test_student_representation_loss_is_cosine_distance() -> None:
+    obs = make_rep_obs()
+    model = make_model(obs)
+
+    _, representation_loss, _ = model.compute_student_losses(obs)
+    student_latent, _ = model.get_proprio_outputs(obs)
+    teacher_latent = model.get_privileged_latent(obs)
+    expected = (1.0 - torch.nn.functional.cosine_similarity(student_latent, teacher_latent, dim=-1)).mean()
+
+    torch.testing.assert_close(representation_loss, expected)
+
+
 def test_teacher_student_value_and_velocity_paths_have_expected_shapes() -> None:
     obs = make_rep_obs()
     model = make_model(obs)
@@ -332,6 +344,31 @@ def test_depth_student_hidden_state_persists_and_resets_per_environment() -> Non
     assert model.get_hidden_state() is None
 
 
+def test_depth_predicted_velocity_preview_uses_internal_hidden_state_without_advancing() -> None:
+    obs = make_depth_rep_obs()
+    model = make_depth_model(obs)
+    internal_hidden_state = torch.full(
+        (NUM_ENVS, model.depth_gru_hidden_dim),
+        0.25,
+    )
+    model.reset(hidden_state=internal_hidden_state)
+    observed_gru_inputs: list[torch.Tensor] = []
+
+    def capture_gru_hidden_state(_module, inputs) -> None:
+        observed_gru_inputs.append(inputs[1].detach().clone())
+
+    hook = model.depth_gru.register_forward_pre_hook(capture_gru_hidden_state)
+    try:
+        predicted_lin_vel = model.get_predicted_lin_vel(obs)
+    finally:
+        hook.remove()
+
+    assert predicted_lin_vel.shape == (NUM_ENVS, LIN_VEL_DIM)
+    assert len(observed_gru_inputs) == 1
+    torch.testing.assert_close(observed_gru_inputs[0], internal_hidden_state)
+    torch.testing.assert_close(model.get_hidden_state(), internal_hidden_state)
+
+
 def test_depth_student_losses_update_depth_and_student_encoder_side() -> None:
     obs = make_depth_rep_obs()
     model = make_depth_model(obs)
@@ -344,12 +381,44 @@ def test_depth_student_losses_update_depth_and_student_encoder_side() -> None:
     assert any(param.grad is not None for param in model.depth_encoder.parameters())
     assert any(param.grad is not None for param in model.depth_gru.parameters())
     assert any(param.grad is not None for param in model.proprio_encoder.parameters())
+
+
+def test_depth_student_roughness_head_is_trained_when_target_is_configured() -> None:
+    obs = make_depth_rep_obs()
+    obs["wheel_roughness"] = torch.rand(NUM_ENVS, 2)
+    model = DepthRepresentationVelocityActorCritic(
+        obs,
+        {
+            "proprio_history": ["proprio_history"],
+            "actor_command": ["actor_command"],
+            "lin_vel_target": ["lin_vel_target"],
+            "critic": ["critic", "dynamics_context"],
+            "privileged_encoder": ["privileged_encoder", "dynamics_context"],
+            "depth_encoder": ["depth_camera"],
+            "wheel_roughness": ["wheel_roughness"],
+        },
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        encoder_hidden_dims=[16],
+        latent_dim=LATENT_DIM,
+        depth_feature_dim=8,
+        depth_gru_hidden_dim=8,
+        depth_channels=(4, 4),
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+    student_loss, _, _, roughness_loss = model.compute_student_losses_with_roughness(obs)
+    model.zero_grad()
+    student_loss.backward()
+
+    assert roughness_loss > 0.0
+    assert any(parameter.grad is not None for parameter in model.wheel_roughness_head.parameters())
     assert any(param.grad is not None for param in model.student_latent_head.parameters())
     assert any(param.grad is not None for param in model.lin_vel_head.parameters())
     assert all(param.grad is None for param in model.privileged_encoder.parameters())
 
 
-def test_depth_latent_dynamics_prediction_is_normalized_and_has_isolated_gradients() -> None:
+def test_depth_dynamics_predicts_latent_and_velocity_with_isolated_gradients() -> None:
     obs_t = make_depth_rep_obs()
     obs_tp10 = make_depth_rep_obs()
     model = make_depth_predictor_model(
@@ -359,38 +428,57 @@ def test_depth_latent_dynamics_prediction_is_normalized_and_has_isolated_gradien
     applied_action_block = torch.randn(NUM_ENVS, 10 * NUM_ACTIONS)
 
     latent_t = model.get_privileged_latent(obs_t)
-    prediction = model.predict_privileged_latent(
+    normalized_lin_vel_t = model.get_normalized_lin_vel_target(obs_t)
+    predicted_latent, predicted_normalized_lin_vel = model.predict_privileged_state(
         latent_t,
+        normalized_lin_vel_t,
         applied_action_block,
         horizon=10,
     )
-    assert torch.allclose(prediction.norm(dim=-1), torch.ones(NUM_ENVS), atol=1.0e-6)
+    assert torch.allclose(predicted_latent.norm(dim=-1), torch.ones(NUM_ENVS), atol=1.0e-6)
+    assert predicted_normalized_lin_vel.shape == (NUM_ENVS, LIN_VEL_DIM)
+    assert model.latent_dynamics_state_dim == LATENT_DIM + LIN_VEL_DIM
     assert set(model.latent_dynamics_predictors) == {"1", "5", "10"}
 
-    captured_latents: list[torch.Tensor] = []
+    captured_source_latents: list[torch.Tensor] = []
+    captured_target_latents: list[torch.Tensor] = []
     original_get_privileged_latent = model.get_privileged_latent
+    original_get_latent_dynamics_target = model.get_latent_dynamics_target
 
-    def capture_latent(obs: TensorDict) -> torch.Tensor:
+    def capture_source_latent(obs: TensorDict) -> torch.Tensor:
         latent = original_get_privileged_latent(obs)
-        captured_latents.append(latent)
+        captured_source_latents.append(latent)
         return latent
 
-    model.get_privileged_latent = capture_latent  # type: ignore[method-assign]
+    def capture_target(
+        obs: TensorDict,
+        use_ema_target: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        latent, normalized_lin_vel = original_get_latent_dynamics_target(
+            obs,
+            use_ema_target=use_ema_target,
+        )
+        captured_target_latents.append(latent)
+        return latent, normalized_lin_vel
+
+    model.get_privileged_latent = capture_source_latent  # type: ignore[method-assign]
+    model.get_latent_dynamics_target = capture_target  # type: ignore[method-assign]
     model.zero_grad()
-    dynamics_loss = model.compute_latent_dynamics_loss(
+    representation_loss, velocity_loss = model.compute_latent_dynamics_losses(
         obs_t,
         applied_action_block,
         obs_tp10,
         horizon=10,
     )
-    dynamics_loss.backward()
+    (representation_loss + velocity_loss).backward()
 
-    assert captured_latents[0].requires_grad
-    assert not captured_latents[1].requires_grad
+    assert captured_source_latents[0].requires_grad
+    assert not captured_target_latents[0].requires_grad
     assert all(param.grad is None for param in model.latent_dynamics_predictors["1"].parameters())
     assert all(param.grad is None for param in model.latent_dynamics_predictors["5"].parameters())
     assert any(param.grad is not None for param in model.latent_dynamics_predictors["10"].parameters())
     assert any(param.grad is not None for param in model.privileged_encoder.parameters())
+    assert all(param.grad is None for param in model.latent_dynamics_target_encoder.parameters())
     assert all(param.grad is None for param in model.actor_head.parameters())
     assert all(param.grad is None for param in model.critic_head.parameters())
     assert all(param.grad is None for param in model.depth_encoder.parameters())
@@ -413,6 +501,23 @@ def test_depth_ppo_path_does_not_backpropagate_into_dynamics_predictor() -> None
     assert all(param.grad is None for param in model.latent_dynamics_predictors.parameters())
 
 
+def test_depth_predictor_parameter_groups_are_disjoint() -> None:
+    model = make_depth_predictor_model()
+
+    ppo_parameter_ids = {id(parameter) for parameter in model.ppo_parameters()}
+    predictor_parameter_ids = {id(parameter) for parameter in model.predictor_parameters()}
+    privileged_encoder_parameter_ids = {
+        id(parameter) for parameter in model.privileged_encoder.parameters()
+    }
+    expected_predictor_parameter_ids = {
+        id(parameter) for parameter in model.latent_dynamics_predictors.parameters()
+    }
+
+    assert ppo_parameter_ids.isdisjoint(predictor_parameter_ids)
+    assert privileged_encoder_parameter_ids <= ppo_parameter_ids
+    assert predictor_parameter_ids == expected_predictor_parameter_ids
+
+
 def test_depth_latent_dynamics_can_detach_source_for_representation_ablation() -> None:
     obs_t = make_depth_rep_obs()
     obs_future = make_depth_rep_obs()
@@ -420,17 +525,57 @@ def test_depth_latent_dynamics_can_detach_source_for_representation_ablation() -
     applied_action_block = torch.randn(NUM_ENVS, 5 * NUM_ACTIONS)
 
     model.zero_grad()
-    loss = model.compute_latent_dynamics_loss(
+    representation_loss, velocity_loss = model.compute_latent_dynamics_losses(
         obs_t,
         applied_action_block,
         obs_future,
         horizon=5,
         detach_source=True,
     )
-    loss.backward()
+    (representation_loss + velocity_loss).backward()
 
     assert all(param.grad is None for param in model.privileged_encoder.parameters())
     assert any(param.grad is not None for param in model.latent_dynamics_predictors["5"].parameters())
+
+
+def test_depth_dynamics_uses_ground_truth_velocity_and_keeps_optional_ema_target() -> None:
+    obs = make_depth_rep_obs()
+    model = make_depth_predictor_model(obs)
+    obs["lin_vel_target"] = torch.full((NUM_ENVS, LIN_VEL_DIM), 2.0)
+    with torch.no_grad():
+        model.lin_vel_head.bias.fill_(100.0)
+
+    normalized_target = model.get_normalized_lin_vel_target(obs)
+    student_prediction = model.get_predicted_lin_vel(obs)
+
+    assert torch.equal(normalized_target, obs["lin_vel_target"])
+    assert not torch.equal(normalized_target, student_prediction)
+    assert all(not parameter.requires_grad for parameter in model.latent_dynamics_target_encoder.parameters())
+
+    online_target_before, _ = model.get_latent_dynamics_target(obs, use_ema_target=False)
+    ema_target_before, _ = model.get_latent_dynamics_target(obs, use_ema_target=True)
+    assert torch.allclose(online_target_before, ema_target_before)
+
+    target_before = [
+        parameter.detach().clone() for parameter in model.latent_dynamics_target_encoder.parameters()
+    ]
+    with torch.no_grad():
+        for parameter in model.privileged_encoder.parameters():
+            parameter.add_(1.0)
+    online_after = [parameter.detach().clone() for parameter in model.privileged_encoder.parameters()]
+    online_target_after, _ = model.get_latent_dynamics_target(obs, use_ema_target=False)
+    ema_target_after, _ = model.get_latent_dynamics_target(obs, use_ema_target=True)
+    assert not torch.allclose(online_target_after, ema_target_after)
+
+    model.update_latent_dynamics_target(decay=0.5)
+
+    for target_parameter, previous_target, online_parameter in zip(
+        model.latent_dynamics_target_encoder.parameters(),
+        target_before,
+        online_after,
+        strict=True,
+    ):
+        assert torch.allclose(target_parameter, 0.5 * previous_target + 0.5 * online_parameter)
 
 
 def test_depth_sequence_student_losses_use_continuous_depth_state() -> None:
