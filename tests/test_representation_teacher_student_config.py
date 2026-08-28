@@ -675,7 +675,13 @@ def _make_dummy_metadata_env():
             active_terms={
                 "actor": ["base_ang_vel", "projected_gravity"],
                 "actor_history": ["base_ang_vel", "projected_gravity"],
-            }
+            },
+            get_term_cfg=lambda group, name: SimpleNamespace(
+                scale=None,
+                clip=None,
+                flatten_history_dim=True,
+                history_length=0,
+            ),
         ),
         cfg=SimpleNamespace(
             observations={
@@ -794,6 +800,13 @@ def test_representation_metadata_describes_single_history_input() -> None:
     assert metadata["student_history_length"] == "5"
     assert metadata["student_history_flatten_dim"] == "false"
     assert metadata["student_history_order"] == "oldest_to_newest"
+    assert metadata["observation_terms_scale"] == [1.0, 1.0]
+    assert metadata["observation_terms_flatten_history_dim"] == [True, True]
+    assert metadata["observation_terms_history_length"] == [0, 0]
+    assert metadata["observation_terms_clip"] == [
+        [float("-inf"), float("inf")],
+        [float("-inf"), float("inf")],
+    ]
 
 
 def test_velocity_representation_metadata_describes_history_and_command_inputs() -> None:

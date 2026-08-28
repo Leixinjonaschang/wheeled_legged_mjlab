@@ -189,6 +189,7 @@ class _DelayedActionMixin:
         self._applied_action_substeps = torch.zeros(
             self.num_envs, 1, device=self.device, dtype=torch.long
         )
+        self._terminal_applied_action = torch.zeros_like(self._raw_actions)
         self._reset_delay_buffer(slice(None))
 
     @property
@@ -201,6 +202,11 @@ class _DelayedActionMixin:
         """Mean policy-space action actually applied during the current env step."""
         return self._applied_action_sum / self._applied_action_substeps.clamp_min(1)
 
+    @property
+    def terminal_applied_action(self) -> torch.Tensor:
+        """Applied action snapshot captured before reset clears terminal envs."""
+        return self._terminal_applied_action
+
     def process_actions(self, actions: torch.Tensor) -> None:
         self._delay_state.prepare_for_policy_step(self._env)
         super().process_actions(actions)
@@ -210,6 +216,7 @@ class _DelayedActionMixin:
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         if env_ids is None:
             env_ids = slice(None)
+        self._terminal_applied_action[env_ids] = self.applied_action[env_ids]
         super().reset(env_ids)
         self._reset_processed_actions(env_ids)
         self._reset_delay_buffer(env_ids)

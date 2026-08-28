@@ -129,54 +129,72 @@ class UniformVelocityCommand(CommandTerm):
           torch.where(positive_y, np.pi / 2, -np.pi / 2),
         )
 
-    self._update_command()
+    self._update_command(env_ids)
 
-    init_vel_mask = r.uniform_(0.0, 1.0) < self.cfg.init_velocity_prob
-    init_vel_env_ids = env_ids[init_vel_mask]
+  def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
+    extras = super().reset(env_ids)
+    assert isinstance(env_ids, torch.Tensor)
+
+    r = torch.empty(len(env_ids), device=self.device)
+    init_vel_env_ids = env_ids[
+      r.uniform_(0.0, 1.0) < self.cfg.init_velocity_prob
+    ]
     if len(init_vel_env_ids) > 0:
-      root_pos = self.robot.data.root_link_pos_w[init_vel_env_ids]
-      root_quat = self.robot.data.root_link_quat_w[init_vel_env_ids]
-      root_lin_vel_w = self.robot.data.root_link_lin_vel_w[init_vel_env_ids]
-      root_lin_vel_w[:, :2] = self.vel_command_w[init_vel_env_ids, :2]
-      root_ang_vel_b = self.robot.data.root_link_ang_vel_b[init_vel_env_ids]
-      root_ang_vel_b[:, 2] = self.vel_command_b[init_vel_env_ids, 2]
-      root_state = torch.cat(
-        [root_pos, root_quat, root_lin_vel_w, root_ang_vel_b], dim=-1
+      root_velocity_w = torch.cat(
+        (
+          self.robot.data.root_link_lin_vel_w[init_vel_env_ids],
+          self.robot.data.root_link_ang_vel_w[init_vel_env_ids],
+        ),
+        dim=-1,
       )
-      self.robot.write_root_state_to_sim(root_state, init_vel_env_ids)
+      root_velocity_w[:, :2] = self.vel_command_w[init_vel_env_ids, :2]
+      root_velocity_w[:, 5] = self.vel_command_b[init_vel_env_ids, 2]
+      self.robot.write_root_link_velocity_to_sim(root_velocity_w, init_vel_env_ids)
+    return extras
 
-  def _update_command(self) -> None:
-    self.vel_command_b[:, 2] = self.vel_command_w[:, 2]
+  def _update_command(self, env_ids: torch.Tensor | None = None) -> None:
+    ids = slice(None) if env_ids is None else env_ids
+    self.vel_command_b[ids, 2] = self.vel_command_w[ids, 2]
     if self.cfg.heading_command:
       # Convert the sampled forward/lateral components into one fixed
       # world-frame vector using the commanded heading.
-      cos_target = torch.cos(self.heading_target)
-      sin_target = torch.sin(self.heading_target)
-      vx_h = self.vel_command_h[:, 0]
-      vy_h = self.vel_command_h[:, 1]
-      self.vel_command_w[:, 0] = cos_target * vx_h - sin_target * vy_h
-      self.vel_command_w[:, 1] = sin_target * vx_h + cos_target * vy_h
+      cos_target = torch.cos(self.heading_target[ids])
+      sin_target = torch.sin(self.heading_target[ids])
+      vx_h = self.vel_command_h[ids, 0]
+      vy_h = self.vel_command_h[ids, 1]
+      self.vel_command_w[ids, 0] = cos_target * vx_h - sin_target * vy_h
+      self.vel_command_w[ids, 1] = sin_target * vx_h + cos_target * vy_h
 
-      self.heading_error = wrap_to_pi(self.heading_target - self.robot.data.heading_w)
-      env_ids = self.is_heading_env.nonzero(as_tuple=False).flatten()
+      self.heading_error[ids] = wrap_to_pi(
+        self.heading_target[ids] - self.robot.data.heading_w[ids]
+      )
+      heading_env_ids = (
+        self.is_heading_env.nonzero(as_tuple=False).flatten()
+        if env_ids is None
+        else env_ids[self.is_heading_env[env_ids]]
+      )
       yaw_rate_cmd = torch.clip(
-        self.cfg.heading_control_stiffness * self.heading_error[env_ids],
+        self.cfg.heading_control_stiffness * self.heading_error[heading_env_ids],
         min=self.cfg.ranges.ang_vel_z[0],
         max=self.cfg.ranges.ang_vel_z[1],
       )
-      self.vel_command_w[env_ids, 2] = yaw_rate_cmd
-      self.vel_command_b[env_ids, 2] = yaw_rate_cmd
+      self.vel_command_w[heading_env_ids, 2] = yaw_rate_cmd
+      self.vel_command_b[heading_env_ids, 2] = yaw_rate_cmd
 
     # Rotate fixed world-frame linear command into robot yaw frame for policy.
-    heading = self.robot.data.heading_w
+    heading = self.robot.data.heading_w[ids]
     cos_h = torch.cos(heading)
     sin_h = torch.sin(heading)
-    vx_w = self.vel_command_w[:, 0]
-    vy_w = self.vel_command_w[:, 1]
-    self.vel_command_b[:, 0] = cos_h * vx_w + sin_h * vy_w
-    self.vel_command_b[:, 1] = -sin_h * vx_w + cos_h * vy_w
+    vx_w = self.vel_command_w[ids, 0]
+    vy_w = self.vel_command_w[ids, 1]
+    self.vel_command_b[ids, 0] = cos_h * vx_w + sin_h * vy_w
+    self.vel_command_b[ids, 1] = -sin_h * vx_w + cos_h * vy_w
 
-    standing_env_ids = self.is_standing_env.nonzero(as_tuple=False).flatten()
+    standing_env_ids = (
+      self.is_standing_env.nonzero(as_tuple=False).flatten()
+      if env_ids is None
+      else env_ids[self.is_standing_env[env_ids]]
+    )
     self.vel_command_h[standing_env_ids, :] = 0.0
     self.vel_command_b[standing_env_ids, :] = 0.0
     self.vel_command_w[standing_env_ids, :] = 0.0
@@ -249,8 +267,12 @@ class UniformVelocityCommand(CommandTerm):
     self._joystick_sliders = sliders
     self._joystick_get_env_idx = get_env_idx
 
-  def compute(self, dt: float) -> None:
-    super().compute(dt)
+  def compute(
+    self,
+    dt: float | torch.Tensor,
+    env_ids: torch.Tensor | None = None,
+  ) -> None:
+    super().compute(dt, env_ids)
     if self._joystick_enabled is not None and self._joystick_enabled.value:
       assert self._joystick_get_env_idx is not None
       idx = self._joystick_get_env_idx()
@@ -266,7 +288,7 @@ class UniformVelocityCommand(CommandTerm):
         else:
           self.vel_command_w[idx, i] = s.value
       self.is_standing_env[idx] = False
-      self._update_command()
+      self._update_command(torch.tensor([idx], device=self.device))
 
   # Visualization.
 

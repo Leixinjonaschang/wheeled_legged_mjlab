@@ -60,8 +60,9 @@ def terrain_levels_vel(
   )
   move_down *= ~move_up
 
-  # Update terrain levels.
-  terrain.update_env_origins(env_ids, move_up, move_down)
+  # The initial environment reset has no completed episode to evaluate.
+  if env.common_step_counter > 0:
+    terrain.update_env_origins(env_ids, move_up, move_down)
 
   # Compute per-terrain-type mean levels.
   levels = terrain.terrain_levels.float()

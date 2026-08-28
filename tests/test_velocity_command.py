@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import torch
 
+from mjlab.managers.command_manager import CommandTerm
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     COMMAND_NAME,
     WORLD_COMMAND_TRACKING_ACTIVATION_STEPS,
@@ -49,7 +50,7 @@ def test_forward_limit_is_defined_in_target_heading_frame() -> None:
         linear_command_h=torch.tensor([[2.5, 0.0], [2.5, 0.0]]),
     )
 
-    term._update_command()
+    term._update_command(None)
 
     expected_world_velocity = torch.tensor([[0.0, 2.5], [0.0, -2.5]])
     assert torch.allclose(
@@ -64,11 +65,11 @@ def test_world_command_stays_fixed_while_robot_turns_to_target_heading() -> None
         robot_heading=robot_heading,
         linear_command_h=torch.tensor([[2.5, 0.0]]),
     )
-    term._update_command()
+    term._update_command(None)
     world_command_before_turn = term.command_w[:, :2].clone()
 
     robot_heading[:] = math.pi / 2
-    term._update_command()
+    term._update_command(None)
 
     assert torch.allclose(
         term.command_w[:, :2], world_command_before_turn, atol=1.0e-6
@@ -78,11 +79,59 @@ def test_world_command_stays_fixed_while_robot_turns_to_target_heading() -> None
     )
 
 
-def test_training_and_play_configs_use_2_5_forward_speed_limit() -> None:
-    for cfg in (wf_tron1b_flat_env_cfg(), wf_tron1b_flat_env_cfg(play=True)):
-        command_cfg = cfg.commands[COMMAND_NAME]
-        assert isinstance(command_cfg, UniformVelocityCommandCfg)
-        assert command_cfg.ranges.lin_vel_x == (-1.0, 2.5)
+def test_partial_command_update_does_not_change_other_environments() -> None:
+    term = _make_command_term(
+        heading_target=torch.tensor([math.pi / 2, -math.pi / 2]),
+        robot_heading=torch.zeros(2),
+        linear_command_h=torch.tensor([[1.0, 0.0], [2.0, 0.0]]),
+    )
+    term.vel_command_b[1] = torch.tensor([7.0, 8.0, 9.0])
+    term.vel_command_w[1] = torch.tensor([4.0, 5.0, 6.0])
+
+    term._update_command(torch.tensor([0]))
+
+    assert torch.equal(term.vel_command_b[1], torch.tensor([7.0, 8.0, 9.0]))
+    assert torch.equal(term.vel_command_w[1], torch.tensor([4.0, 5.0, 6.0]))
+
+
+def test_init_velocity_is_written_during_reset_without_rewriting_pose(monkeypatch) -> None:
+    term = UniformVelocityCommand.__new__(UniformVelocityCommand)
+    term._env = SimpleNamespace(device="cpu")
+    term.cfg = SimpleNamespace(init_velocity_prob=1.0)
+    term.vel_command_w = torch.tensor([[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]])
+    term.vel_command_b = torch.tensor([[0.0, 0.0, 0.5], [0.0, 0.0, 1.5]])
+    written = []
+    term.robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_lin_vel_w=torch.tensor(
+                [[0.0, 0.0, 0.1], [0.0, 0.0, 0.2]]
+            ),
+            root_link_ang_vel_w=torch.tensor(
+                [[0.3, 0.4, 0.0], [0.6, 0.7, 0.0]]
+            ),
+        ),
+        write_root_link_velocity_to_sim=lambda velocity, env_ids: written.append(
+            (velocity.clone(), env_ids.clone())
+        ),
+    )
+    monkeypatch.setattr(CommandTerm, "reset", lambda self, env_ids: {})
+
+    term.reset(torch.tensor([1]))
+
+    assert len(written) == 1
+    velocity, env_ids = written[0]
+    assert torch.equal(env_ids, torch.tensor([1]))
+    assert torch.allclose(velocity, torch.tensor([[3.0, 4.0, 0.2, 0.6, 0.7, 1.5]]))
+
+
+def test_training_and_play_configs_use_current_forward_speed_limits() -> None:
+    training_command_cfg = wf_tron1b_flat_env_cfg().commands[COMMAND_NAME]
+    play_command_cfg = wf_tron1b_flat_env_cfg(play=True).commands[COMMAND_NAME]
+
+    assert isinstance(training_command_cfg, UniformVelocityCommandCfg)
+    assert isinstance(play_command_cfg, UniformVelocityCommandCfg)
+    assert training_command_cfg.ranges.lin_vel_x == (-1.0, 2.0)
+    assert play_command_cfg.ranges.lin_vel_x == (-1.0, 1.0)
 
 
 def _make_tracking_termination_env(

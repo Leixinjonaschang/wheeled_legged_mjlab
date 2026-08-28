@@ -162,6 +162,25 @@ def test_applied_actions_follow_action_manager_term_order() -> None:
     )
 
 
+def test_done_env_uses_terminal_applied_action_snapshot() -> None:
+    term = SimpleNamespace(
+        applied_action=torch.tensor([[0.0], [2.0]]),
+        terminal_applied_action=torch.tensor([[1.0], [9.0]]),
+        raw_action=torch.zeros(2, 1),
+    )
+    action_manager = SimpleNamespace(
+        active_terms=["delayed"],
+        get_term=lambda _: term,
+    )
+
+    applied_actions = get_applied_actions(
+        action_manager,
+        dones=torch.tensor([1, 0]),
+    )
+
+    assert torch.equal(applied_actions, torch.tensor([[1.0], [2.0]]))
+
+
 def test_reset_clears_delayed_targets_and_raw_action_stays_latest() -> None:
     env = DummyEnv(physics_dt=0.005)
     term = DelayedJointVelocityActionCfg(
@@ -177,8 +196,11 @@ def test_reset_clears_delayed_targets_and_raw_action_stays_latest() -> None:
     for _ in range(3):
         term.apply_actions()
     assert torch.allclose(env.entity.velocity_targets[-1], torch.tensor([[4.0]]))
+    completed_step_action = term.applied_action.clone()
 
     term.reset(torch.tensor([0]))
+    assert torch.allclose(term.terminal_applied_action, completed_step_action)
+    assert torch.allclose(term.applied_action, torch.zeros(1, 1))
     term.process_actions(torch.tensor([[7.0]]))
 
     assert torch.allclose(term.raw_action, torch.tensor([[7.0]]))

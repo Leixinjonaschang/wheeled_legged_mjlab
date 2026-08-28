@@ -148,18 +148,18 @@ def test_interleaved_terrain_columns_preserve_logical_proportions() -> None:
         0.28,
     )
     assert math.isclose(sum(cfg.proportion for cfg in sub_terrains.values()), 1.0)
-    for name in ("discrete_obstacles", "random_rough"):
-        assert math.isclose(sub_terrains[name].proportion, 0.10)
+    assert math.isclose(sub_terrains["discrete_obstacles"].proportion, 0.10)
+    assert math.isclose(sub_terrains["random_rough"].proportion, 0.08)
     for name in (
         "hf_pyramid_slope",
         "hf_pyramid_slope_inv",
         "pyramid_stair",
         "random_stairs",
         "tilted_grid",
-        "random_spread",
     ):
         assert math.isclose(sub_terrains[name].proportion, 0.05)
     assert math.isclose(sub_terrains["pyramid_stair_inv"].proportion, 0.15)
+    assert math.isclose(sub_terrains["random_spread"].proportion, 0.07)
     assert math.isclose(sub_terrains["stepping_stones"].proportion, 0.07)
 
     stepping_stones = sub_terrains["stepping_stones"]
@@ -181,16 +181,16 @@ def test_interleaved_terrain_columns_preserve_logical_proportions() -> None:
 
     random_stairs = sub_terrains["random_stairs"]
     assert random_stairs.step_width == 0.35
-    assert random_stairs.step_height_range == (0.03, 0.20)
+    assert random_stairs.step_height_range == (0.03, 0.25)
 
     tilted_grid = sub_terrains["tilted_grid"]
     assert tilted_grid.grid_width == 0.6
-    assert tilted_grid.tilt_range_deg == 12.0
-    assert tilted_grid.height_range == 0.12
+    assert tilted_grid.tilt_range_deg == 15.0
+    assert tilted_grid.height_range == 0.15
 
     random_spread = sub_terrains["random_spread"]
     assert random_spread.num_boxes == 64
-    assert random_spread.box_height_range == (0.03, 0.22)
+    assert random_spread.box_height_range == (0.03, 0.25)
 
 
 def test_play_config_uses_all_interleaved_terrain_columns() -> None:
@@ -422,7 +422,7 @@ def test_non_rough_flat_orientation_replaces_base_ang_vel_reward() -> None:
     assert "non_rough_base_ang_vel_xy" not in cfg.rewards
     term = cfg.rewards["non_rough_flat_orientation"]
     assert term.func is reward_terms.non_rough_flat_orientation
-    assert math.isclose(term.weight, -20.0)
+    assert math.isclose(term.weight, -10.0)
     assert term.params["roll_weight"] == 2.0
     assert term.params["pitch_weight"] == 1.0
 
@@ -438,11 +438,13 @@ class DummyTerrain:
         self.terrain_levels = torch.tensor([1, 5, 3])
         self.terrain_origins = torch.zeros(1, 3, 3)
         self.terrain_types = torch.tensor([0, 1, 2])
+        self.updated_env_ids: list[torch.Tensor] = []
 
     def update_env_origins(
         self, env_ids: torch.Tensor, move_up: torch.Tensor, move_down: torch.Tensor
     ) -> None:
-        del env_ids, move_up, move_down
+        del move_up, move_down
+        self.updated_env_ids.append(env_ids.clone())
 
 
 class DummyTerrainScene:
@@ -463,6 +465,7 @@ def test_terrain_curriculum_groups_repeated_flat_columns() -> None:
             get_command=lambda name: torch.tensor([[1.0, 0.0]]).repeat(3, 1)
         ),
         max_episode_length_s=20.0,
+        common_step_counter=1,
     )
 
     result = terrain_levels_vel(env, torch.tensor([0, 1, 2]), command_name="base_velocity")
@@ -471,6 +474,26 @@ def test_terrain_curriculum_groups_repeated_flat_columns() -> None:
     assert result["rough"].item() == 5.0
     assert "flat__0" not in result
     assert "flat__1" not in result
+
+
+def test_terrain_curriculum_skips_initial_reset_and_scopes_partial_reset() -> None:
+    scene = DummyTerrainScene()
+    env = SimpleNamespace(
+        scene=scene,
+        command_manager=SimpleNamespace(
+            get_command=lambda name: torch.tensor([[1.0, 0.0]]).repeat(3, 1)
+        ),
+        max_episode_length_s=20.0,
+        common_step_counter=0,
+    )
+
+    terrain_levels_vel(env, torch.tensor([0, 1, 2]), command_name="base_velocity")
+    assert scene.terrain.updated_env_ids == []
+
+    env.common_step_counter = 1
+    terrain_levels_vel(env, torch.tensor([1]), command_name="base_velocity")
+    assert len(scene.terrain.updated_env_ids) == 1
+    assert torch.equal(scene.terrain.updated_env_ids[0], torch.tensor([1]))
 
 
 class DummyTerrainBoundsScene:
