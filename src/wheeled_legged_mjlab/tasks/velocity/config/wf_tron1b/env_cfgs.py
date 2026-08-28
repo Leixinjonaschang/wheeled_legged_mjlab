@@ -834,10 +834,10 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-5.0e-5,
             params={"asset_cfg": all_joint_cfg},
         ),
-        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
+        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.2),
         "self_collisions": RewardTermCfg(
             func=mdp.self_collision_cost,
-            weight=-0.1,
+            weight=-0.2,
             params={"sensor_name": "self_collision"},
         ),
         "illegal_ground_contact": RewardTermCfg(
@@ -847,7 +847,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "soft_landing": RewardTermCfg(
             func=mdp.soft_landing,
-            weight=-3.0e-5,
+            weight=-3.0e-3,
             params={
                 "sensor_name": "wheels_ground_contact",
                 "command_name": COMMAND_NAME,
