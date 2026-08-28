@@ -1225,6 +1225,8 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
             if "predictor_optimizer_state_dict" in loaded_dict:
                 self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
                 self.predictor_optimizer.load_state_dict(loaded_dict["predictor_optimizer_state_dict"])
+                self.learning_rate = self.optimizer.param_groups[0]["lr"]
+                self.predictor_learning_rate = self.predictor_optimizer.param_groups[0]["lr"]
             else:
                 self.optimizer = type(self.optimizer)(
                     self._raw_actor.ppo_parameters(),
@@ -1242,8 +1244,10 @@ class RepresentationVelocityPredictorTeacherStudentPPO:
                 )
             if "student_optimizer_state_dict" in loaded_dict:
                 self.student_optimizer.load_state_dict(loaded_dict["student_optimizer_state_dict"])
+                self.student_learning_rate = self.student_optimizer.param_groups[0]["lr"]
             elif "proprio_optimizer_state_dict" in loaded_dict:
                 self.student_optimizer.load_state_dict(loaded_dict["proprio_optimizer_state_dict"])
+                self.student_learning_rate = self.student_optimizer.param_groups[0]["lr"]
         return load_cfg.get("iteration", False)
 
     def get_policy(self) -> RepresentationVelocityActorCritic:

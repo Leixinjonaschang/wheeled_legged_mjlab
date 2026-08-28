@@ -1,9 +1,34 @@
 # wheel_legged_mjlab
 
-## Installation 
+## Supported environment
+
+This branch targets the following locked migration stack:
+
+- Python 3.13
+- MJLab 1.6.0
+- MuJoCo 3.11.0
+- MuJoCo Warp 3.11.0
+- Warp 1.14.0
+- Repository-bundled `rsl-rl-lib` 5.3.0 installed editable from `rsl_rl/`
+
+Use the lockfile for training environments:
 
 ```shell
-uv sync
+uv sync --locked
+```
+
+Do not use `pip install .` for training. It does not enforce the uv override that
+selects the repository-bundled ASRL implementation and the validated Warp version.
+
+The MJLab 1.6 migration smoke tests were run on an NVIDIA RTX 4080 SUPER with
+driver 580.173.02. Long-training parity, contact-capacity tuning, and legacy
+checkpoint classification remain separate release gates; a checkpoint is not
+implicitly considered strict-resume compatible merely because its state dict loads.
+
+## Installation
+
+```shell
+uv sync --locked
 ```
 
 ## Usage

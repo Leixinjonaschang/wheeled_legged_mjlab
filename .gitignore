@@ -54,7 +54,9 @@ tests/
 !tests/
 tests/*
 !tests/test_action_delay.py
+!tests/test_dependency_versions.py
 !tests/test_fell_over_curriculum.py
+!tests/test_mjlab160_integration.py
 !tests/test_representation_teacher_student_config.py
 !tests/test_velocity_command.py
 !rsl_rl/tests/
@@ -63,6 +65,10 @@ rsl_rl/tests/*
 rsl_rl/tests/algorithms/*
 !rsl_rl/tests/algorithms/test_representation_teacher_student_ppo.py
 !rsl_rl/tests/algorithms/test_representation_velocity_teacher_student_ppo.py
+!rsl_rl/tests/algorithms/test_checkpoint_learning_rates.py
+!rsl_rl/tests/storage/
+rsl_rl/tests/storage/*
+!rsl_rl/tests/storage/test_rollout_storage_dtype.py
 !rsl_rl/tests/models/
 rsl_rl/tests/models/*
 !rsl_rl/tests/models/test_representation_actor_critic.py

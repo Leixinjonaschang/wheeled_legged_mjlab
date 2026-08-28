@@ -51,6 +51,22 @@ def get_wheeled_legged_metadata(
     joint_stiffness = env.sim.mj_model.actuator_gainprm[ctrl_ids_natural, 0]
     joint_damping = -env.sim.mj_model.actuator_biasprm[ctrl_ids_natural, 2]
     observation_group = "actor" if "actor" in env.observation_manager.active_terms else "proprio_history"
+    observation_names = env.observation_manager.active_terms[observation_group]
+    observation_terms_scale = []
+    observation_terms_flatten_history_dim = []
+    observation_terms_history_length = []
+    observation_terms_clip = []
+    for observation_name in observation_names:
+        cfg = env.observation_manager.get_term_cfg(observation_group, observation_name)
+        scale = cfg.scale
+        observation_terms_scale.append(
+            scale.cpu().tolist() if hasattr(scale, "cpu") else (1.0 if scale is None else scale)
+        )
+        observation_terms_flatten_history_dim.append(cfg.flatten_history_dim)
+        observation_terms_history_length.append(cfg.history_length)
+        observation_terms_clip.append(
+            [float("-inf"), float("inf")] if cfg.clip is None else list(cfg.clip)
+        )
 
     metadata = {
         "run_path": run_path,
@@ -59,7 +75,11 @@ def get_wheeled_legged_metadata(
         "joint_damping": joint_damping.tolist(),
         "default_joint_pos": robot.data.default_joint_pos[0].cpu().tolist(),
         "command_names": list(env.command_manager.active_terms),
-        "observation_names": env.observation_manager.active_terms[observation_group],
+        "observation_names": observation_names,
+        "observation_terms_scale": observation_terms_scale,
+        "observation_terms_flatten_history_dim": observation_terms_flatten_history_dim,
+        "observation_terms_history_length": observation_terms_history_length,
+        "observation_terms_clip": observation_terms_clip,
         "action_names": action_names,
         "action_target_names": action_target_names,
         "action_scale": action_scales,
@@ -116,12 +136,15 @@ class WheeledLeggedVelocityOnPolicyRunner(VelocityOnPolicyRunner):
             self.export_policy_to_onnx(str(policy_dir), filename)
             run_name = (
                 wandb.run.name
-                if self.logger.logger_type == "wandb" and wandb.run
+                if self.logger.logger_type in ("wandb", "WandbLogWriter") and wandb.run
                 else "local"
             )
             metadata = get_wheeled_legged_metadata(self.env.unwrapped, run_name, self.alg.get_policy())
             attach_metadata_to_onnx(str(onnx_path), metadata)
-            if self.logger.logger_type in ["wandb"] and self.cfg["upload_model"]:
+            if (
+                self.logger.logger_type in ("wandb", "WandbLogWriter")
+                and self.cfg["upload_model"]
+            ):
                 wandb.save(str(onnx_path), base_path=str(policy_dir))
         except Exception as exc:
             print(f"[WARN] ONNX export failed (training continues): {exc}")

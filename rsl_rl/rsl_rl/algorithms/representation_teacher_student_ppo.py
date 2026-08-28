@@ -241,8 +241,10 @@ class RepresentationTeacherStudentPPO:
             self._raw_actor.load_state_dict(loaded_dict[key], strict=strict)
         if load_cfg.get("optimizer"):
             self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+            self.learning_rate = self.optimizer.param_groups[0]["lr"]
             if "proprio_optimizer_state_dict" in loaded_dict:
                 self.proprio_optimizer.load_state_dict(loaded_dict["proprio_optimizer_state_dict"])
+                self.proprio_encoder_learning_rate = self.proprio_optimizer.param_groups[0]["lr"]
         return load_cfg.get("iteration", False)
 
     def get_policy(self) -> RepresentationActorCritic:
