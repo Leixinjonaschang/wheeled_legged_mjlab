@@ -847,7 +847,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "soft_landing": RewardTermCfg(
             func=mdp.soft_landing,
-            weight=-3.0e-3,
+            weight=-3.0e-4,
             params={
                 "sensor_name": "wheels_ground_contact",
                 "command_name": COMMAND_NAME,
