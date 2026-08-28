@@ -76,8 +76,16 @@ def depth_image(
   env: ManagerBasedRlEnv,
   sensor_name: str = "depth_camera",
   left_crop: int = 0,
+  depth_min_m: float = 0.2,
+  depth_max_m: float = 2.0,
 ) -> torch.Tensor:
   """Depth image from the forward-facing camera."""
+  if depth_min_m < 0.0:
+    raise ValueError(f"depth_min_m must be >= 0, got {depth_min_m}")
+  if depth_max_m <= depth_min_m:
+    raise ValueError(
+      f"depth_max_m must be greater than depth_min_m, got {depth_max_m}"
+    )
   camera: CameraSensor = env.scene[sensor_name]
   assert camera.data.depth is not None, f"Sensor '{sensor_name}' has no depth data"
   depth = camera.data.depth.squeeze(-1)
@@ -87,7 +95,15 @@ def depth_image(
     )
   if left_crop > 0:
     depth = depth[..., left_crop:].contiguous()
-  return depth
+  depth = torch.nan_to_num(
+    depth,
+    nan=depth_max_m,
+    posinf=depth_max_m,
+    neginf=depth_max_m,
+  )
+  depth = torch.where(depth <= 0.0, depth_max_m, depth)
+  depth = depth.clamp(min=depth_min_m, max=depth_max_m)
+  return (depth - depth_min_m) / (depth_max_m - depth_min_m)
 
 
 class DepthBuffer:
@@ -106,6 +122,8 @@ class DepthBuffer:
     buffer_size: int = 5,
     update_period: int = 5,
     left_crop: int = 0,
+    depth_min_m: float = 0.2,
+    depth_max_m: float = 2.0,
   ) -> torch.Tensor:
     if buffer_size < 1:
       raise ValueError(f"buffer_size must be >= 1, got {buffer_size}")
@@ -124,7 +142,13 @@ class DepthBuffer:
       assert self._buffer is not None
       return self._buffer
 
-    frame = depth_image(env, sensor_name=sensor_name, left_crop=left_crop)
+    frame = depth_image(
+      env,
+      sensor_name=sensor_name,
+      left_crop=left_crop,
+      depth_min_m=depth_min_m,
+      depth_max_m=depth_max_m,
+    )
 
     if needs_init:
       self._buffer = frame.unsqueeze(1).repeat(
@@ -189,6 +213,8 @@ class AsyncDepthBuffer:
     capture_frequency_hz: float = 30.0,
     system_delay_range_s: tuple[float, float] = (0.0, 0.0),
     left_crop: int = 0,
+    depth_min_m: float = 0.2,
+    depth_max_m: float = 2.0,
   ) -> torch.Tensor:
     if capture_frequency_hz <= 0.0:
       raise ValueError(
@@ -236,6 +262,8 @@ class AsyncDepthBuffer:
       env,
       sensor_name=sensor_name,
       left_crop=left_crop,
+      depth_min_m=depth_min_m,
+      depth_max_m=depth_max_m,
     ).unsqueeze(1)
 
     if needs_init:

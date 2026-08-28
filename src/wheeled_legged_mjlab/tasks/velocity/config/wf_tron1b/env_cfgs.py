@@ -92,6 +92,8 @@ DEPTH_CAMERA_WIDTH = 53
 DEPTH_CAMERA_HEIGHT = 30
 DEPTH_LEFT_CROP = 8
 DEPTH_MODEL_WIDTH = DEPTH_CAMERA_WIDTH - DEPTH_LEFT_CROP
+DEPTH_MIN_M = 0.2
+DEPTH_MAX_M = 2.0
 DEPTH_BUFFER_SIZE = 5
 DEPTH_BUFFER_UPDATE_PERIOD = 5
 DEPTH_CAPTURE_FREQUENCY_HZ = 30.0
@@ -451,6 +453,8 @@ def make_observations(
                         "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
                         "system_delay_range_s": DEPTH_SYSTEM_DELAY_RANGE_S,
                         "left_crop": DEPTH_LEFT_CROP,
+                        "depth_min_m": DEPTH_MIN_M,
+                        "depth_max_m": DEPTH_MAX_M,
                     },
                 )
             },
@@ -467,6 +471,8 @@ def make_observations(
                         "buffer_size": DEPTH_BUFFER_SIZE,
                         "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
                         "left_crop": DEPTH_LEFT_CROP,
+                        "depth_min_m": DEPTH_MIN_M,
+                        "depth_max_m": DEPTH_MAX_M,
                     },
                 )
             },
