@@ -305,6 +305,8 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     assert agent["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
     assert agent["actor"]["depth_gru_hidden_dim"] == 128
     assert agent["actor"]["depth_conv_strides"] == (2, 2, 1)
+    assert agent["actor"]["depth_min_m"] == DEPTH_MIN_M
+    assert agent["actor"]["depth_max_m"] == DEPTH_MAX_M
     assert agent["algorithm"]["representation_chunk_length"] == 24
     assert agent["algorithm"]["roughness_loss_coef"] == 0.2
     assert all("latent_dynamics" not in name for name in agent["actor"])
@@ -453,7 +455,7 @@ def test_depth_camera_domain_randomization_and_play_overrides() -> None:
     assert buffered_depth_term.params["enable_depth_dropout"] is False
 
 
-def test_depth_image_crops_and_normalizes_without_modifying_camera_data() -> None:
+def test_depth_image_crops_and_encodes_invalid_without_modifying_camera_data() -> None:
     raw_depth = torch.full(
         (1, DEPTH_CAMERA_HEIGHT, DEPTH_CAMERA_WIDTH, 1),
         1.1,
@@ -470,27 +472,23 @@ def test_depth_image_crops_and_normalizes_without_modifying_camera_data() -> Non
     depth = observation_mdp.depth_image(
         env,
         left_crop=DEPTH_LEFT_CROP,
-        depth_min_m=DEPTH_MIN_M,
-        depth_max_m=DEPTH_MAX_M,
     )
     deployment_depth = observation_mdp.preprocess_depth_image(
         raw_depth.squeeze(-1),
         left_crop=DEPTH_LEFT_CROP,
-        depth_min_m=DEPTH_MIN_M,
-        depth_max_m=DEPTH_MAX_M,
     )
 
     assert depth.shape == (1, DEPTH_CAMERA_HEIGHT, DEPTH_MODEL_WIDTH)
     torch.testing.assert_close(
         depth[0, 0, :10],
-        torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.5, 1.0, 1.0]),
+        torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 1.1, 2.0, 2.5]),
     )
     torch.testing.assert_close(deployment_depth, depth)
     torch.testing.assert_close(raw_depth, original_depth, equal_nan=True)
     assert depth.dtype is torch.float32
     assert depth.is_contiguous()
     assert torch.isfinite(depth).all()
-    assert torch.all((0.0 <= depth) & (depth <= 1.0))
+    assert torch.all(depth >= 0.0)
     with pytest.raises(ValueError, match="left_crop must be in"):
         observation_mdp.depth_image(env, left_crop=DEPTH_CAMERA_WIDTH)
 
@@ -503,19 +501,15 @@ def test_depth_image_crops_and_normalizes_without_modifying_camera_data() -> Non
         (2.0, 1.0, "depth_max_m must be greater than depth_min_m"),
     ),
 )
-def test_depth_image_validates_normalization_range(
+def test_depth_frame_processor_validates_noise_range(
     depth_min_m: float,
     depth_max_m: float,
     message: str,
 ) -> None:
     raw_depth = torch.ones(1, 1, 1, 1)
-    env = SimpleNamespace(
-        scene={"depth_camera": SimpleNamespace(data=SimpleNamespace(depth=raw_depth))}
-    )
-
     with pytest.raises(ValueError, match=message):
-        observation_mdp.depth_image(
-            env,
+        observation_mdp._DepthFrameProcessor()(
+            raw_depth.squeeze(-1),
             depth_min_m=depth_min_m,
             depth_max_m=depth_max_m,
         )
@@ -607,7 +601,7 @@ def test_structured_depth_dropout_is_bounded_and_reproducible() -> None:
         dropout_area_fraction_range=DEPTH_DROPOUT_AREA_FRACTION_RANGE,
         dropout_aspect_ratio_range=DEPTH_DROPOUT_ASPECT_RATIO_RANGE,
     )
-    filled_invalid = processed == 1.0
+    filled_invalid = processed == 0.0
     assert torch.all(filled_invalid.any(dim=(-1, -2)))
     assert torch.all(filled_invalid.sum(dim=(-1, -2)) <= max_pixels)
 
@@ -630,7 +624,7 @@ def test_disabled_depth_dropout_does_not_sample_rng(monkeypatch) -> None:
         dropout_probability=1.0,
     )
 
-    torch.testing.assert_close(depth, torch.full_like(depth, 0.5))
+    torch.testing.assert_close(depth, torch.full_like(depth, 1.1))
 
 
 def test_depth_distance_noise_uses_quadratic_sigma(monkeypatch) -> None:
@@ -651,7 +645,7 @@ def test_depth_distance_noise_uses_quadratic_sigma(monkeypatch) -> None:
         dropout_probability=0.0,
     )
 
-    measured_sigma = processed * 4.0 - raw_depth
+    measured_sigma = processed - raw_depth
     expected_sigma = (
         DEPTH_NOISE_BASE_M + DEPTH_NOISE_QUADRATIC_COEFF * raw_depth.square()
     )
@@ -705,7 +699,7 @@ def test_disabled_depth_distance_noise_does_not_sample_rng(monkeypatch) -> None:
     )
 
     assert depth.dtype is torch.float32
-    torch.testing.assert_close(depth, torch.full_like(depth, 0.5))
+    torch.testing.assert_close(depth, torch.full_like(depth, 1.1))
     processor.reset()
 
 
@@ -728,11 +722,11 @@ def test_depth_randomization_preserves_original_invalid_pixels(monkeypatch) -> N
         dropout_probability=0.0,
     )
 
-    torch.testing.assert_close(processed[0, 0, :4], torch.ones(4))
+    torch.testing.assert_close(processed[0, 0, :4], torch.zeros(4))
     assert processed.dtype is torch.float32
     assert processed.is_contiguous()
     assert torch.isfinite(processed).all()
-    assert torch.all((0.0 <= processed) & (processed <= 1.0))
+    assert torch.all(processed >= 0.0)
 
 
 @pytest.mark.parametrize(
@@ -845,28 +839,28 @@ def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:
 
     obs = term(env, buffer_size=5, update_period=5, left_crop=1, **depth_range)
     assert obs.shape == (2, 5, 2, 2)
-    assert torch.all(obs == 0.1)
+    assert torch.all(obs == 1.0)
     assert depth_calls == 1
 
     env.common_step_counter = 4
     env.frame = torch.full((2, 2, 3), 2.0)
     obs = term(env, buffer_size=5, update_period=5, left_crop=1, **depth_range)
-    assert torch.all(obs == 0.1)
+    assert torch.all(obs == 1.0)
     assert depth_calls == 1
 
     env.common_step_counter = 5
     obs = term(env, buffer_size=5, update_period=5, left_crop=1, **depth_range)
-    assert torch.all(obs[:, :4] == 0.1)
-    assert torch.all(obs[:, 4] == 0.2)
+    assert torch.all(obs[:, :4] == 1.0)
+    assert torch.all(obs[:, 4] == 2.0)
     assert depth_calls == 2
 
     env.common_step_counter = 6
     env.frame = torch.stack((torch.full((2, 3), 3.0), torch.full((2, 3), 4.0)))
     term.reset(torch.tensor([1]))
     obs = term(env, buffer_size=5, update_period=5, left_crop=1, **depth_range)
-    assert torch.all(obs[0, :4] == 0.1)
-    assert torch.all(obs[0, 4] == 0.2)
-    assert torch.all(obs[1] == 0.4)
+    assert torch.all(obs[0, :4] == 1.0)
+    assert torch.all(obs[0, 4] == 2.0)
+    assert torch.all(obs[1] == 4.0)
     assert depth_calls == 3
 
 
@@ -890,29 +884,29 @@ def test_async_depth_buffer_updates_on_capture_clock(monkeypatch) -> None:
 
     obs = term(env, capture_frequency_hz=30.0, left_crop=1, **depth_range)
     assert obs.shape == (2, 1, 2, 2)
-    assert torch.all(obs == 0.1)
+    assert torch.all(obs == 1.0)
     assert depth_calls == 1
 
     env.common_step_counter = 1
     env.frame = torch.full((2, 2, 3), 2.0)
     obs = term(env, capture_frequency_hz=30.0, left_crop=1, **depth_range)
-    assert torch.all(obs == 0.1)
+    assert torch.all(obs == 1.0)
     assert depth_calls == 1
 
     env.common_step_counter = 2
     obs = term(env, capture_frequency_hz=30.0, left_crop=1, **depth_range)
-    assert torch.all(obs == 0.2)
+    assert torch.all(obs == 2.0)
     assert depth_calls == 2
 
     env.common_step_counter = 3
     env.frame = torch.full((2, 2, 3), 3.0)
     obs = term(env, capture_frequency_hz=30.0, left_crop=1, **depth_range)
-    assert torch.all(obs == 0.2)
+    assert torch.all(obs == 2.0)
     assert depth_calls == 2
 
     env.common_step_counter = 4
     obs = term(env, capture_frequency_hz=30.0, left_crop=1, **depth_range)
-    assert torch.all(obs == 0.3)
+    assert torch.all(obs == 3.0)
     assert depth_calls == 3
 
 
@@ -960,7 +954,7 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
         **depth_range,
     )
     assert obs.shape == (2, 1, 2, 3)
-    assert torch.all(obs == 0.05)
+    assert torch.all(obs == 1.0)
     assert term._delay_s is not None
     term._delay_s.copy_(torch.tensor([0.005, 0.015], device=term._delay_s.device))
 
@@ -972,8 +966,8 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
         system_delay_range_s=(0.0, 0.020),
         **depth_range,
     )
-    assert torch.all(obs[0] == 0.1)
-    assert torch.all(obs[1] == 0.05)
+    assert torch.all(obs[0] == 2.0)
+    assert torch.all(obs[1] == 1.0)
 
     env.common_step_counter = 3
     obs = term(
@@ -982,7 +976,7 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
         system_delay_range_s=(0.0, 0.020),
         **depth_range,
     )
-    assert torch.all(obs == 0.1)
+    assert torch.all(obs == 2.0)
 
     env.common_step_counter = 4
     env.frame = torch.full((2, 2, 3), 3.0)
@@ -992,8 +986,8 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
         system_delay_range_s=(0.0, 0.020),
         **depth_range,
     )
-    assert torch.all(obs[0] == 0.15)
-    assert torch.all(obs[1] == 0.1)
+    assert torch.all(obs[0] == 3.0)
+    assert torch.all(obs[1] == 2.0)
 
     def fixed_delay(count, device):
         return torch.full((count,), 0.012, device=device, dtype=torch.float64)
@@ -1008,8 +1002,8 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
         system_delay_range_s=(0.0, 0.020),
         **depth_range,
     )
-    assert torch.all(obs[0] == 0.15)
-    assert torch.all(obs[1] == 0.45)
+    assert torch.all(obs[0] == 3.0)
+    assert torch.all(obs[1] == 9.0)
     assert term._delay_s is not None
     assert term._delay_s[0].item() == pytest.approx(0.005)
     assert term._delay_s[1].item() == pytest.approx(0.012)
@@ -1023,8 +1017,8 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
         system_delay_range_s=(0.0, 0.020),
         **depth_range,
     )
-    assert torch.all(obs[0] == 0.2)
-    assert torch.all(obs[1] == 0.55)
+    assert torch.all(obs[0] == 4.0)
+    assert torch.all(obs[1] == 11.0)
     assert depth_calls == 5
 
 
@@ -1264,6 +1258,13 @@ def test_depth_velocity_representation_metadata_matches_onnx_io() -> None:
 
     assert metadata["policy_input_names"] == onnx_policy.input_names
     assert metadata["policy_output_names"] == onnx_policy.output_names
+    assert metadata["depth_input_dtype"] == "float32"
+    assert metadata["depth_input_unit"] == "m"
+    assert metadata["depth_input_shape"] == [1, 1, 32, 24]
+    assert metadata["depth_invalid_value"] == 0.0
+    assert metadata["depth_min_m"] == DEPTH_MIN_M
+    assert metadata["depth_max_m"] == DEPTH_MAX_M
+    assert metadata["depth_preprocessing"] == "below_min_to_max,clamp,normalize"
 
 
 def test_non_representation_metadata_stays_legacy_shape() -> None:

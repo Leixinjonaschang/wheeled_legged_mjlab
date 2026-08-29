@@ -9,6 +9,8 @@ from mjlab.rl import (
     RslRlPpoAlgorithmCfg,
 )
 
+from .env_cfgs import DEPTH_MAX_M, DEPTH_MIN_M
+
 
 class WFTRON1BRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     trial_message: str = ""
@@ -51,6 +53,8 @@ class RslRlDepthRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelC
     depth_gru_hidden_dim: int = 128
     depth_channels: Tuple[int, ...] = (16, 32, 32)
     depth_conv_strides: Tuple[int, ...] = (2, 2, 1)
+    depth_min_m: float = DEPTH_MIN_M
+    depth_max_m: float = DEPTH_MAX_M
     class_name: str = "DepthRepresentationVelocityActorCritic"
 
 

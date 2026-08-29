@@ -106,6 +106,13 @@ def get_wheeled_legged_metadata(
                 "student_history_length": str(proprio_history_cfg.history_length),
                 "student_history_flatten_dim": str(proprio_history_cfg.flatten_history_dim).lower(),
                 "student_history_order": "oldest_to_newest",
+                "depth_input_dtype": "float32",
+                "depth_input_unit": "m",
+                "depth_input_shape": [1, *policy.depth_shape],
+                "depth_invalid_value": 0.0,
+                "depth_min_m": policy.depth_preprocessor.depth_min_m,
+                "depth_max_m": policy.depth_preprocessor.depth_max_m,
+                "depth_preprocessing": "below_min_to_max,clamp,normalize",
             }
         )
     elif isinstance(policy, RepresentationVelocityActorCritic):
