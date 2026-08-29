@@ -27,6 +27,8 @@ from wheeled_legged_mjlab.tasks.velocity import mdp
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     DEPTH_BUFFER_SIZE,
     DEPTH_BUFFER_UPDATE_PERIOD,
+    DEPTH_CALIBRATION_BIAS_RANGE_M,
+    DEPTH_CALIBRATION_SCALE_RANGE,
     DEPTH_CAPTURE_FREQUENCY_HZ,
     DEPTH_CAMERA_ENTITY_NAME,
     DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG,
@@ -35,10 +37,16 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     DEPTH_CAMERA_PITCH_DELTA_RANGE_RAD,
     DEPTH_CAMERA_POSITION_DELTA_RANGE_M,
     DEPTH_CAMERA_WIDTH,
+    DEPTH_DROPOUT_AREA_FRACTION_RANGE,
+    DEPTH_DROPOUT_ASPECT_RATIO_RANGE,
+    DEPTH_DROPOUT_PATCH_COUNT_RANGE,
+    DEPTH_DROPOUT_PROBABILITY,
     DEPTH_LEFT_CROP,
     DEPTH_MAX_M,
     DEPTH_MIN_M,
     DEPTH_MODEL_WIDTH,
+    DEPTH_NOISE_STD_M,
+    DEPTH_RANDOMIZATION_ENABLED,
     DEPTH_SYSTEM_DELAY_RANGE_S,
     wf_tron1b_rough_depth_env_cfg,
     wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg,
@@ -54,6 +62,18 @@ assert PLAY_SPEC is not None
 assert PLAY_SPEC.loader is not None
 play = importlib.util.module_from_spec(PLAY_SPEC)
 PLAY_SPEC.loader.exec_module(play)
+
+
+DEPTH_RANDOMIZATION_PARAMS = {
+    "enable_depth_randomization": DEPTH_RANDOMIZATION_ENABLED,
+    "calibration_scale_range": DEPTH_CALIBRATION_SCALE_RANGE,
+    "calibration_bias_range_m": DEPTH_CALIBRATION_BIAS_RANGE_M,
+    "noise_std_m": DEPTH_NOISE_STD_M,
+    "dropout_probability": DEPTH_DROPOUT_PROBABILITY,
+    "dropout_patch_count_range": DEPTH_DROPOUT_PATCH_COUNT_RANGE,
+    "dropout_area_fraction_range": DEPTH_DROPOUT_AREA_FRACTION_RANGE,
+    "dropout_aspect_ratio_range": DEPTH_DROPOUT_ASPECT_RATIO_RANGE,
+}
 
 
 def _assert_dynamics_context_group(cfg) -> None:
@@ -199,6 +219,7 @@ def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
         "left_crop": DEPTH_LEFT_CROP,
         "depth_min_m": DEPTH_MIN_M,
         "depth_max_m": DEPTH_MAX_M,
+        **DEPTH_RANDOMIZATION_PARAMS,
     }
     depth_sensor = next(
         sensor for sensor in cfg.scene.sensors if sensor.name == DEPTH_CAMERA_NAME
@@ -248,6 +269,7 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "left_crop": DEPTH_LEFT_CROP,
         "depth_min_m": DEPTH_MIN_M,
         "depth_max_m": DEPTH_MAX_M,
+        **DEPTH_RANDOMIZATION_PARAMS,
     }
     assert cfg.observations["wheel_roughness"].terms["wheel_roughness"].func is mdp.wheel_roughness_gate
     assert agent["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
@@ -383,6 +405,7 @@ def test_depth_camera_domain_randomization_and_play_overrides() -> None:
     assert play_depth_term.params["left_crop"] == DEPTH_LEFT_CROP
     assert play_depth_term.params["depth_min_m"] == DEPTH_MIN_M
     assert play_depth_term.params["depth_max_m"] == DEPTH_MAX_M
+    assert play_depth_term.params["enable_depth_randomization"] is False
 
     buffered_play_cfg = wf_tron1b_rough_depth_env_cfg(play=True)
     buffered_depth_term = buffered_play_cfg.observations[DEPTH_CAMERA_NAME].terms[
@@ -393,12 +416,14 @@ def test_depth_camera_domain_randomization_and_play_overrides() -> None:
     assert buffered_depth_term.params["left_crop"] == DEPTH_LEFT_CROP
     assert buffered_depth_term.params["depth_min_m"] == DEPTH_MIN_M
     assert buffered_depth_term.params["depth_max_m"] == DEPTH_MAX_M
+    assert buffered_depth_term.params["enable_depth_randomization"] is False
 
 
 def test_depth_image_crops_and_normalizes_without_modifying_camera_data() -> None:
     raw_depth = torch.full(
         (1, DEPTH_CAMERA_HEIGHT, DEPTH_CAMERA_WIDTH, 1),
         1.1,
+        dtype=torch.float64,
     )
     raw_depth[0, 0, DEPTH_LEFT_CROP : DEPTH_LEFT_CROP + 10, 0] = torch.tensor(
         [-1.0, 0.0, torch.nan, -torch.inf, torch.inf, 0.1, 0.2, 1.1, 2.0, 2.5]
@@ -414,13 +439,21 @@ def test_depth_image_crops_and_normalizes_without_modifying_camera_data() -> Non
         depth_min_m=DEPTH_MIN_M,
         depth_max_m=DEPTH_MAX_M,
     )
+    deployment_depth = observation_mdp.preprocess_depth_image(
+        raw_depth.squeeze(-1),
+        left_crop=DEPTH_LEFT_CROP,
+        depth_min_m=DEPTH_MIN_M,
+        depth_max_m=DEPTH_MAX_M,
+    )
 
     assert depth.shape == (1, DEPTH_CAMERA_HEIGHT, DEPTH_MODEL_WIDTH)
     torch.testing.assert_close(
         depth[0, 0, :10],
         torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.5, 1.0, 1.0]),
     )
+    torch.testing.assert_close(deployment_depth, depth)
     torch.testing.assert_close(raw_depth, original_depth, equal_nan=True)
+    assert depth.dtype is torch.float32
     assert depth.is_contiguous()
     assert torch.isfinite(depth).all()
     assert torch.all((0.0 <= depth) & (depth <= 1.0))
@@ -454,117 +487,291 @@ def test_depth_image_validates_normalization_range(
         )
 
 
+def test_depth_calibration_is_episode_stable_and_resampled_on_reset() -> None:
+    torch.manual_seed(0)
+    processor = observation_mdp._DepthFrameProcessor()
+    raw_depth = torch.ones(3, 4, 5)
+    randomization = {
+        "enable_depth_randomization": True,
+        "calibration_scale_range": (0.98, 1.02),
+        "calibration_bias_range_m": (-0.01, 0.01),
+    }
+
+    first = processor(raw_depth, **randomization)
+    assert processor._calibration_scale is not None
+    assert processor._calibration_bias_m is not None
+    initial_scale = processor._calibration_scale.clone()
+    initial_bias = processor._calibration_bias_m.clone()
+
+    second = processor(raw_depth, **randomization)
+    torch.testing.assert_close(second, first)
+    torch.testing.assert_close(processor._calibration_scale, initial_scale)
+    torch.testing.assert_close(processor._calibration_bias_m, initial_bias)
+
+    processor.reset(torch.tensor([1]))
+    torch.testing.assert_close(processor._calibration_scale[[0, 2]], initial_scale[[0, 2]])
+    torch.testing.assert_close(processor._calibration_bias_m[[0, 2]], initial_bias[[0, 2]])
+    assert not (
+        torch.equal(processor._calibration_scale[1], initial_scale[1])
+        and torch.equal(processor._calibration_bias_m[1], initial_bias[1])
+    )
+    after_partial_reset = processor(raw_depth, **randomization)
+    torch.testing.assert_close(after_partial_reset[[0, 2]], first[[0, 2]])
+    assert not torch.equal(after_partial_reset[1], first[1])
+
+    partial_scale = processor._calibration_scale.clone()
+    partial_bias = processor._calibration_bias_m.clone()
+    processor.reset()
+    assert not torch.equal(processor._calibration_scale, partial_scale)
+    assert not torch.equal(processor._calibration_bias_m, partial_bias)
+
+
+def test_structured_depth_dropout_is_bounded_and_reproducible() -> None:
+    mask_kwargs = {
+        "batch_size": 2048,
+        "height": DEPTH_CAMERA_HEIGHT,
+        "width": DEPTH_MODEL_WIDTH,
+        "device": torch.device("cpu"),
+        "probability": DEPTH_DROPOUT_PROBABILITY,
+        "patch_count_range": DEPTH_DROPOUT_PATCH_COUNT_RANGE,
+        "area_fraction_range": DEPTH_DROPOUT_AREA_FRACTION_RANGE,
+        "aspect_ratio_range": DEPTH_DROPOUT_ASPECT_RATIO_RANGE,
+    }
+    torch.manual_seed(7)
+    mask = observation_mdp._DepthFrameProcessor._structured_dropout_mask(
+        **mask_kwargs
+    )
+    torch.manual_seed(7)
+    repeated_mask = observation_mdp._DepthFrameProcessor._structured_dropout_mask(
+        **mask_kwargs
+    )
+
+    torch.testing.assert_close(repeated_mask, mask)
+    invalid_pixels = mask.sum(dim=(-1, -2))
+    active = invalid_pixels > 0
+    active_fraction = active.to(torch.float32).mean().item()
+    assert active_fraction == pytest.approx(DEPTH_DROPOUT_PROBABILITY, abs=0.04)
+    max_pixels = math.floor(
+        DEPTH_DROPOUT_AREA_FRACTION_RANGE[1]
+        * DEPTH_CAMERA_HEIGHT
+        * DEPTH_MODEL_WIDTH
+    )
+    assert torch.all(invalid_pixels[active] <= max_pixels)
+
+    torch.manual_seed(8)
+    processed = observation_mdp._DepthFrameProcessor()(
+        torch.full((4, DEPTH_CAMERA_HEIGHT, DEPTH_MODEL_WIDTH), 1.1),
+        enable_depth_randomization=True,
+        calibration_scale_range=(1.0, 1.0),
+        calibration_bias_range_m=(0.0, 0.0),
+        dropout_probability=1.0,
+        dropout_patch_count_range=DEPTH_DROPOUT_PATCH_COUNT_RANGE,
+        dropout_area_fraction_range=DEPTH_DROPOUT_AREA_FRACTION_RANGE,
+        dropout_aspect_ratio_range=DEPTH_DROPOUT_ASPECT_RATIO_RANGE,
+    )
+    filled_invalid = processed == 1.0
+    assert torch.all(filled_invalid.any(dim=(-1, -2)))
+    assert torch.all(filled_invalid.sum(dim=(-1, -2)) <= max_pixels)
+
+
+def test_disabled_depth_randomization_does_not_sample_rng(monkeypatch) -> None:
+    processor = observation_mdp._DepthFrameProcessor()
+
+    def unexpected_rng(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("depth RNG must not run when randomization is disabled")
+
+    monkeypatch.setattr(torch, "rand", unexpected_rng)
+    monkeypatch.setattr(torch, "randn_like", unexpected_rng)
+    depth = processor(
+        torch.full((2, 3, 4), 1.1),
+        enable_depth_randomization=False,
+        calibration_scale_range=DEPTH_CALIBRATION_SCALE_RANGE,
+        calibration_bias_range_m=DEPTH_CALIBRATION_BIAS_RANGE_M,
+        noise_std_m=DEPTH_NOISE_STD_M,
+        dropout_probability=DEPTH_DROPOUT_PROBABILITY,
+        dropout_patch_count_range=DEPTH_DROPOUT_PATCH_COUNT_RANGE,
+        dropout_area_fraction_range=DEPTH_DROPOUT_AREA_FRACTION_RANGE,
+        dropout_aspect_ratio_range=DEPTH_DROPOUT_ASPECT_RATIO_RANGE,
+    )
+
+    assert depth.dtype is torch.float32
+    torch.testing.assert_close(depth, torch.full_like(depth, 0.5))
+    processor.reset()
+
+
+@pytest.mark.parametrize(
+    ("term_factory", "term_kwargs", "stable_step", "capture_step"),
+    (
+        (observation_mdp.depth_buffer, {"buffer_size": 1, "update_period": 5}, 4, 5),
+        (
+            observation_mdp.async_depth_buffer,
+            {"capture_frequency_hz": 30.0},
+            1,
+            2,
+        ),
+    ),
+)
+def test_depth_noise_is_sampled_only_for_new_buffered_frames(
+    monkeypatch,
+    term_factory,
+    term_kwargs,
+    stable_step: int,
+    capture_step: int,
+) -> None:
+    env = SimpleNamespace(
+        common_step_counter=0,
+        step_dt=0.02,
+        frame=torch.ones(2, 3, 4),
+    )
+    term = term_factory(cfg=None, env=env)
+    noise_calls = 0
+
+    def get_depth(env, sensor_name):
+        del sensor_name
+        return env.frame
+
+    def deterministic_noise(depth):
+        nonlocal noise_calls
+        noise_calls += 1
+        return torch.full_like(depth, float(noise_calls))
+
+    monkeypatch.setattr(observation_mdp, "_camera_depth_image_meters", get_depth)
+    monkeypatch.setattr(torch, "randn_like", deterministic_noise)
+    randomization = {
+        "depth_min_m": 0.0,
+        "depth_max_m": 10.0,
+        "enable_depth_randomization": True,
+        "calibration_scale_range": (1.0, 1.0),
+        "calibration_bias_range_m": (0.0, 0.0),
+        "noise_std_m": 0.1,
+        "dropout_probability": 0.0,
+    }
+
+    first = term(env, **term_kwargs, **randomization).clone()
+    env.common_step_counter = stable_step
+    repeated = term(env, **term_kwargs, **randomization).clone()
+    torch.testing.assert_close(repeated, first)
+    assert noise_calls == 1
+
+    env.common_step_counter = capture_step
+    captured = term(env, **term_kwargs, **randomization)
+    assert noise_calls == 2
+    assert not torch.equal(captured, first)
+
+
+@pytest.mark.parametrize(
+    ("parameter", "value", "message"),
+    (
+        ("calibration_scale_range", (0.0, 1.0), "calibration_scale_range"),
+        ("calibration_bias_range_m", (0.1, -0.1), "calibration_bias_range_m"),
+        ("noise_std_m", -0.1, "noise_std_m"),
+        ("dropout_probability", 1.1, "dropout_probability"),
+        ("dropout_patch_count_range", (0, 3), "dropout_patch_count_range"),
+        ("dropout_area_fraction_range", (0.1, 1.1), "dropout_area_fraction_range"),
+        ("dropout_aspect_ratio_range", (0.0, 1.0), "dropout_aspect_ratio_range"),
+    ),
+)
+def test_depth_randomization_validates_parameters(
+    parameter: str,
+    value,
+    message: str,
+) -> None:
+    processor = observation_mdp._DepthFrameProcessor()
+
+    with pytest.raises(ValueError, match=message):
+        processor(torch.ones(1, 3, 4), **{parameter: value})
+
+
 def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:
     env = SimpleNamespace(common_step_counter=0, frame=torch.ones(2, 2, 3))
     term = observation_mdp.depth_buffer(cfg=None, env=env)
     depth_calls = 0
-    left_crops = []
-    depth_ranges = []
 
-    def get_depth(
-        env,
-        sensor_name,
-        left_crop=0,
-        depth_min_m=DEPTH_MIN_M,
-        depth_max_m=DEPTH_MAX_M,
-    ):
+    def get_depth(env, sensor_name):
         nonlocal depth_calls
+        del sensor_name
         depth_calls += 1
-        left_crops.append(left_crop)
-        depth_ranges.append((depth_min_m, depth_max_m))
-        return env.frame[..., left_crop:]
+        return env.frame
 
     monkeypatch.setattr(
         observation_mdp,
-        "depth_image",
+        "_camera_depth_image_meters",
         get_depth,
     )
-    depth_range = {"depth_min_m": 0.3, "depth_max_m": 3.0}
+    depth_range = {"depth_min_m": 0.0, "depth_max_m": 10.0}
 
     obs = term(env, buffer_size=5, update_period=5, left_crop=1, **depth_range)
     assert obs.shape == (2, 5, 2, 2)
-    assert torch.all(obs == 1.0)
+    assert torch.all(obs == 0.1)
     assert depth_calls == 1
 
     env.common_step_counter = 4
     env.frame = torch.full((2, 2, 3), 2.0)
     obs = term(env, buffer_size=5, update_period=5, left_crop=1, **depth_range)
-    assert torch.all(obs == 1.0)
+    assert torch.all(obs == 0.1)
     assert depth_calls == 1
 
     env.common_step_counter = 5
     obs = term(env, buffer_size=5, update_period=5, left_crop=1, **depth_range)
-    assert torch.all(obs[:, :4] == 1.0)
-    assert torch.all(obs[:, 4] == 2.0)
+    assert torch.all(obs[:, :4] == 0.1)
+    assert torch.all(obs[:, 4] == 0.2)
     assert depth_calls == 2
 
     env.common_step_counter = 6
     env.frame = torch.stack((torch.full((2, 3), 3.0), torch.full((2, 3), 4.0)))
     term.reset(torch.tensor([1]))
     obs = term(env, buffer_size=5, update_period=5, left_crop=1, **depth_range)
-    assert torch.all(obs[0, :4] == 1.0)
-    assert torch.all(obs[0, 4] == 2.0)
-    assert torch.all(obs[1] == 4.0)
+    assert torch.all(obs[0, :4] == 0.1)
+    assert torch.all(obs[0, 4] == 0.2)
+    assert torch.all(obs[1] == 0.4)
     assert depth_calls == 3
-    assert left_crops == [1, 1, 1]
-    assert depth_ranges == [(0.3, 3.0)] * 3
 
 
 def test_async_depth_buffer_updates_on_capture_clock(monkeypatch) -> None:
     env = SimpleNamespace(common_step_counter=0, step_dt=0.02, frame=torch.ones(2, 2, 3))
     term = observation_mdp.async_depth_buffer(cfg=None, env=env)
     depth_calls = 0
-    left_crops = []
-    depth_ranges = []
 
-    def get_depth(
-        env,
-        sensor_name,
-        left_crop=0,
-        depth_min_m=DEPTH_MIN_M,
-        depth_max_m=DEPTH_MAX_M,
-    ):
+    def get_depth(env, sensor_name):
         nonlocal depth_calls
+        del sensor_name
         depth_calls += 1
-        left_crops.append(left_crop)
-        depth_ranges.append((depth_min_m, depth_max_m))
-        return env.frame[..., left_crop:]
+        return env.frame
 
     monkeypatch.setattr(
         observation_mdp,
-        "depth_image",
+        "_camera_depth_image_meters",
         get_depth,
     )
-    depth_range = {"depth_min_m": 0.4, "depth_max_m": 4.0}
+    depth_range = {"depth_min_m": 0.0, "depth_max_m": 10.0}
 
     obs = term(env, capture_frequency_hz=30.0, left_crop=1, **depth_range)
     assert obs.shape == (2, 1, 2, 2)
-    assert torch.all(obs == 1.0)
+    assert torch.all(obs == 0.1)
     assert depth_calls == 1
 
     env.common_step_counter = 1
     env.frame = torch.full((2, 2, 3), 2.0)
     obs = term(env, capture_frequency_hz=30.0, left_crop=1, **depth_range)
-    assert torch.all(obs == 1.0)
+    assert torch.all(obs == 0.1)
     assert depth_calls == 1
 
     env.common_step_counter = 2
     obs = term(env, capture_frequency_hz=30.0, left_crop=1, **depth_range)
-    assert torch.all(obs == 2.0)
+    assert torch.all(obs == 0.2)
     assert depth_calls == 2
 
     env.common_step_counter = 3
     env.frame = torch.full((2, 2, 3), 3.0)
     obs = term(env, capture_frequency_hz=30.0, left_crop=1, **depth_range)
-    assert torch.all(obs == 2.0)
+    assert torch.all(obs == 0.2)
     assert depth_calls == 2
 
     env.common_step_counter = 4
     obs = term(env, capture_frequency_hz=30.0, left_crop=1, **depth_range)
-    assert torch.all(obs == 3.0)
+    assert torch.all(obs == 0.3)
     assert depth_calls == 3
-    assert left_crops == [1, 1, 1]
-    assert depth_ranges == [(0.4, 4.0)] * 3
 
 
 def test_wheel_roughness_preserves_left_right_order(monkeypatch) -> None:
@@ -595,26 +802,23 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
     term = observation_mdp.async_depth_buffer(cfg=None, env=env)
     depth_calls = 0
 
-    def get_depth(
-        env,
-        sensor_name,
-        left_crop=0,
-        depth_min_m=DEPTH_MIN_M,
-        depth_max_m=DEPTH_MAX_M,
-    ):
+    def get_depth(env, sensor_name):
         nonlocal depth_calls
-        del depth_min_m, depth_max_m
+        del sensor_name
         depth_calls += 1
-        return env.frame[..., left_crop:]
+        return env.frame
 
-    monkeypatch.setattr(observation_mdp, "depth_image", get_depth)
+    monkeypatch.setattr(observation_mdp, "_camera_depth_image_meters", get_depth)
+    depth_range = {"depth_min_m": 0.0, "depth_max_m": 20.0}
 
     obs = term(
         env,
         capture_frequency_hz=30.0,
         system_delay_range_s=(0.0, 0.020),
+        **depth_range,
     )
     assert obs.shape == (2, 1, 2, 3)
+    assert torch.all(obs == 0.05)
     assert term._delay_s is not None
     term._delay_s.copy_(torch.tensor([0.005, 0.015], device=term._delay_s.device))
 
@@ -624,17 +828,19 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
         env,
         capture_frequency_hz=30.0,
         system_delay_range_s=(0.0, 0.020),
+        **depth_range,
     )
-    assert torch.all(obs[0] == 2.0)
-    assert torch.all(obs[1] == 1.0)
+    assert torch.all(obs[0] == 0.1)
+    assert torch.all(obs[1] == 0.05)
 
     env.common_step_counter = 3
     obs = term(
         env,
         capture_frequency_hz=30.0,
         system_delay_range_s=(0.0, 0.020),
+        **depth_range,
     )
-    assert torch.all(obs == 2.0)
+    assert torch.all(obs == 0.1)
 
     env.common_step_counter = 4
     env.frame = torch.full((2, 2, 3), 3.0)
@@ -642,9 +848,10 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
         env,
         capture_frequency_hz=30.0,
         system_delay_range_s=(0.0, 0.020),
+        **depth_range,
     )
-    assert torch.all(obs[0] == 3.0)
-    assert torch.all(obs[1] == 2.0)
+    assert torch.all(obs[0] == 0.15)
+    assert torch.all(obs[1] == 0.1)
 
     def fixed_delay(count, device):
         return torch.full((count,), 0.012, device=device, dtype=torch.float64)
@@ -657,9 +864,10 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
         env,
         capture_frequency_hz=30.0,
         system_delay_range_s=(0.0, 0.020),
+        **depth_range,
     )
-    assert torch.all(obs[0] == 3.0)
-    assert torch.all(obs[1] == 9.0)
+    assert torch.all(obs[0] == 0.15)
+    assert torch.all(obs[1] == 0.45)
     assert term._delay_s is not None
     assert term._delay_s[0].item() == pytest.approx(0.005)
     assert term._delay_s[1].item() == pytest.approx(0.012)
@@ -671,9 +879,10 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
         env,
         capture_frequency_hz=30.0,
         system_delay_range_s=(0.0, 0.020),
+        **depth_range,
     )
-    assert torch.all(obs[0] == 4.0)
-    assert torch.all(obs[1] == 11.0)
+    assert torch.all(obs[0] == 0.2)
+    assert torch.all(obs[1] == 0.55)
     assert depth_calls == 5
 
 

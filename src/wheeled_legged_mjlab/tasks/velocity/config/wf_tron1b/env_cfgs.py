@@ -98,6 +98,14 @@ DEPTH_BUFFER_SIZE = 5
 DEPTH_BUFFER_UPDATE_PERIOD = 5
 DEPTH_CAPTURE_FREQUENCY_HZ = 30.0
 DEPTH_SYSTEM_DELAY_RANGE_S = (0.0, 0.020)
+DEPTH_RANDOMIZATION_ENABLED = True
+DEPTH_CALIBRATION_SCALE_RANGE = (0.98, 1.02)
+DEPTH_CALIBRATION_BIAS_RANGE_M = (-0.01, 0.01)
+DEPTH_NOISE_STD_M = 0.005
+DEPTH_DROPOUT_PROBABILITY = 0.30
+DEPTH_DROPOUT_PATCH_COUNT_RANGE = (1, 3)
+DEPTH_DROPOUT_AREA_FRACTION_RANGE = (0.01, 0.05)
+DEPTH_DROPOUT_ASPECT_RATIO_RANGE = (0.125, 8.0)
 DEPTH_CAMERA_POSITION_DELTA_RANGE_M = (-0.010, 0.010)
 DEPTH_CAMERA_PITCH_DELTA_RANGE_RAD = (-math.radians(1.0), math.radians(1.0))
 DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG = (-1.0, 1.0)
@@ -443,6 +451,19 @@ def make_observations(
         enable_corruption=False,
     )
 
+    depth_processing_params = {
+        "left_crop": DEPTH_LEFT_CROP,
+        "depth_min_m": DEPTH_MIN_M,
+        "depth_max_m": DEPTH_MAX_M,
+        "enable_depth_randomization": DEPTH_RANDOMIZATION_ENABLED,
+        "calibration_scale_range": DEPTH_CALIBRATION_SCALE_RANGE,
+        "calibration_bias_range_m": DEPTH_CALIBRATION_BIAS_RANGE_M,
+        "noise_std_m": DEPTH_NOISE_STD_M,
+        "dropout_probability": DEPTH_DROPOUT_PROBABILITY,
+        "dropout_patch_count_range": DEPTH_DROPOUT_PATCH_COUNT_RANGE,
+        "dropout_area_fraction_range": DEPTH_DROPOUT_AREA_FRACTION_RANGE,
+        "dropout_aspect_ratio_range": DEPTH_DROPOUT_ASPECT_RATIO_RANGE,
+    }
     if depth and async_depth:
         observations[DEPTH_CAMERA_NAME] = ObservationGroupCfg(
             terms={
@@ -452,9 +473,7 @@ def make_observations(
                         "sensor_name": DEPTH_CAMERA_NAME,
                         "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
                         "system_delay_range_s": DEPTH_SYSTEM_DELAY_RANGE_S,
-                        "left_crop": DEPTH_LEFT_CROP,
-                        "depth_min_m": DEPTH_MIN_M,
-                        "depth_max_m": DEPTH_MAX_M,
+                        **depth_processing_params,
                     },
                 )
             },
@@ -470,9 +489,7 @@ def make_observations(
                         "sensor_name": DEPTH_CAMERA_NAME,
                         "buffer_size": DEPTH_BUFFER_SIZE,
                         "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
-                        "left_crop": DEPTH_LEFT_CROP,
-                        "depth_min_m": DEPTH_MIN_M,
-                        "depth_max_m": DEPTH_MAX_M,
+                        **depth_processing_params,
                     },
                 )
             },
@@ -1109,6 +1126,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
         cfg.events.pop(event_name, None)
     if DEPTH_CAMERA_NAME in cfg.observations:
         depth_term = cfg.observations[DEPTH_CAMERA_NAME].terms[DEPTH_CAMERA_NAME]
+        depth_term.params["enable_depth_randomization"] = False
         if "system_delay_range_s" in depth_term.params:
             depth_term.params["system_delay_range_s"] = (0.0, 0.0)
     cfg.curriculum = {}

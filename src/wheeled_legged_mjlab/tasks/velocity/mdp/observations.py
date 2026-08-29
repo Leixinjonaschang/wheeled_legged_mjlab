@@ -72,6 +72,61 @@ def foot_contact_forces(
   return torch.sign(forces_flat) * torch.log1p(torch.abs(forces_flat))
 
 
+def _validate_depth_range(depth_min_m: float, depth_max_m: float) -> None:
+  if depth_min_m < 0.0:
+    raise ValueError(f"depth_min_m must be >= 0, got {depth_min_m}")
+  if depth_max_m <= depth_min_m:
+    raise ValueError(
+      f"depth_max_m must be greater than depth_min_m, got {depth_max_m}"
+    )
+
+
+def _crop_depth_image(depth_m: torch.Tensor, left_crop: int) -> torch.Tensor:
+  if depth_m.ndim < 2:
+    raise ValueError(
+      "depth_m must have at least two dimensions ending in [H, W], "
+      f"got shape {tuple(depth_m.shape)}"
+    )
+  if left_crop < 0 or left_crop >= depth_m.shape[-1]:
+    raise ValueError(
+      f"left_crop must be in [0, {depth_m.shape[-1] - 1}], got {left_crop}"
+    )
+  return depth_m[..., left_crop:].to(dtype=torch.float32).contiguous()
+
+
+def _finalize_depth_image(
+  depth_m: torch.Tensor,
+  depth_min_m: float,
+  depth_max_m: float,
+) -> torch.Tensor:
+  invalid = (~torch.isfinite(depth_m)) | (depth_m <= 0.0)
+  depth_m = torch.where(invalid, depth_max_m, depth_m)
+  depth_m = depth_m.clamp(min=depth_min_m, max=depth_max_m)
+  return ((depth_m - depth_min_m) / (depth_max_m - depth_min_m)).contiguous()
+
+
+def preprocess_depth_image(
+  depth_m: torch.Tensor,
+  *,
+  left_crop: int = 0,
+  depth_min_m: float = 0.2,
+  depth_max_m: float = 2.0,
+) -> torch.Tensor:
+  """Deterministically crop and normalize a metric depth image."""
+  _validate_depth_range(depth_min_m, depth_max_m)
+  depth_m = _crop_depth_image(depth_m, left_crop)
+  return _finalize_depth_image(depth_m, depth_min_m, depth_max_m)
+
+
+def _camera_depth_image_meters(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+) -> torch.Tensor:
+  camera: CameraSensor = env.scene[sensor_name]
+  assert camera.data.depth is not None, f"Sensor '{sensor_name}' has no depth data"
+  return camera.data.depth.squeeze(-1)
+
+
 def depth_image(
   env: ManagerBasedRlEnv,
   sensor_name: str = "depth_camera",
@@ -79,31 +134,321 @@ def depth_image(
   depth_min_m: float = 0.2,
   depth_max_m: float = 2.0,
 ) -> torch.Tensor:
-  """Depth image from the forward-facing camera."""
-  if depth_min_m < 0.0:
-    raise ValueError(f"depth_min_m must be >= 0, got {depth_min_m}")
-  if depth_max_m <= depth_min_m:
-    raise ValueError(
-      f"depth_max_m must be greater than depth_min_m, got {depth_max_m}"
-    )
-  camera: CameraSensor = env.scene[sensor_name]
-  assert camera.data.depth is not None, f"Sensor '{sensor_name}' has no depth data"
-  depth = camera.data.depth.squeeze(-1)
-  if left_crop < 0 or left_crop >= depth.shape[-1]:
-    raise ValueError(
-      f"left_crop must be in [0, {depth.shape[-1] - 1}], got {left_crop}"
-    )
-  if left_crop > 0:
-    depth = depth[..., left_crop:].contiguous()
-  depth = torch.nan_to_num(
-    depth,
-    nan=depth_max_m,
-    posinf=depth_max_m,
-    neginf=depth_max_m,
+  """Deterministic depth image from the forward-facing camera."""
+  return preprocess_depth_image(
+    _camera_depth_image_meters(env, sensor_name),
+    left_crop=left_crop,
+    depth_min_m=depth_min_m,
+    depth_max_m=depth_max_m,
   )
-  depth = torch.where(depth <= 0.0, depth_max_m, depth)
-  depth = depth.clamp(min=depth_min_m, max=depth_max_m)
-  return (depth - depth_min_m) / (depth_max_m - depth_min_m)
+
+
+class _DepthFrameProcessor:
+  """Apply capture-time depth randomization followed by deterministic processing."""
+
+  def __init__(self) -> None:
+    self._calibration_scale: torch.Tensor | None = None
+    self._calibration_bias_m: torch.Tensor | None = None
+    self._calibration_scale_range: tuple[float, float] | None = None
+    self._calibration_bias_range_m: tuple[float, float] | None = None
+    self._randomization_enabled = False
+
+  def __call__(
+    self,
+    depth_m: torch.Tensor,
+    *,
+    env_ids: torch.Tensor | None = None,
+    left_crop: int = 0,
+    depth_min_m: float = 0.2,
+    depth_max_m: float = 2.0,
+    enable_depth_randomization: bool = False,
+    calibration_scale_range: tuple[float, float] = (1.0, 1.0),
+    calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
+    noise_std_m: float = 0.0,
+    dropout_probability: float = 0.0,
+    dropout_patch_count_range: tuple[int, int] = (1, 1),
+    dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
+    dropout_aspect_ratio_range: tuple[float, float] = (1.0, 1.0),
+  ) -> torch.Tensor:
+    _validate_depth_range(depth_min_m, depth_max_m)
+    self._validate_randomization_cfg(
+      calibration_scale_range=calibration_scale_range,
+      calibration_bias_range_m=calibration_bias_range_m,
+      noise_std_m=noise_std_m,
+      dropout_probability=dropout_probability,
+      dropout_patch_count_range=dropout_patch_count_range,
+      dropout_area_fraction_range=dropout_area_fraction_range,
+      dropout_aspect_ratio_range=dropout_aspect_ratio_range,
+    )
+    depth_m = _crop_depth_image(depth_m, left_crop)
+    if depth_m.ndim != 3:
+      raise ValueError(
+        "buffered depth_m must have shape [B, H, W], "
+        f"got {tuple(depth_m.shape)}"
+      )
+
+    self._randomization_enabled = enable_depth_randomization
+    if env_ids is not None:
+      env_ids = env_ids.to(device=depth_m.device, dtype=torch.long)
+
+    if enable_depth_randomization:
+      self._ensure_calibration(
+        batch_size=depth_m.shape[0],
+        device=depth_m.device,
+        calibration_scale_range=calibration_scale_range,
+        calibration_bias_range_m=calibration_bias_range_m,
+      )
+      assert self._calibration_scale is not None
+      assert self._calibration_bias_m is not None
+      if env_ids is None:
+        scale = self._calibration_scale
+        bias_m = self._calibration_bias_m
+      else:
+        depth_m = depth_m.index_select(0, env_ids)
+        scale = self._calibration_scale.index_select(0, env_ids)
+        bias_m = self._calibration_bias_m.index_select(0, env_ids)
+      depth_m = depth_m * scale + bias_m
+      if noise_std_m > 0.0:
+        depth_m = depth_m + noise_std_m * torch.randn_like(depth_m)
+      if dropout_probability > 0.0:
+        dropout_mask = self._structured_dropout_mask(
+          batch_size=depth_m.shape[0],
+          height=depth_m.shape[-2],
+          width=depth_m.shape[-1],
+          device=depth_m.device,
+          probability=dropout_probability,
+          patch_count_range=dropout_patch_count_range,
+          area_fraction_range=dropout_area_fraction_range,
+          aspect_ratio_range=dropout_aspect_ratio_range,
+        )
+        depth_m = depth_m.masked_fill(dropout_mask, torch.nan)
+    elif env_ids is not None:
+      depth_m = depth_m.index_select(0, env_ids)
+
+    return _finalize_depth_image(depth_m, depth_min_m, depth_max_m)
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if not self._randomization_enabled or self._calibration_scale is None:
+      return
+    assert self._calibration_bias_m is not None
+    assert self._calibration_scale_range is not None
+    assert self._calibration_bias_range_m is not None
+    if env_ids is None or isinstance(env_ids, slice):
+      env_ids = torch.arange(
+        self._calibration_scale.shape[0],
+        device=self._calibration_scale.device,
+      )
+    else:
+      env_ids = env_ids.to(device=self._calibration_scale.device, dtype=torch.long)
+    if env_ids.numel() == 0:
+      return
+    self._sample_calibration(env_ids)
+
+  def _ensure_calibration(
+    self,
+    *,
+    batch_size: int,
+    device: torch.device,
+    calibration_scale_range: tuple[float, float],
+    calibration_bias_range_m: tuple[float, float],
+  ) -> None:
+    ranges_changed = (
+      self._calibration_scale_range != calibration_scale_range
+      or self._calibration_bias_range_m != calibration_bias_range_m
+    )
+    needs_init = (
+      self._calibration_scale is None
+      or self._calibration_scale.shape[0] != batch_size
+      or self._calibration_scale.device != device
+      or ranges_changed
+    )
+    if not needs_init:
+      return
+    self._calibration_scale_range = calibration_scale_range
+    self._calibration_bias_range_m = calibration_bias_range_m
+    self._calibration_scale = torch.empty(
+      batch_size, 1, 1, device=device, dtype=torch.float32
+    )
+    self._calibration_bias_m = torch.empty_like(self._calibration_scale)
+    self._sample_calibration(torch.arange(batch_size, device=device))
+
+  def _sample_calibration(self, env_ids: torch.Tensor) -> None:
+    assert self._calibration_scale is not None
+    assert self._calibration_bias_m is not None
+    assert self._calibration_scale_range is not None
+    assert self._calibration_bias_range_m is not None
+    count = env_ids.numel()
+    scale_min, scale_max = self._calibration_scale_range
+    bias_min_m, bias_max_m = self._calibration_bias_range_m
+    if scale_min == scale_max:
+      self._calibration_scale[env_ids] = scale_min
+    else:
+      self._calibration_scale[env_ids] = scale_min + (
+        scale_max - scale_min
+      ) * torch.rand(
+        count,
+        1,
+        1,
+        device=self._calibration_scale.device,
+      )
+    if bias_min_m == bias_max_m:
+      self._calibration_bias_m[env_ids] = bias_min_m
+    else:
+      self._calibration_bias_m[env_ids] = bias_min_m + (
+        bias_max_m - bias_min_m
+      ) * torch.rand(
+        count,
+        1,
+        1,
+        device=self._calibration_bias_m.device,
+      )
+
+  @staticmethod
+  def _structured_dropout_mask(
+    *,
+    batch_size: int,
+    height: int,
+    width: int,
+    device: torch.device,
+    probability: float,
+    patch_count_range: tuple[int, int],
+    area_fraction_range: tuple[float, float],
+    aspect_ratio_range: tuple[float, float],
+  ) -> torch.Tensor:
+    mask = torch.zeros(batch_size, height, width, device=device, dtype=torch.bool)
+    if probability <= 0.0 or area_fraction_range[1] <= 0.0:
+      return mask
+
+    min_patches, max_patches = patch_count_range
+    pixel_count = height * width
+    min_area = max(
+      min_patches,
+      math.ceil(area_fraction_range[0] * pixel_count),
+    )
+    max_area = max(1, math.floor(area_fraction_range[1] * pixel_count))
+    if max_area < min_area:
+      raise ValueError(
+        "dropout_area_fraction_range does not contain a whole-pixel area for "
+        f"an image of shape ({height}, {width})"
+      )
+    if max_area < min_patches:
+      raise ValueError(
+        "dropout area budget must contain at least one pixel per minimum patch"
+      )
+
+    frame_active = torch.rand(batch_size, device=device) < probability
+    patch_counts = torch.randint(
+      min_patches,
+      max_patches + 1,
+      (batch_size,),
+      device=device,
+    )
+    area_budgets = torch.randint(
+      min_area,
+      max_area + 1,
+      (batch_size,),
+      device=device,
+    )
+    patch_counts = torch.where(
+      frame_active,
+      patch_counts,
+      torch.zeros_like(patch_counts),
+    )
+
+    slots = torch.arange(max_patches, device=device).unsqueeze(0)
+    active_slots = slots < patch_counts.unsqueeze(1)
+    safe_counts = patch_counts.clamp_min(1)
+    base_areas = area_budgets // safe_counts
+    remainders = area_budgets % safe_counts
+    patch_areas = base_areas.unsqueeze(1) + (slots < remainders.unsqueeze(1))
+    patch_areas = torch.where(
+      active_slots,
+      patch_areas,
+      torch.zeros_like(patch_areas),
+    )
+
+    aspect_min, aspect_max = aspect_ratio_range
+    log_aspect = math.log(aspect_min) + (
+      math.log(aspect_max) - math.log(aspect_min)
+    ) * torch.rand(batch_size, max_patches, device=device)
+    aspect = torch.exp(log_aspect)
+    safe_areas = patch_areas.clamp_min(1)
+    patch_heights = torch.floor(
+      torch.sqrt(safe_areas.to(torch.float32) / aspect)
+    ).to(torch.long)
+    patch_heights = patch_heights.clamp(min=1, max=height)
+    patch_heights = torch.minimum(patch_heights, safe_areas)
+    patch_widths = torch.floor(
+      torch.sqrt(safe_areas.to(torch.float32) * aspect)
+    ).to(torch.long)
+    patch_widths = patch_widths.clamp(min=1, max=width)
+    patch_widths = torch.minimum(
+      patch_widths,
+      torch.div(safe_areas, patch_heights, rounding_mode="floor").clamp_min(1),
+    )
+
+    top = torch.floor(
+      torch.rand(batch_size, max_patches, device=device)
+      * (height - patch_heights + 1)
+    ).to(torch.long)
+    left = torch.floor(
+      torch.rand(batch_size, max_patches, device=device)
+      * (width - patch_widths + 1)
+    ).to(torch.long)
+    rows = torch.arange(height, device=device).view(1, 1, height, 1)
+    cols = torch.arange(width, device=device).view(1, 1, 1, width)
+    rectangles = (
+      active_slots[:, :, None, None]
+      & (rows >= top[:, :, None, None])
+      & (rows < (top + patch_heights)[:, :, None, None])
+      & (cols >= left[:, :, None, None])
+      & (cols < (left + patch_widths)[:, :, None, None])
+    )
+    return rectangles.any(dim=1)
+
+  @staticmethod
+  def _validate_randomization_cfg(
+    *,
+    calibration_scale_range: tuple[float, float],
+    calibration_bias_range_m: tuple[float, float],
+    noise_std_m: float,
+    dropout_probability: float,
+    dropout_patch_count_range: tuple[int, int],
+    dropout_area_fraction_range: tuple[float, float],
+    dropout_aspect_ratio_range: tuple[float, float],
+  ) -> None:
+    scale_min, scale_max = calibration_scale_range
+    if scale_min <= 0.0 or scale_min > scale_max:
+      raise ValueError(
+        "calibration_scale_range must be positive and ordered min <= max"
+      )
+    bias_min_m, bias_max_m = calibration_bias_range_m
+    if bias_min_m > bias_max_m:
+      raise ValueError(
+        "calibration_bias_range_m must be ordered min <= max"
+      )
+    if noise_std_m < 0.0:
+      raise ValueError(f"noise_std_m must be non-negative, got {noise_std_m}")
+    if not 0.0 <= dropout_probability <= 1.0:
+      raise ValueError(
+        "dropout_probability must be in [0, 1], "
+        f"got {dropout_probability}"
+      )
+    patch_min, patch_max = dropout_patch_count_range
+    if patch_min < 1 or patch_min > patch_max:
+      raise ValueError(
+        "dropout_patch_count_range must be positive and ordered min <= max"
+      )
+    area_min, area_max = dropout_area_fraction_range
+    if area_min < 0.0 or area_min > area_max or area_max > 1.0:
+      raise ValueError(
+        "dropout_area_fraction_range must be ordered within [0, 1]"
+      )
+    aspect_min, aspect_max = dropout_aspect_ratio_range
+    if aspect_min <= 0.0 or aspect_min > aspect_max:
+      raise ValueError(
+        "dropout_aspect_ratio_range must be positive and ordered min <= max"
+      )
 
 
 class DepthBuffer:
@@ -111,6 +456,7 @@ class DepthBuffer:
 
   def __init__(self, cfg, env: ManagerBasedRlEnv) -> None:
     del cfg, env
+    self._processor = _DepthFrameProcessor()
     self._buffer: torch.Tensor | None = None
     self._last_update_step: int | None = None
     self._invalid_env_ids: torch.Tensor | None = None
@@ -124,6 +470,14 @@ class DepthBuffer:
     left_crop: int = 0,
     depth_min_m: float = 0.2,
     depth_max_m: float = 2.0,
+    enable_depth_randomization: bool = False,
+    calibration_scale_range: tuple[float, float] = (1.0, 1.0),
+    calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
+    noise_std_m: float = 0.0,
+    dropout_probability: float = 0.0,
+    dropout_patch_count_range: tuple[int, int] = (1, 1),
+    dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
+    dropout_aspect_ratio_range: tuple[float, float] = (1.0, 1.0),
   ) -> torch.Tensor:
     if buffer_size < 1:
       raise ValueError(f"buffer_size must be >= 1, got {buffer_size}")
@@ -142,12 +496,27 @@ class DepthBuffer:
       assert self._buffer is not None
       return self._buffer
 
-    frame = depth_image(
-      env,
-      sensor_name=sensor_name,
+    reset_env_ids = None
+    if needs_reset_fill:
+      assert self._invalid_env_ids is not None
+      reset_env_ids = self._invalid_env_ids.to(dtype=torch.long)
+    process_env_ids = (
+      None if needs_init or needs_periodic_update else reset_env_ids
+    )
+    frame = self._processor(
+      _camera_depth_image_meters(env, sensor_name),
+      env_ids=process_env_ids,
       left_crop=left_crop,
       depth_min_m=depth_min_m,
       depth_max_m=depth_max_m,
+      enable_depth_randomization=enable_depth_randomization,
+      calibration_scale_range=calibration_scale_range,
+      calibration_bias_range_m=calibration_bias_range_m,
+      noise_std_m=noise_std_m,
+      dropout_probability=dropout_probability,
+      dropout_patch_count_range=dropout_patch_count_range,
+      dropout_area_fraction_range=dropout_area_fraction_range,
+      dropout_aspect_ratio_range=dropout_aspect_ratio_range,
     )
 
     if needs_init:
@@ -158,22 +527,30 @@ class DepthBuffer:
       self._invalid_env_ids = None
       return self._buffer
 
-    if needs_reset_fill:
-      assert self._invalid_env_ids is not None
-      env_ids = self._invalid_env_ids.to(device=frame.device, dtype=torch.long)
-      self._buffer[env_ids] = frame[env_ids].unsqueeze(1).expand(
-        -1, buffer_size, *frame.shape[1:]
+    if reset_env_ids is not None:
+      assert self._buffer is not None
+      reset_env_ids = reset_env_ids.to(device=frame.device)
+      reset_frame = (
+        frame.index_select(0, reset_env_ids)
+        if process_env_ids is None
+        else frame
+      )
+      self._buffer[reset_env_ids] = reset_frame.unsqueeze(1).expand(
+        -1, buffer_size, *reset_frame.shape[1:]
       )
       self._invalid_env_ids = None
 
     if needs_periodic_update:
+      assert self._buffer is not None
       self._buffer = torch.roll(self._buffer, shifts=-1, dims=1)
       self._buffer[:, -1] = frame
       self._last_update_step = step
 
+    assert self._buffer is not None
     return self._buffer
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    self._processor.reset(env_ids)
     if env_ids is None or isinstance(env_ids, slice):
       self._buffer = None
       self._last_update_step = None
@@ -198,6 +575,7 @@ class AsyncDepthBuffer:
 
   def __init__(self, cfg, env: ManagerBasedRlEnv) -> None:
     del cfg, env
+    self._processor = _DepthFrameProcessor()
     self._frames: torch.Tensor | None = None
     self._capture_times_s: torch.Tensor | None = None
     self._next_capture_time_s: float | None = None
@@ -215,6 +593,14 @@ class AsyncDepthBuffer:
     left_crop: int = 0,
     depth_min_m: float = 0.2,
     depth_max_m: float = 2.0,
+    enable_depth_randomization: bool = False,
+    calibration_scale_range: tuple[float, float] = (1.0, 1.0),
+    calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
+    noise_std_m: float = 0.0,
+    dropout_probability: float = 0.0,
+    dropout_patch_count_range: tuple[int, int] = (1, 1),
+    dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
+    dropout_aspect_ratio_range: tuple[float, float] = (1.0, 1.0),
   ) -> torch.Tensor:
     if capture_frequency_hz <= 0.0:
       raise ValueError(
@@ -258,12 +644,25 @@ class AsyncDepthBuffer:
     if not (needs_init or capture_due or needs_reset_fill):
       return self._select(current_time_s)
 
-    frame = depth_image(
-      env,
-      sensor_name=sensor_name,
+    reset_env_ids = None
+    if needs_reset_fill:
+      assert self._invalid_env_ids is not None
+      reset_env_ids = self._invalid_env_ids.to(dtype=torch.long)
+    process_env_ids = None if needs_init or capture_due else reset_env_ids
+    frame = self._processor(
+      _camera_depth_image_meters(env, sensor_name),
+      env_ids=process_env_ids,
       left_crop=left_crop,
       depth_min_m=depth_min_m,
       depth_max_m=depth_max_m,
+      enable_depth_randomization=enable_depth_randomization,
+      calibration_scale_range=calibration_scale_range,
+      calibration_bias_range_m=calibration_bias_range_m,
+      noise_std_m=noise_std_m,
+      dropout_probability=dropout_probability,
+      dropout_patch_count_range=dropout_patch_count_range,
+      dropout_area_fraction_range=dropout_area_fraction_range,
+      dropout_aspect_ratio_range=dropout_aspect_ratio_range,
     ).unsqueeze(1)
 
     if needs_init:
@@ -281,14 +680,6 @@ class AsyncDepthBuffer:
       self._delay_s = self._sample_delay(frame.shape[0], frame.device)
       self._invalid_env_ids = None
       return self._select(current_time_s)
-
-    reset_env_ids = None
-    if needs_reset_fill:
-      assert self._invalid_env_ids is not None
-      reset_env_ids = self._invalid_env_ids.to(
-        device=frame.device,
-        dtype=torch.long,
-      )
 
     if capture_due:
       assert self._frames is not None
@@ -318,7 +709,13 @@ class AsyncDepthBuffer:
     if reset_env_ids is not None:
       assert self._frames is not None
       assert self._delay_s is not None
-      self._frames[:, reset_env_ids] = frame[reset_env_ids].unsqueeze(0)
+      reset_env_ids = reset_env_ids.to(device=frame.device)
+      reset_frame = (
+        frame.index_select(0, reset_env_ids)
+        if process_env_ids is None
+        else frame
+      )
+      self._frames[:, reset_env_ids] = reset_frame.unsqueeze(0)
       self._delay_s[reset_env_ids] = self._sample_delay(
         reset_env_ids.numel(),
         frame.device,
@@ -350,6 +747,7 @@ class AsyncDepthBuffer:
     return self._frames[frame_indices, env_indices]
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    self._processor.reset(env_ids)
     if env_ids is None or isinstance(env_ids, slice):
       self._frames = None
       self._capture_times_s = None
