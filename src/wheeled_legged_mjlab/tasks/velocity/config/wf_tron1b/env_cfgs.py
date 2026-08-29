@@ -37,12 +37,13 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab.viewer import ViewerConfig
 
 from wheeled_legged_mjlab.assets.WF_TRON1B.wf_tron1b import WF_TRON1B_ROBOT_CFG
+from wheeled_legged_mjlab.sensors import OffsetGridPatternCfg
 from wheeled_legged_mjlab.tasks.velocity import mdp
+from wheeled_legged_mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from wheeled_legged_mjlab.tasks.velocity.mdp.actions import (
     DelayedJointPositionActionCfg,
     DelayedJointVelocityActionCfg,
 )
-from wheeled_legged_mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 
 from .terrain_cfg import PLANE_ENTITY_CFG, TERRAINS_ENTITY_CFG
 
@@ -84,7 +85,14 @@ WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
 WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
-TERRAIN_SCAN_GRID_SHAPE = (11, 11)
+TERRAIN_SCAN_SIZE = (1.3, 0.7)
+TERRAIN_SCAN_RESOLUTION = 0.1
+TERRAIN_SCAN_CENTER = (0.3, 0.0)
+TERRAIN_SCAN_GRID_SHAPE = OffsetGridPatternCfg(
+    size=TERRAIN_SCAN_SIZE,
+    resolution=TERRAIN_SCAN_RESOLUTION,
+    center=TERRAIN_SCAN_CENTER,
+).grid_shape
 DEPTH_CAMERA_NAME = "depth_camera"
 DEPTH_CAMERA_ENTITY_NAME = "d435"
 DEPTH_CAMERA_MUJOCO_NAME = f"{ROBOT_ENTITY}/{DEPTH_CAMERA_ENTITY_NAME}"
@@ -161,7 +169,11 @@ def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
                 name="terrain_scan",
                 frame=ObjRef(type="body", name=BASE_BODY, entity=ROBOT_ENTITY),
                 ray_alignment="yaw",
-                pattern=GridPatternCfg(size=(1.0, 1.0), resolution=0.1),
+                pattern=OffsetGridPatternCfg(
+                    size=TERRAIN_SCAN_SIZE,
+                    resolution=TERRAIN_SCAN_RESOLUTION,
+                    center=TERRAIN_SCAN_CENTER,
+                ),
                 max_distance=10.0,
                 exclude_parent_body=True,
                 include_geom_groups=(0,),

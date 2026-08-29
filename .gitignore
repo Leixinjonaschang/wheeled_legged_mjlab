@@ -57,6 +57,7 @@ tests/*
 !tests/test_dependency_versions.py
 !tests/test_fell_over_curriculum.py
 !tests/test_mjlab160_integration.py
+!tests/test_offset_grid_pattern.py
 !tests/test_representation_teacher_student_config.py
 !tests/test_velocity_command.py
 !rsl_rl/tests/
