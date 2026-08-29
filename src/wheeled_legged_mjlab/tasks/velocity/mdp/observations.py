@@ -165,6 +165,7 @@ class _DepthFrameProcessor:
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
+    enable_depth_dropout: bool = False,
     noise_base_m: float = 0.002,
     noise_quadratic_coeff: float = 0.005,
     dropout_probability: float = 0.0,
@@ -222,7 +223,7 @@ class _DepthFrameProcessor:
         ).clamp(min=0.2, max=2.0)
         sigma = noise_base_m + noise_quadratic_coeff * depth_for_sigma.square()
         depth_m = depth_m + sigma * torch.randn_like(depth_m)
-      if dropout_probability > 0.0:
+      if enable_depth_dropout and dropout_probability > 0.0:
         dropout_mask = self._structured_dropout_mask(
           batch_size=depth_m.shape[0],
           height=depth_m.shape[-2],
@@ -494,6 +495,7 @@ class DepthBuffer:
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
+    enable_depth_dropout: bool = False,
     noise_base_m: float = 0.002,
     noise_quadratic_coeff: float = 0.005,
     dropout_probability: float = 0.0,
@@ -535,6 +537,7 @@ class DepthBuffer:
       calibration_scale_range=calibration_scale_range,
       calibration_bias_range_m=calibration_bias_range_m,
       enable_depth_distance_noise=enable_depth_distance_noise,
+      enable_depth_dropout=enable_depth_dropout,
       noise_base_m=noise_base_m,
       noise_quadratic_coeff=noise_quadratic_coeff,
       dropout_probability=dropout_probability,
@@ -621,6 +624,7 @@ class AsyncDepthBuffer:
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
+    enable_depth_dropout: bool = False,
     noise_base_m: float = 0.002,
     noise_quadratic_coeff: float = 0.005,
     dropout_probability: float = 0.0,
@@ -685,6 +689,7 @@ class AsyncDepthBuffer:
       calibration_scale_range=calibration_scale_range,
       calibration_bias_range_m=calibration_bias_range_m,
       enable_depth_distance_noise=enable_depth_distance_noise,
+      enable_depth_dropout=enable_depth_dropout,
       noise_base_m=noise_base_m,
       noise_quadratic_coeff=noise_quadratic_coeff,
       dropout_probability=dropout_probability,

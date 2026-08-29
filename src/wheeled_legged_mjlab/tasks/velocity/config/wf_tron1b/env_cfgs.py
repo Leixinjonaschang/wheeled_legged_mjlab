@@ -104,7 +104,8 @@ DEPTH_CALIBRATION_BIAS_RANGE_M = (-0.01, 0.01)
 DEPTH_DISTANCE_NOISE_ENABLED = True
 DEPTH_NOISE_BASE_M = 0.001
 DEPTH_NOISE_QUADRATIC_COEFF = 0.005
-DEPTH_DROPOUT_PROBABILITY = 0.0
+DEPTH_DROPOUT_ENABLED = False
+DEPTH_DROPOUT_PROBABILITY = 0.30
 DEPTH_DROPOUT_PATCH_COUNT_RANGE = (1, 3)
 DEPTH_DROPOUT_AREA_FRACTION_RANGE = (0.01, 0.05)
 DEPTH_DROPOUT_ASPECT_RATIO_RANGE = (0.125, 8.0)
@@ -244,6 +245,7 @@ def make_observations(
     lin_vel_representation: bool = False,
     async_depth: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
 ) -> dict[str, ObservationGroupCfg]:
@@ -464,6 +466,7 @@ def make_observations(
         "calibration_scale_range": DEPTH_CALIBRATION_SCALE_RANGE,
         "calibration_bias_range_m": DEPTH_CALIBRATION_BIAS_RANGE_M,
         "enable_depth_distance_noise": enable_depth_distance_noise,
+        "enable_depth_dropout": enable_depth_dropout,
         "noise_base_m": depth_noise_base_m,
         "noise_quadratic_coeff": depth_noise_quadratic_coeff,
         "dropout_probability": DEPTH_DROPOUT_PROBABILITY,
@@ -1093,6 +1096,7 @@ def make_env_cfg(
     lin_vel_representation: bool = False,
     async_depth: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
 ) -> ManagerBasedRlEnvCfg:
@@ -1104,6 +1108,7 @@ def make_env_cfg(
             lin_vel_representation=lin_vel_representation,
             async_depth=async_depth,
             enable_depth_distance_noise=enable_depth_distance_noise,
+            enable_depth_dropout=enable_depth_dropout,
             depth_noise_base_m=depth_noise_base_m,
             depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,
         ),
@@ -1141,6 +1146,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
         depth_term = cfg.observations[DEPTH_CAMERA_NAME].terms[DEPTH_CAMERA_NAME]
         depth_term.params["enable_depth_randomization"] = False
         depth_term.params["enable_depth_distance_noise"] = False
+        depth_term.params["enable_depth_dropout"] = False
         if "system_delay_range_s" in depth_term.params:
             depth_term.params["system_delay_range_s"] = (0.0, 0.0)
     cfg.curriculum = {}
@@ -1185,6 +1191,7 @@ def wf_tron1b_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def wf_tron1b_rough_depth_env_cfg(
     play: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
 ) -> ManagerBasedRlEnvCfg:
@@ -1194,6 +1201,7 @@ def wf_tron1b_rough_depth_env_cfg(
         play=play,
         depth=True,
         enable_depth_distance_noise=enable_depth_distance_noise,
+        enable_depth_dropout=enable_depth_dropout,
         depth_noise_base_m=depth_noise_base_m,
         depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,
     )
@@ -1212,6 +1220,7 @@ def wf_tron1b_rough_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRl
 def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(
     play: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
 ) -> ManagerBasedRlEnvCfg:
@@ -1223,6 +1232,7 @@ def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(
         lin_vel_representation=True,
         async_depth=True,
         enable_depth_distance_noise=enable_depth_distance_noise,
+        enable_depth_dropout=enable_depth_dropout,
         depth_noise_base_m=depth_noise_base_m,
         depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,
     )

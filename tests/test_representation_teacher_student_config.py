@@ -39,6 +39,7 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     DEPTH_CAMERA_WIDTH,
     DEPTH_DROPOUT_AREA_FRACTION_RANGE,
     DEPTH_DROPOUT_ASPECT_RATIO_RANGE,
+    DEPTH_DROPOUT_ENABLED,
     DEPTH_DROPOUT_PATCH_COUNT_RANGE,
     DEPTH_DROPOUT_PROBABILITY,
     DEPTH_DISTANCE_NOISE_ENABLED,
@@ -73,6 +74,7 @@ DEPTH_RANDOMIZATION_PARAMS = {
     "enable_depth_distance_noise": DEPTH_DISTANCE_NOISE_ENABLED,
     "noise_base_m": DEPTH_NOISE_BASE_M,
     "noise_quadratic_coeff": DEPTH_NOISE_QUADRATIC_COEFF,
+    "enable_depth_dropout": DEPTH_DROPOUT_ENABLED,
     "dropout_probability": DEPTH_DROPOUT_PROBABILITY,
     "dropout_patch_count_range": DEPTH_DROPOUT_PATCH_COUNT_RANGE,
     "dropout_area_fraction_range": DEPTH_DROPOUT_AREA_FRACTION_RANGE,
@@ -254,18 +256,20 @@ def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
         wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg,
     ),
 )
-def test_depth_task_factories_expose_distance_noise_parameters(factory) -> None:
+def test_depth_task_factories_expose_randomization_parameters(factory) -> None:
     cfg = factory(
         enable_depth_distance_noise=False,
+        enable_depth_dropout=True,
         depth_noise_base_m=0.003,
         depth_noise_quadratic_coeff=0.007,
     )
     depth_term = cfg.observations[DEPTH_CAMERA_NAME].terms[DEPTH_CAMERA_NAME]
 
     assert depth_term.params["enable_depth_distance_noise"] is False
+    assert depth_term.params["enable_depth_dropout"] is True
     assert depth_term.params["noise_base_m"] == 0.003
     assert depth_term.params["noise_quadratic_coeff"] == 0.007
-    assert depth_term.params["dropout_probability"] == 0.0
+    assert depth_term.params["dropout_probability"] == 0.30
 
 
 def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
@@ -432,6 +436,7 @@ def test_depth_camera_domain_randomization_and_play_overrides() -> None:
     assert play_depth_term.params["depth_max_m"] == DEPTH_MAX_M
     assert play_depth_term.params["enable_depth_randomization"] is False
     assert play_depth_term.params["enable_depth_distance_noise"] is False
+    assert play_depth_term.params["enable_depth_dropout"] is False
 
     buffered_play_cfg = wf_tron1b_rough_depth_env_cfg(play=True)
     buffered_depth_term = buffered_play_cfg.observations[DEPTH_CAMERA_NAME].terms[
@@ -444,6 +449,7 @@ def test_depth_camera_domain_randomization_and_play_overrides() -> None:
     assert buffered_depth_term.params["depth_max_m"] == DEPTH_MAX_M
     assert buffered_depth_term.params["enable_depth_randomization"] is False
     assert buffered_depth_term.params["enable_depth_distance_noise"] is False
+    assert buffered_depth_term.params["enable_depth_dropout"] is False
 
 
 def test_depth_image_crops_and_normalizes_without_modifying_camera_data() -> None:
@@ -592,6 +598,7 @@ def test_structured_depth_dropout_is_bounded_and_reproducible() -> None:
         torch.full((4, DEPTH_CAMERA_HEIGHT, DEPTH_MODEL_WIDTH), 1.1),
         enable_depth_randomization=True,
         enable_depth_distance_noise=False,
+        enable_depth_dropout=True,
         calibration_scale_range=(1.0, 1.0),
         calibration_bias_range_m=(0.0, 0.0),
         dropout_probability=1.0,
@@ -602,6 +609,27 @@ def test_structured_depth_dropout_is_bounded_and_reproducible() -> None:
     filled_invalid = processed == 1.0
     assert torch.all(filled_invalid.any(dim=(-1, -2)))
     assert torch.all(filled_invalid.sum(dim=(-1, -2)) <= max_pixels)
+
+
+def test_disabled_depth_dropout_does_not_sample_rng(monkeypatch) -> None:
+    processor = observation_mdp._DepthFrameProcessor()
+
+    def unexpected_rng(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("depth dropout RNG must not run when disabled")
+
+    monkeypatch.setattr(torch, "rand", unexpected_rng)
+    depth = processor(
+        torch.full((2, 3, 4), 1.1),
+        enable_depth_randomization=True,
+        calibration_scale_range=(1.0, 1.0),
+        calibration_bias_range_m=(0.0, 0.0),
+        enable_depth_distance_noise=False,
+        enable_depth_dropout=False,
+        dropout_probability=1.0,
+    )
+
+    torch.testing.assert_close(depth, torch.full_like(depth, 0.5))
 
 
 def test_depth_distance_noise_uses_quadratic_sigma(monkeypatch) -> None:
@@ -623,9 +651,12 @@ def test_depth_distance_noise_uses_quadratic_sigma(monkeypatch) -> None:
     )
 
     measured_sigma = processed * 3.0 - raw_depth
+    expected_sigma = (
+        DEPTH_NOISE_BASE_M + DEPTH_NOISE_QUADRATIC_COEFF * raw_depth.square()
+    )
     torch.testing.assert_close(
         measured_sigma,
-        torch.tensor([[[0.0022, 0.0070, 0.0220]]]),
+        expected_sigma,
         rtol=0.0,
         atol=1.0e-7,
     )
