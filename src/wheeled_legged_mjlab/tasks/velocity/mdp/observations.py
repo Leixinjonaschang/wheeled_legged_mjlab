@@ -166,7 +166,7 @@ class _DepthFrameProcessor:
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
     enable_depth_dropout: bool = False,
-    noise_base_m: float = 0.002,
+    noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
@@ -217,10 +217,10 @@ class _DepthFrameProcessor:
       if enable_depth_distance_noise:
         depth_for_sigma = torch.nan_to_num(
           depth_m,
-          nan=0.2,
-          posinf=2.0,
-          neginf=0.2,
-        ).clamp(min=0.2, max=2.0)
+          nan=depth_max_m,
+          posinf=depth_max_m,
+          neginf=depth_min_m,
+        ).clamp(min=depth_min_m, max=depth_max_m)
         sigma = noise_base_m + noise_quadratic_coeff * depth_for_sigma.square()
         depth_m = depth_m + sigma * torch.randn_like(depth_m)
       if enable_depth_dropout and dropout_probability > 0.0:
@@ -443,11 +443,13 @@ class _DepthFrameProcessor:
       raise ValueError(
         "calibration_bias_range_m must be ordered min <= max"
       )
-    if noise_base_m < 0.0:
-      raise ValueError(f"noise_base_m must be non-negative, got {noise_base_m}")
-    if noise_quadratic_coeff < 0.0:
+    if not math.isfinite(noise_base_m) or noise_base_m < 0.0:
       raise ValueError(
-        "noise_quadratic_coeff must be non-negative, "
+        f"noise_base_m must be finite and non-negative, got {noise_base_m}"
+      )
+    if not math.isfinite(noise_quadratic_coeff) or noise_quadratic_coeff < 0.0:
+      raise ValueError(
+        "noise_quadratic_coeff must be finite and non-negative, "
         f"got {noise_quadratic_coeff}"
       )
     if not 0.0 <= dropout_probability <= 1.0:
@@ -496,7 +498,7 @@ class DepthBuffer:
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
     enable_depth_dropout: bool = False,
-    noise_base_m: float = 0.002,
+    noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
@@ -625,7 +627,7 @@ class AsyncDepthBuffer:
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
     enable_depth_dropout: bool = False,
-    noise_base_m: float = 0.002,
+    noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),

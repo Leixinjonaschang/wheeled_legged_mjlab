@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import importlib.util
+import inspect
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -634,13 +635,13 @@ def test_disabled_depth_dropout_does_not_sample_rng(monkeypatch) -> None:
 
 def test_depth_distance_noise_uses_quadratic_sigma(monkeypatch) -> None:
     processor = observation_mdp._DepthFrameProcessor()
-    raw_depth = torch.tensor([[[0.2, 1.0, 2.0]]])
+    raw_depth = torch.tensor([[[0.2, 1.0, 2.0, 3.0]]])
 
     monkeypatch.setattr(torch, "randn_like", torch.ones_like)
     processed = processor(
         raw_depth,
         depth_min_m=0.0,
-        depth_max_m=3.0,
+        depth_max_m=4.0,
         enable_depth_randomization=True,
         calibration_scale_range=(1.0, 1.0),
         calibration_bias_range_m=(0.0, 0.0),
@@ -650,7 +651,7 @@ def test_depth_distance_noise_uses_quadratic_sigma(monkeypatch) -> None:
         dropout_probability=0.0,
     )
 
-    measured_sigma = processed * 3.0 - raw_depth
+    measured_sigma = processed * 4.0 - raw_depth
     expected_sigma = (
         DEPTH_NOISE_BASE_M + DEPTH_NOISE_QUADRATIC_COEFF * raw_depth.square()
     )
@@ -659,6 +660,24 @@ def test_depth_distance_noise_uses_quadratic_sigma(monkeypatch) -> None:
         expected_sigma,
         rtol=0.0,
         atol=1.0e-7,
+    )
+
+
+@pytest.mark.parametrize(
+    "callable_obj",
+    (
+        observation_mdp._DepthFrameProcessor.__call__,
+        observation_mdp.DepthBuffer.__call__,
+        observation_mdp.AsyncDepthBuffer.__call__,
+    ),
+)
+def test_depth_noise_low_level_defaults_match_env_config(callable_obj) -> None:
+    parameters = inspect.signature(callable_obj).parameters
+
+    assert parameters["noise_base_m"].default == DEPTH_NOISE_BASE_M
+    assert (
+        parameters["noise_quadratic_coeff"].default
+        == DEPTH_NOISE_QUADRATIC_COEFF
     )
 
 
@@ -784,7 +803,11 @@ def test_depth_noise_is_sampled_only_for_new_buffered_frames(
         ("calibration_scale_range", (0.0, 1.0), "calibration_scale_range"),
         ("calibration_bias_range_m", (0.1, -0.1), "calibration_bias_range_m"),
         ("noise_base_m", -0.1, "noise_base_m"),
+        ("noise_base_m", math.nan, "noise_base_m"),
+        ("noise_base_m", math.inf, "noise_base_m"),
         ("noise_quadratic_coeff", -0.1, "noise_quadratic_coeff"),
+        ("noise_quadratic_coeff", math.nan, "noise_quadratic_coeff"),
+        ("noise_quadratic_coeff", math.inf, "noise_quadratic_coeff"),
         ("dropout_probability", 1.1, "dropout_probability"),
         ("dropout_patch_count_range", (0, 3), "dropout_patch_count_range"),
         ("dropout_area_fraction_range", (0.1, 1.1), "dropout_area_fraction_range"),
