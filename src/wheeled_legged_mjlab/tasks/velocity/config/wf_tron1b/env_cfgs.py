@@ -101,8 +101,10 @@ DEPTH_SYSTEM_DELAY_RANGE_S = (0.0, 0.020)
 DEPTH_RANDOMIZATION_ENABLED = True
 DEPTH_CALIBRATION_SCALE_RANGE = (0.98, 1.02)
 DEPTH_CALIBRATION_BIAS_RANGE_M = (-0.01, 0.01)
-DEPTH_NOISE_STD_M = 0.005
-DEPTH_DROPOUT_PROBABILITY = 0.30
+DEPTH_DISTANCE_NOISE_ENABLED = True
+DEPTH_NOISE_BASE_M = 0.001
+DEPTH_NOISE_QUADRATIC_COEFF = 0.005
+DEPTH_DROPOUT_PROBABILITY = 0.0
 DEPTH_DROPOUT_PATCH_COUNT_RANGE = (1, 3)
 DEPTH_DROPOUT_AREA_FRACTION_RANGE = (0.01, 0.05)
 DEPTH_DROPOUT_ASPECT_RATIO_RANGE = (0.125, 8.0)
@@ -241,6 +243,9 @@ def make_observations(
     depth: bool = False,
     lin_vel_representation: bool = False,
     async_depth: bool = False,
+    enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
+    depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
 ) -> dict[str, ObservationGroupCfg]:
     """Student history uses noisy proprioception; teacher and critic stay clean."""
     actor_terms = {
@@ -458,7 +463,9 @@ def make_observations(
         "enable_depth_randomization": DEPTH_RANDOMIZATION_ENABLED,
         "calibration_scale_range": DEPTH_CALIBRATION_SCALE_RANGE,
         "calibration_bias_range_m": DEPTH_CALIBRATION_BIAS_RANGE_M,
-        "noise_std_m": DEPTH_NOISE_STD_M,
+        "enable_depth_distance_noise": enable_depth_distance_noise,
+        "noise_base_m": depth_noise_base_m,
+        "noise_quadratic_coeff": depth_noise_quadratic_coeff,
         "dropout_probability": DEPTH_DROPOUT_PROBABILITY,
         "dropout_patch_count_range": DEPTH_DROPOUT_PATCH_COUNT_RANGE,
         "dropout_area_fraction_range": DEPTH_DROPOUT_AREA_FRACTION_RANGE,
@@ -1085,6 +1092,9 @@ def make_env_cfg(
     depth: bool = False,
     lin_vel_representation: bool = False,
     async_depth: bool = False,
+    enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
+    depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
 ) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
         scene=make_scene(rough=rough, depth=depth),
@@ -1093,6 +1103,9 @@ def make_env_cfg(
             depth=depth,
             lin_vel_representation=lin_vel_representation,
             async_depth=async_depth,
+            enable_depth_distance_noise=enable_depth_distance_noise,
+            depth_noise_base_m=depth_noise_base_m,
+            depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,
         ),
         actions=make_actions(action_delay=not play),
         commands=make_commands(),
@@ -1127,6 +1140,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
     if DEPTH_CAMERA_NAME in cfg.observations:
         depth_term = cfg.observations[DEPTH_CAMERA_NAME].terms[DEPTH_CAMERA_NAME]
         depth_term.params["enable_depth_randomization"] = False
+        depth_term.params["enable_depth_distance_noise"] = False
         if "system_delay_range_s" in depth_term.params:
             depth_term.params["system_delay_range_s"] = (0.0, 0.0)
     cfg.curriculum = {}
@@ -1168,9 +1182,21 @@ def wf_tron1b_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     return make_env_cfg(rough=True, play=play)
 
 
-def wf_tron1b_rough_depth_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def wf_tron1b_rough_depth_env_cfg(
+    play: bool = False,
+    enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
+    depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
+) -> ManagerBasedRlEnvCfg:
     """Create WF-TRON1B rough-terrain configuration with a depth camera."""
-    return make_env_cfg(rough=True, play=play, depth=True)
+    return make_env_cfg(
+        rough=True,
+        play=play,
+        depth=True,
+        enable_depth_distance_noise=enable_depth_distance_noise,
+        depth_noise_base_m=depth_noise_base_m,
+        depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,
+    )
 
 
 def wf_tron1b_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -1183,7 +1209,12 @@ def wf_tron1b_rough_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRl
     return make_env_cfg(rough=True, play=play, lin_vel_representation=True)
 
 
-def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(
+    play: bool = False,
+    enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
+    depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
+) -> ManagerBasedRlEnvCfg:
     """Create rough-terrain velocity representation configuration with async depth."""
     return make_env_cfg(
         rough=True,
@@ -1191,6 +1222,9 @@ def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(play: bool = False) -> ManagerB
         depth=True,
         lin_vel_representation=True,
         async_depth=True,
+        enable_depth_distance_noise=enable_depth_distance_noise,
+        depth_noise_base_m=depth_noise_base_m,
+        depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,
     )
 
 

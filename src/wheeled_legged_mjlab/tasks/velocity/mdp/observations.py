@@ -164,7 +164,9 @@ class _DepthFrameProcessor:
     enable_depth_randomization: bool = False,
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
-    noise_std_m: float = 0.0,
+    enable_depth_distance_noise: bool = True,
+    noise_base_m: float = 0.002,
+    noise_quadratic_coeff: float = 0.005,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -174,7 +176,8 @@ class _DepthFrameProcessor:
     self._validate_randomization_cfg(
       calibration_scale_range=calibration_scale_range,
       calibration_bias_range_m=calibration_bias_range_m,
-      noise_std_m=noise_std_m,
+      noise_base_m=noise_base_m,
+      noise_quadratic_coeff=noise_quadratic_coeff,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,
@@ -186,6 +189,7 @@ class _DepthFrameProcessor:
         "buffered depth_m must have shape [B, H, W], "
         f"got {tuple(depth_m.shape)}"
       )
+    original_invalid = (~torch.isfinite(depth_m)) | (depth_m <= 0.0)
 
     self._randomization_enabled = enable_depth_randomization
     if env_ids is not None:
@@ -205,11 +209,19 @@ class _DepthFrameProcessor:
         bias_m = self._calibration_bias_m
       else:
         depth_m = depth_m.index_select(0, env_ids)
+        original_invalid = original_invalid.index_select(0, env_ids)
         scale = self._calibration_scale.index_select(0, env_ids)
         bias_m = self._calibration_bias_m.index_select(0, env_ids)
       depth_m = depth_m * scale + bias_m
-      if noise_std_m > 0.0:
-        depth_m = depth_m + noise_std_m * torch.randn_like(depth_m)
+      if enable_depth_distance_noise:
+        depth_for_sigma = torch.nan_to_num(
+          depth_m,
+          nan=0.2,
+          posinf=2.0,
+          neginf=0.2,
+        ).clamp(min=0.2, max=2.0)
+        sigma = noise_base_m + noise_quadratic_coeff * depth_for_sigma.square()
+        depth_m = depth_m + sigma * torch.randn_like(depth_m)
       if dropout_probability > 0.0:
         dropout_mask = self._structured_dropout_mask(
           batch_size=depth_m.shape[0],
@@ -224,7 +236,9 @@ class _DepthFrameProcessor:
         depth_m = depth_m.masked_fill(dropout_mask, torch.nan)
     elif env_ids is not None:
       depth_m = depth_m.index_select(0, env_ids)
+      original_invalid = original_invalid.index_select(0, env_ids)
 
+    depth_m = depth_m.masked_fill(original_invalid, torch.nan)
     return _finalize_depth_image(depth_m, depth_min_m, depth_max_m)
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
@@ -411,7 +425,8 @@ class _DepthFrameProcessor:
     *,
     calibration_scale_range: tuple[float, float],
     calibration_bias_range_m: tuple[float, float],
-    noise_std_m: float,
+    noise_base_m: float,
+    noise_quadratic_coeff: float,
     dropout_probability: float,
     dropout_patch_count_range: tuple[int, int],
     dropout_area_fraction_range: tuple[float, float],
@@ -427,8 +442,13 @@ class _DepthFrameProcessor:
       raise ValueError(
         "calibration_bias_range_m must be ordered min <= max"
       )
-    if noise_std_m < 0.0:
-      raise ValueError(f"noise_std_m must be non-negative, got {noise_std_m}")
+    if noise_base_m < 0.0:
+      raise ValueError(f"noise_base_m must be non-negative, got {noise_base_m}")
+    if noise_quadratic_coeff < 0.0:
+      raise ValueError(
+        "noise_quadratic_coeff must be non-negative, "
+        f"got {noise_quadratic_coeff}"
+      )
     if not 0.0 <= dropout_probability <= 1.0:
       raise ValueError(
         "dropout_probability must be in [0, 1], "
@@ -473,7 +493,9 @@ class DepthBuffer:
     enable_depth_randomization: bool = False,
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
-    noise_std_m: float = 0.0,
+    enable_depth_distance_noise: bool = True,
+    noise_base_m: float = 0.002,
+    noise_quadratic_coeff: float = 0.005,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -512,7 +534,9 @@ class DepthBuffer:
       enable_depth_randomization=enable_depth_randomization,
       calibration_scale_range=calibration_scale_range,
       calibration_bias_range_m=calibration_bias_range_m,
-      noise_std_m=noise_std_m,
+      enable_depth_distance_noise=enable_depth_distance_noise,
+      noise_base_m=noise_base_m,
+      noise_quadratic_coeff=noise_quadratic_coeff,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,
@@ -596,7 +620,9 @@ class AsyncDepthBuffer:
     enable_depth_randomization: bool = False,
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
-    noise_std_m: float = 0.0,
+    enable_depth_distance_noise: bool = True,
+    noise_base_m: float = 0.002,
+    noise_quadratic_coeff: float = 0.005,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -658,7 +684,9 @@ class AsyncDepthBuffer:
       enable_depth_randomization=enable_depth_randomization,
       calibration_scale_range=calibration_scale_range,
       calibration_bias_range_m=calibration_bias_range_m,
-      noise_std_m=noise_std_m,
+      enable_depth_distance_noise=enable_depth_distance_noise,
+      noise_base_m=noise_base_m,
+      noise_quadratic_coeff=noise_quadratic_coeff,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,

@@ -41,11 +41,13 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     DEPTH_DROPOUT_ASPECT_RATIO_RANGE,
     DEPTH_DROPOUT_PATCH_COUNT_RANGE,
     DEPTH_DROPOUT_PROBABILITY,
+    DEPTH_DISTANCE_NOISE_ENABLED,
     DEPTH_LEFT_CROP,
     DEPTH_MAX_M,
     DEPTH_MIN_M,
     DEPTH_MODEL_WIDTH,
-    DEPTH_NOISE_STD_M,
+    DEPTH_NOISE_BASE_M,
+    DEPTH_NOISE_QUADRATIC_COEFF,
     DEPTH_RANDOMIZATION_ENABLED,
     DEPTH_SYSTEM_DELAY_RANGE_S,
     wf_tron1b_rough_depth_env_cfg,
@@ -68,7 +70,9 @@ DEPTH_RANDOMIZATION_PARAMS = {
     "enable_depth_randomization": DEPTH_RANDOMIZATION_ENABLED,
     "calibration_scale_range": DEPTH_CALIBRATION_SCALE_RANGE,
     "calibration_bias_range_m": DEPTH_CALIBRATION_BIAS_RANGE_M,
-    "noise_std_m": DEPTH_NOISE_STD_M,
+    "enable_depth_distance_noise": DEPTH_DISTANCE_NOISE_ENABLED,
+    "noise_base_m": DEPTH_NOISE_BASE_M,
+    "noise_quadratic_coeff": DEPTH_NOISE_QUADRATIC_COEFF,
     "dropout_probability": DEPTH_DROPOUT_PROBABILITY,
     "dropout_patch_count_range": DEPTH_DROPOUT_PATCH_COUNT_RANGE,
     "dropout_area_fraction_range": DEPTH_DROPOUT_AREA_FRACTION_RANGE,
@@ -243,6 +247,27 @@ def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
     assert DEPTH_CAMERA_NAME not in training_obs_groups
 
 
+@pytest.mark.parametrize(
+    "factory",
+    (
+        wf_tron1b_rough_depth_env_cfg,
+        wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg,
+    ),
+)
+def test_depth_task_factories_expose_distance_noise_parameters(factory) -> None:
+    cfg = factory(
+        enable_depth_distance_noise=False,
+        depth_noise_base_m=0.003,
+        depth_noise_quadratic_coeff=0.007,
+    )
+    depth_term = cfg.observations[DEPTH_CAMERA_NAME].terms[DEPTH_CAMERA_NAME]
+
+    assert depth_term.params["enable_depth_distance_noise"] is False
+    assert depth_term.params["noise_base_m"] == 0.003
+    assert depth_term.params["noise_quadratic_coeff"] == 0.007
+    assert depth_term.params["dropout_probability"] == 0.0
+
+
 def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     tasks = set(list_tasks())
 
@@ -406,6 +431,7 @@ def test_depth_camera_domain_randomization_and_play_overrides() -> None:
     assert play_depth_term.params["depth_min_m"] == DEPTH_MIN_M
     assert play_depth_term.params["depth_max_m"] == DEPTH_MAX_M
     assert play_depth_term.params["enable_depth_randomization"] is False
+    assert play_depth_term.params["enable_depth_distance_noise"] is False
 
     buffered_play_cfg = wf_tron1b_rough_depth_env_cfg(play=True)
     buffered_depth_term = buffered_play_cfg.observations[DEPTH_CAMERA_NAME].terms[
@@ -417,6 +443,7 @@ def test_depth_camera_domain_randomization_and_play_overrides() -> None:
     assert buffered_depth_term.params["depth_min_m"] == DEPTH_MIN_M
     assert buffered_depth_term.params["depth_max_m"] == DEPTH_MAX_M
     assert buffered_depth_term.params["enable_depth_randomization"] is False
+    assert buffered_depth_term.params["enable_depth_distance_noise"] is False
 
 
 def test_depth_image_crops_and_normalizes_without_modifying_camera_data() -> None:
@@ -493,6 +520,7 @@ def test_depth_calibration_is_episode_stable_and_resampled_on_reset() -> None:
     raw_depth = torch.ones(3, 4, 5)
     randomization = {
         "enable_depth_randomization": True,
+        "enable_depth_distance_noise": False,
         "calibration_scale_range": (0.98, 1.02),
         "calibration_bias_range_m": (-0.01, 0.01),
     }
@@ -527,12 +555,13 @@ def test_depth_calibration_is_episode_stable_and_resampled_on_reset() -> None:
 
 
 def test_structured_depth_dropout_is_bounded_and_reproducible() -> None:
+    test_dropout_probability = 0.30
     mask_kwargs = {
         "batch_size": 2048,
         "height": DEPTH_CAMERA_HEIGHT,
         "width": DEPTH_MODEL_WIDTH,
         "device": torch.device("cpu"),
-        "probability": DEPTH_DROPOUT_PROBABILITY,
+        "probability": test_dropout_probability,
         "patch_count_range": DEPTH_DROPOUT_PATCH_COUNT_RANGE,
         "area_fraction_range": DEPTH_DROPOUT_AREA_FRACTION_RANGE,
         "aspect_ratio_range": DEPTH_DROPOUT_ASPECT_RATIO_RANGE,
@@ -550,7 +579,7 @@ def test_structured_depth_dropout_is_bounded_and_reproducible() -> None:
     invalid_pixels = mask.sum(dim=(-1, -2))
     active = invalid_pixels > 0
     active_fraction = active.to(torch.float32).mean().item()
-    assert active_fraction == pytest.approx(DEPTH_DROPOUT_PROBABILITY, abs=0.04)
+    assert active_fraction == pytest.approx(test_dropout_probability, abs=0.04)
     max_pixels = math.floor(
         DEPTH_DROPOUT_AREA_FRACTION_RANGE[1]
         * DEPTH_CAMERA_HEIGHT
@@ -562,6 +591,7 @@ def test_structured_depth_dropout_is_bounded_and_reproducible() -> None:
     processed = observation_mdp._DepthFrameProcessor()(
         torch.full((4, DEPTH_CAMERA_HEIGHT, DEPTH_MODEL_WIDTH), 1.1),
         enable_depth_randomization=True,
+        enable_depth_distance_noise=False,
         calibration_scale_range=(1.0, 1.0),
         calibration_bias_range_m=(0.0, 0.0),
         dropout_probability=1.0,
@@ -574,22 +604,51 @@ def test_structured_depth_dropout_is_bounded_and_reproducible() -> None:
     assert torch.all(filled_invalid.sum(dim=(-1, -2)) <= max_pixels)
 
 
-def test_disabled_depth_randomization_does_not_sample_rng(monkeypatch) -> None:
+def test_depth_distance_noise_uses_quadratic_sigma(monkeypatch) -> None:
+    processor = observation_mdp._DepthFrameProcessor()
+    raw_depth = torch.tensor([[[0.2, 1.0, 2.0]]])
+
+    monkeypatch.setattr(torch, "randn_like", torch.ones_like)
+    processed = processor(
+        raw_depth,
+        depth_min_m=0.0,
+        depth_max_m=3.0,
+        enable_depth_randomization=True,
+        calibration_scale_range=(1.0, 1.0),
+        calibration_bias_range_m=(0.0, 0.0),
+        enable_depth_distance_noise=True,
+        noise_base_m=DEPTH_NOISE_BASE_M,
+        noise_quadratic_coeff=DEPTH_NOISE_QUADRATIC_COEFF,
+        dropout_probability=0.0,
+    )
+
+    measured_sigma = processed * 3.0 - raw_depth
+    torch.testing.assert_close(
+        measured_sigma,
+        torch.tensor([[[0.0022, 0.0070, 0.0220]]]),
+        rtol=0.0,
+        atol=1.0e-7,
+    )
+
+
+def test_disabled_depth_distance_noise_does_not_sample_rng(monkeypatch) -> None:
     processor = observation_mdp._DepthFrameProcessor()
 
     def unexpected_rng(*args, **kwargs):
         del args, kwargs
-        raise AssertionError("depth RNG must not run when randomization is disabled")
+        raise AssertionError("depth RNG must not run when distance noise is disabled")
 
     monkeypatch.setattr(torch, "rand", unexpected_rng)
     monkeypatch.setattr(torch, "randn_like", unexpected_rng)
     depth = processor(
         torch.full((2, 3, 4), 1.1),
-        enable_depth_randomization=False,
-        calibration_scale_range=DEPTH_CALIBRATION_SCALE_RANGE,
-        calibration_bias_range_m=DEPTH_CALIBRATION_BIAS_RANGE_M,
-        noise_std_m=DEPTH_NOISE_STD_M,
-        dropout_probability=DEPTH_DROPOUT_PROBABILITY,
+        enable_depth_randomization=True,
+        calibration_scale_range=(1.0, 1.0),
+        calibration_bias_range_m=(0.0, 0.0),
+        enable_depth_distance_noise=False,
+        noise_base_m=DEPTH_NOISE_BASE_M,
+        noise_quadratic_coeff=DEPTH_NOISE_QUADRATIC_COEFF,
+        dropout_probability=0.0,
         dropout_patch_count_range=DEPTH_DROPOUT_PATCH_COUNT_RANGE,
         dropout_area_fraction_range=DEPTH_DROPOUT_AREA_FRACTION_RANGE,
         dropout_aspect_ratio_range=DEPTH_DROPOUT_ASPECT_RATIO_RANGE,
@@ -598,6 +657,32 @@ def test_disabled_depth_randomization_does_not_sample_rng(monkeypatch) -> None:
     assert depth.dtype is torch.float32
     torch.testing.assert_close(depth, torch.full_like(depth, 0.5))
     processor.reset()
+
+
+def test_depth_randomization_preserves_original_invalid_pixels(monkeypatch) -> None:
+    processor = observation_mdp._DepthFrameProcessor()
+    raw_depth = torch.tensor(
+        [[[0.0, torch.nan, torch.inf, -torch.inf, 1.0]]],
+        dtype=torch.float64,
+    )
+
+    monkeypatch.setattr(torch, "randn_like", torch.ones_like)
+    processed = processor(
+        raw_depth,
+        enable_depth_randomization=True,
+        calibration_scale_range=(1.0, 1.0),
+        calibration_bias_range_m=(0.5, 0.5),
+        enable_depth_distance_noise=True,
+        noise_base_m=DEPTH_NOISE_BASE_M,
+        noise_quadratic_coeff=DEPTH_NOISE_QUADRATIC_COEFF,
+        dropout_probability=0.0,
+    )
+
+    torch.testing.assert_close(processed[0, 0, :4], torch.ones(4))
+    assert processed.dtype is torch.float32
+    assert processed.is_contiguous()
+    assert torch.isfinite(processed).all()
+    assert torch.all((0.0 <= processed) & (processed <= 1.0))
 
 
 @pytest.mark.parametrize(
@@ -644,7 +729,9 @@ def test_depth_noise_is_sampled_only_for_new_buffered_frames(
         "enable_depth_randomization": True,
         "calibration_scale_range": (1.0, 1.0),
         "calibration_bias_range_m": (0.0, 0.0),
-        "noise_std_m": 0.1,
+        "enable_depth_distance_noise": True,
+        "noise_base_m": 0.1,
+        "noise_quadratic_coeff": 0.0,
         "dropout_probability": 0.0,
     }
 
@@ -665,7 +752,8 @@ def test_depth_noise_is_sampled_only_for_new_buffered_frames(
     (
         ("calibration_scale_range", (0.0, 1.0), "calibration_scale_range"),
         ("calibration_bias_range_m", (0.1, -0.1), "calibration_bias_range_m"),
-        ("noise_std_m", -0.1, "noise_std_m"),
+        ("noise_base_m", -0.1, "noise_base_m"),
+        ("noise_quadratic_coeff", -0.1, "noise_quadratic_coeff"),
         ("dropout_probability", 1.1, "dropout_probability"),
         ("dropout_patch_count_range", (0, 3), "dropout_patch_count_range"),
         ("dropout_area_fraction_range", (0.1, 1.1), "dropout_area_fraction_range"),
