@@ -18,6 +18,34 @@ from rsl_rl.modules import MLP, HiddenState
 from rsl_rl.utils import unpad_trajectories
 
 
+class DepthPreprocessor(nn.Module):
+    """Convert finite metric depth into normalized camera-range values."""
+
+    def __init__(self, depth_min_m: float = 0.2, depth_max_m: float = 2.0) -> None:
+        """Initialize the metric clipping range."""
+        super().__init__()
+        if depth_min_m < 0.0:
+            raise ValueError(f"depth_min_m must be >= 0, got {depth_min_m}")
+        if depth_max_m <= depth_min_m:
+            raise ValueError(
+                f"depth_max_m must be greater than depth_min_m, got {depth_max_m}"
+            )
+        self.depth_min_m = depth_min_m
+        self.depth_max_m = depth_max_m
+
+    def forward(self, depth_m: torch.Tensor) -> torch.Tensor:
+        """Treat depths below the near limit as empty, clip, and normalize."""
+        depth_m = torch.where(
+            depth_m >= self.depth_min_m,
+            depth_m,
+            torch.full_like(depth_m, self.depth_max_m),
+        )
+        depth_m = torch.clamp(depth_m, self.depth_min_m, self.depth_max_m)
+        return (depth_m - self.depth_min_m) / (
+            self.depth_max_m - self.depth_min_m
+        )
+
+
 class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
     """Velocity representation model with a recurrent depth-image student input."""
 
@@ -37,6 +65,8 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         depth_gru_hidden_dim: int = 128,
         depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
         depth_conv_strides: tuple[int, ...] | list[int] | None = None,
+        depth_min_m: float = 0.2,
+        depth_max_m: float = 2.0,
     ) -> None:
         super().__init__(
             obs,
@@ -55,6 +85,7 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         self.depth_feature_dim = depth_feature_dim
         self.depth_gru_input_dim = depth_feature_dim + self.current_proprio_dim
         self.depth_gru_hidden_dim = depth_gru_hidden_dim
+        self.depth_preprocessor = DepthPreprocessor(depth_min_m, depth_max_m)
         if depth_conv_strides is None:
             depth_conv_strides = (*((2,) * (len(depth_channels) - 1)), 1)
         self.depth_encoder = _DepthCNN(
@@ -340,7 +371,7 @@ class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
         next_hidden_state = depth_proprio_gru_step(
             self.depth_encoder,
             self.depth_gru,
-            depth,
+            self.depth_preprocessor(depth),
             normalized_current_proprio,
             hidden_state,
         )
@@ -496,6 +527,7 @@ class _TorchDepthRepresentationVelocityActorCritic(nn.Module):
         self.current_proprio_obs_normalizer = copy.deepcopy(model.current_proprio_obs_normalizer)
         self.command_obs_normalizer = copy.deepcopy(model.command_obs_normalizer)
         self.lin_vel_normalizer = copy.deepcopy(model.lin_vel_normalizer)
+        self.depth_preprocessor = copy.deepcopy(model.depth_preprocessor)
         self.proprio_encoder = copy.deepcopy(model.proprio_encoder)
         self.depth_encoder = copy.deepcopy(model.depth_encoder)
         self.depth_gru = copy.deepcopy(model.depth_gru)
@@ -518,7 +550,10 @@ class _TorchDepthRepresentationVelocityActorCritic(nn.Module):
         proprio_obs = self.proprio_history_obs_normalizer(proprio_history.flatten(start_dim=1))
         current_proprio = self.current_proprio_obs_normalizer(proprio_history[:, -1, :])
         depth_latent = self.depth_gru(
-            torch.cat((self.depth_encoder(depth), current_proprio), dim=-1),
+            torch.cat(
+                (self.depth_encoder(self.depth_preprocessor(depth)), current_proprio),
+                dim=-1,
+            ),
             self.hidden_state,
         )
         self.hidden_state[:] = depth_latent.detach()
@@ -581,7 +616,10 @@ class _OnnxDepthRepresentationVelocityActorCritic(_TorchDepthRepresentationVeloc
         proprio_obs = self.proprio_history_obs_normalizer(proprio_history.flatten(start_dim=1))
         current_proprio = self.current_proprio_obs_normalizer(proprio_history[:, -1, :])
         hidden_state_out = self.depth_gru(
-            torch.cat((self.depth_encoder(depth), current_proprio), dim=-1),
+            torch.cat(
+                (self.depth_encoder(self.depth_preprocessor(depth)), current_proprio),
+                dim=-1,
+            ),
             hidden_state_in,
         )
         actions, predicted_lin_vel = self._actor_from_student_inputs(

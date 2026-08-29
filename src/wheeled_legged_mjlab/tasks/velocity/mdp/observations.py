@@ -94,28 +94,20 @@ def _crop_depth_image(depth_m: torch.Tensor, left_crop: int) -> torch.Tensor:
   return depth_m[..., left_crop:].to(dtype=torch.float32).contiguous()
 
 
-def _finalize_depth_image(
-  depth_m: torch.Tensor,
-  depth_min_m: float,
-  depth_max_m: float,
-) -> torch.Tensor:
+def _encode_invalid_depth(depth_m: torch.Tensor) -> torch.Tensor:
+  """Encode every invalid depth sample as the finite sentinel 0 m."""
   invalid = (~torch.isfinite(depth_m)) | (depth_m <= 0.0)
-  depth_m = torch.where(invalid, depth_max_m, depth_m)
-  depth_m = depth_m.clamp(min=depth_min_m, max=depth_max_m)
-  return ((depth_m - depth_min_m) / (depth_max_m - depth_min_m)).contiguous()
+  return torch.where(invalid, torch.zeros_like(depth_m), depth_m).contiguous()
 
 
 def preprocess_depth_image(
   depth_m: torch.Tensor,
   *,
   left_crop: int = 0,
-  depth_min_m: float = 0.2,
-  depth_max_m: float = 2.0,
 ) -> torch.Tensor:
-  """Deterministically crop and normalize a metric depth image."""
-  _validate_depth_range(depth_min_m, depth_max_m)
+  """Crop metric depth and encode invalid samples as 0 m."""
   depth_m = _crop_depth_image(depth_m, left_crop)
-  return _finalize_depth_image(depth_m, depth_min_m, depth_max_m)
+  return _encode_invalid_depth(depth_m)
 
 
 def _camera_depth_image_meters(
@@ -131,15 +123,11 @@ def depth_image(
   env: ManagerBasedRlEnv,
   sensor_name: str = "depth_camera",
   left_crop: int = 0,
-  depth_min_m: float = 0.2,
-  depth_max_m: float = 2.0,
 ) -> torch.Tensor:
-  """Deterministic depth image from the forward-facing camera."""
+  """Finite metric depth image from the forward-facing camera."""
   return preprocess_depth_image(
     _camera_depth_image_meters(env, sensor_name),
     left_crop=left_crop,
-    depth_min_m=depth_min_m,
-    depth_max_m=depth_max_m,
   )
 
 
@@ -239,8 +227,8 @@ class _DepthFrameProcessor:
       depth_m = depth_m.index_select(0, env_ids)
       original_invalid = original_invalid.index_select(0, env_ids)
 
-    depth_m = depth_m.masked_fill(original_invalid, torch.nan)
-    return _finalize_depth_image(depth_m, depth_min_m, depth_max_m)
+    depth_m = depth_m.masked_fill(original_invalid, 0.0)
+    return _encode_invalid_depth(depth_m)
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     if not self._randomization_enabled or self._calibration_scale is None:

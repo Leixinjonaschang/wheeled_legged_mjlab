@@ -9,10 +9,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 from tensordict import TensorDict
 
 from rsl_rl.models import DepthRepresentationVelocityActorCritic, RepresentationVelocityActorCritic
+from rsl_rl.models.depth_representation_velocity_actor_critic import DepthPreprocessor
 from rsl_rl.models.depth_representation_velocity_predictor_actor_critic import (
     DepthRepresentationVelocityPredictorActorCritic,
 )
@@ -136,6 +139,17 @@ def make_depth_predictor_model(
         depth_channels=(4, 4),
         latent_dynamics_horizons=latent_dynamics_horizons,
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+
+def test_depth_preprocessor_converts_metric_depth_to_normalized_input() -> None:
+    depth_m = torch.tensor([[[[0.0, -1.0, 0.1, 0.2, 1.1, 2.0, 2.5]]]])
+
+    depth = DepthPreprocessor(depth_min_m=0.2, depth_max_m=2.0)(depth_m)
+
+    torch.testing.assert_close(
+        depth,
+        torch.tensor([[[[1.0, 1.0, 1.0, 0.0, 0.5, 1.0, 1.0]]]]),
     )
 
 
@@ -644,6 +658,33 @@ def test_depth_onnx_wrapper_matches_policy_outputs() -> None:
     assert onnx_model.input_names == ["proprio_history", "actor_command", "depth", "hidden_state_in"]
     assert onnx_model.output_names == ["actions", "predicted_lin_vel", "hidden_state_out"]
     assert onnx_model.get_dummy_inputs()[2].shape == (1, *DEPTH_SHAPE)
+
+
+def test_depth_onnx_export_contains_metric_preprocessing(tmp_path: Path) -> None:
+    import onnx
+
+    export_model = make_depth_model().as_onnx(verbose=False)
+    export_model.eval()
+    export_path = tmp_path / "policy.onnx"
+
+    torch.onnx.export(
+        export_model,
+        export_model.get_dummy_inputs(),
+        export_path,
+        opset_version=18,
+        input_names=export_model.input_names,
+        output_names=export_model.output_names,
+    )
+
+    graph = onnx.load(export_path).graph
+    op_types = {node.op_type for node in graph.node}
+    assert {"GreaterOrEqual", "Where", "Clip", "Sub", "Div"} <= op_types
+    assert {"IsNaN", "IsInf"}.isdisjoint(op_types)
+    depth_input = next(value for value in graph.input if value.name == "depth")
+    assert [dim.dim_value for dim in depth_input.type.tensor_type.shape.dim] == [
+        1,
+        *DEPTH_SHAPE,
+    ]
 
 
 def test_depth_jit_wrapper_scripts_and_runs_single_robot_policy() -> None:

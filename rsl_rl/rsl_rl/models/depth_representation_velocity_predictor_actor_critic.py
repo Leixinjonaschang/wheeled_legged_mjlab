@@ -36,6 +36,8 @@ class DepthRepresentationVelocityPredictorActorCritic(DepthRepresentationVelocit
         depth_gru_hidden_dim: int = 128,
         depth_channels: tuple[int, ...] | list[int] = (16, 32, 32),
         depth_conv_strides: tuple[int, ...] | list[int] | None = None,
+        depth_min_m: float = 0.2,
+        depth_max_m: float = 2.0,
         latent_dynamics_hidden_dims: tuple[int, ...] | list[int] = (128, 256, 256, 128),
         latent_dynamics_horizons: tuple[int, ...] | list[int] = (1,),
     ) -> None:
@@ -54,6 +56,8 @@ class DepthRepresentationVelocityPredictorActorCritic(DepthRepresentationVelocit
             depth_gru_hidden_dim=depth_gru_hidden_dim,
             depth_channels=depth_channels,
             depth_conv_strides=depth_conv_strides,
+            depth_min_m=depth_min_m,
+            depth_max_m=depth_max_m,
         )
         self.latent_dynamics_horizons = tuple(int(horizon) for horizon in latent_dynamics_horizons)
         if not self.latent_dynamics_horizons:
