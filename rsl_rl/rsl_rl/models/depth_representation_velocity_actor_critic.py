@@ -524,7 +524,6 @@ class _TorchDepthRepresentationVelocityActorCritic(nn.Module):
         self.current_proprio_obs_normalizer = copy.deepcopy(model.current_proprio_obs_normalizer)
         self.command_obs_normalizer = copy.deepcopy(model.command_obs_normalizer)
         self.lin_vel_normalizer = copy.deepcopy(model.lin_vel_normalizer)
-        self.depth_preprocessor = copy.deepcopy(model.depth_preprocessor)
         self.proprio_encoder = copy.deepcopy(model.proprio_encoder)
         self.depth_encoder = copy.deepcopy(model.depth_encoder)
         self.depth_gru = copy.deepcopy(model.depth_gru)
@@ -548,7 +547,7 @@ class _TorchDepthRepresentationVelocityActorCritic(nn.Module):
         current_proprio = self.current_proprio_obs_normalizer(proprio_history[:, -1, :])
         depth_latent = self.depth_gru(
             torch.cat(
-                (self.depth_encoder(self.depth_preprocessor(depth)), current_proprio),
+                (self.depth_encoder(depth), current_proprio),
                 dim=-1,
             ),
             self.hidden_state,

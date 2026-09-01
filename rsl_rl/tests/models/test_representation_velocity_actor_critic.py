@@ -660,6 +660,31 @@ def test_depth_onnx_wrapper_matches_policy_outputs_with_preprocessed_depth() -> 
     assert onnx_model.get_dummy_inputs()[2].shape == (1, *DEPTH_SHAPE)
 
 
+def test_depth_jit_wrapper_matches_policy_outputs_with_preprocessed_depth() -> None:
+    model = make_depth_model()
+    model.eval()
+    obs = make_depth_rep_obs()[:1]
+    hidden_state = torch.zeros(1, model.depth_gru_hidden_dim)
+    jit_model = model.as_jit()
+    jit_model.eval()
+
+    with torch.inference_mode():
+        expected_actions = model(obs, hidden_state=hidden_state)
+        expected_predicted_lin_vel = model.get_proprio_outputs(
+            obs,
+            hidden_state=hidden_state,
+        )[1]
+        actions, predicted_lin_vel = jit_model(
+            obs["proprio_history"],
+            obs["actor_command"],
+            model.depth_preprocessor(obs["depth_camera"]),
+        )
+
+    assert not hasattr(jit_model, "depth_preprocessor")
+    assert torch.allclose(actions, expected_actions, atol=1e-6)
+    assert torch.allclose(predicted_lin_vel, expected_predicted_lin_vel, atol=1e-6)
+
+
 def test_depth_onnx_export_excludes_metric_preprocessing(tmp_path: Path) -> None:
     import onnx
 
@@ -686,17 +711,28 @@ def test_depth_onnx_export_excludes_metric_preprocessing(tmp_path: Path) -> None
     ]
 
 
+def test_depth_jit_export_excludes_metric_preprocessing(tmp_path: Path) -> None:
+    export_path = tmp_path / "policy.pt"
+    torch.jit.script(make_depth_model().as_jit()).save(str(export_path))
+
+    jit_model = torch.jit.load(str(export_path))
+    op_types = {node.kind() for node in jit_model.inlined_graph.nodes()}
+    assert {"aten::ge", "aten::where", "aten::clamp"}.isdisjoint(op_types)
+    assert not any("depth_preprocessor" in name for name, _ in jit_model.named_modules())
+
+
 def test_depth_jit_wrapper_scripts_and_runs_single_robot_policy() -> None:
     model = make_depth_model()
     obs = make_depth_rep_obs()
 
     export_model = model.as_jit()
     assert all("latent_dynamics" not in name for name, _ in export_model.named_parameters())
+    assert not hasattr(export_model, "depth_preprocessor")
     jit_model = torch.jit.script(export_model)
     actions, predicted_lin_vel = jit_model(
         obs["proprio_history"][:1],
         obs["actor_command"][:1],
-        obs["depth_camera"][:1],
+        model.depth_preprocessor(obs["depth_camera"][:1]),
     )
 
     assert actions.shape == (1, NUM_ACTIONS)
