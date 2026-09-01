@@ -10,6 +10,7 @@ from mjlab.sensor import ContactSensor, RayCastSensor
 from mjlab.sensor.camera_sensor import CameraSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.utils.lab_api.math import quat_apply_inverse
+from torchvision.transforms.functional import gaussian_blur
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -153,9 +154,12 @@ class _DepthFrameProcessor:
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
+    enable_depth_gaussian_blur: bool = False,
     enable_depth_dropout: bool = False,
     noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
+    gaussian_blur_kernel_size: tuple[int, int] = (5, 5),
+    gaussian_blur_sigma: float = 1.0,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -167,6 +171,8 @@ class _DepthFrameProcessor:
       calibration_bias_range_m=calibration_bias_range_m,
       noise_base_m=noise_base_m,
       noise_quadratic_coeff=noise_quadratic_coeff,
+      gaussian_blur_kernel_size=gaussian_blur_kernel_size,
+      gaussian_blur_sigma=gaussian_blur_sigma,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,
@@ -211,6 +217,23 @@ class _DepthFrameProcessor:
         ).clamp(min=depth_min_m, max=depth_max_m)
         sigma = noise_base_m + noise_quadratic_coeff * depth_for_sigma.square()
         depth_m = depth_m + sigma * torch.randn_like(depth_m)
+      if enable_depth_gaussian_blur:
+        depth_for_blur = torch.nan_to_num(
+          depth_m,
+          nan=depth_max_m,
+          posinf=depth_max_m,
+          neginf=depth_max_m,
+        ).masked_fill(original_invalid, depth_max_m)
+        depth_for_blur = torch.where(
+          depth_for_blur >= depth_min_m,
+          depth_for_blur,
+          torch.full_like(depth_for_blur, depth_max_m),
+        ).clamp(max=depth_max_m)
+        depth_m = gaussian_blur(
+          depth_for_blur.unsqueeze(1),
+          kernel_size=list(gaussian_blur_kernel_size),
+          sigma=[gaussian_blur_sigma, gaussian_blur_sigma],
+        ).squeeze(1)
       if enable_depth_dropout and dropout_probability > 0.0:
         dropout_mask = self._structured_dropout_mask(
           batch_size=depth_m.shape[0],
@@ -416,6 +439,8 @@ class _DepthFrameProcessor:
     calibration_bias_range_m: tuple[float, float],
     noise_base_m: float,
     noise_quadratic_coeff: float,
+    gaussian_blur_kernel_size: tuple[int, int],
+    gaussian_blur_sigma: float,
     dropout_probability: float,
     dropout_patch_count_range: tuple[int, int],
     dropout_area_fraction_range: tuple[float, float],
@@ -439,6 +464,18 @@ class _DepthFrameProcessor:
       raise ValueError(
         "noise_quadratic_coeff must be finite and non-negative, "
         f"got {noise_quadratic_coeff}"
+      )
+    if len(gaussian_blur_kernel_size) != 2 or any(
+      size <= 0 or size % 2 == 0 for size in gaussian_blur_kernel_size
+    ):
+      raise ValueError(
+        "gaussian_blur_kernel_size must contain two positive odd values, "
+        f"got {gaussian_blur_kernel_size}"
+      )
+    if not math.isfinite(gaussian_blur_sigma) or gaussian_blur_sigma <= 0.0:
+      raise ValueError(
+        "gaussian_blur_sigma must be finite and positive, "
+        f"got {gaussian_blur_sigma}"
       )
     if not 0.0 <= dropout_probability <= 1.0:
       raise ValueError(
@@ -485,9 +522,12 @@ class DepthBuffer:
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
+    enable_depth_gaussian_blur: bool = False,
     enable_depth_dropout: bool = False,
     noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
+    gaussian_blur_kernel_size: tuple[int, int] = (5, 5),
+    gaussian_blur_sigma: float = 1.0,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -527,9 +567,12 @@ class DepthBuffer:
       calibration_scale_range=calibration_scale_range,
       calibration_bias_range_m=calibration_bias_range_m,
       enable_depth_distance_noise=enable_depth_distance_noise,
+      enable_depth_gaussian_blur=enable_depth_gaussian_blur,
       enable_depth_dropout=enable_depth_dropout,
       noise_base_m=noise_base_m,
       noise_quadratic_coeff=noise_quadratic_coeff,
+      gaussian_blur_kernel_size=gaussian_blur_kernel_size,
+      gaussian_blur_sigma=gaussian_blur_sigma,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,
@@ -614,9 +657,12 @@ class AsyncDepthBuffer:
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
+    enable_depth_gaussian_blur: bool = False,
     enable_depth_dropout: bool = False,
     noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
+    gaussian_blur_kernel_size: tuple[int, int] = (5, 5),
+    gaussian_blur_sigma: float = 1.0,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -679,9 +725,12 @@ class AsyncDepthBuffer:
       calibration_scale_range=calibration_scale_range,
       calibration_bias_range_m=calibration_bias_range_m,
       enable_depth_distance_noise=enable_depth_distance_noise,
+      enable_depth_gaussian_blur=enable_depth_gaussian_blur,
       enable_depth_dropout=enable_depth_dropout,
       noise_base_m=noise_base_m,
       noise_quadratic_coeff=noise_quadratic_coeff,
+      gaussian_blur_kernel_size=gaussian_blur_kernel_size,
+      gaussian_blur_sigma=gaussian_blur_sigma,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,

@@ -49,6 +49,9 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     DEPTH_DROPOUT_PATCH_COUNT_RANGE,
     DEPTH_DROPOUT_PROBABILITY,
     DEPTH_DISTANCE_NOISE_ENABLED,
+    DEPTH_GAUSSIAN_BLUR_ENABLED,
+    DEPTH_GAUSSIAN_BLUR_KERNEL_SIZE,
+    DEPTH_GAUSSIAN_BLUR_SIGMA,
     DEPTH_LEFT_CROP,
     DEPTH_MAX_M,
     DEPTH_MIN_M,
@@ -80,6 +83,9 @@ DEPTH_RANDOMIZATION_PARAMS = {
     "enable_depth_distance_noise": DEPTH_DISTANCE_NOISE_ENABLED,
     "noise_base_m": DEPTH_NOISE_BASE_M,
     "noise_quadratic_coeff": DEPTH_NOISE_QUADRATIC_COEFF,
+    "enable_depth_gaussian_blur": DEPTH_GAUSSIAN_BLUR_ENABLED,
+    "gaussian_blur_kernel_size": DEPTH_GAUSSIAN_BLUR_KERNEL_SIZE,
+    "gaussian_blur_sigma": DEPTH_GAUSSIAN_BLUR_SIGMA,
     "enable_depth_dropout": DEPTH_DROPOUT_ENABLED,
     "dropout_probability": DEPTH_DROPOUT_PROBABILITY,
     "dropout_patch_count_range": DEPTH_DROPOUT_PATCH_COUNT_RANGE,
@@ -265,6 +271,7 @@ def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
 def test_depth_task_factories_expose_randomization_parameters(factory) -> None:
     cfg = factory(
         enable_depth_distance_noise=False,
+        enable_depth_gaussian_blur=False,
         enable_depth_dropout=True,
         depth_noise_base_m=0.003,
         depth_noise_quadratic_coeff=0.007,
@@ -272,9 +279,12 @@ def test_depth_task_factories_expose_randomization_parameters(factory) -> None:
     depth_term = cfg.observations[DEPTH_CAMERA_NAME].terms[DEPTH_CAMERA_NAME]
 
     assert depth_term.params["enable_depth_distance_noise"] is False
+    assert depth_term.params["enable_depth_gaussian_blur"] is False
     assert depth_term.params["enable_depth_dropout"] is True
     assert depth_term.params["noise_base_m"] == 0.003
     assert depth_term.params["noise_quadratic_coeff"] == 0.007
+    assert depth_term.params["gaussian_blur_kernel_size"] == (5, 5)
+    assert depth_term.params["gaussian_blur_sigma"] == 1.0
     assert depth_term.params["dropout_probability"] == 0.30
 
 
@@ -444,6 +454,7 @@ def test_depth_camera_domain_randomization_and_play_overrides() -> None:
     assert play_depth_term.params["depth_max_m"] == DEPTH_MAX_M
     assert play_depth_term.params["enable_depth_randomization"] is False
     assert play_depth_term.params["enable_depth_distance_noise"] is False
+    assert play_depth_term.params["enable_depth_gaussian_blur"] is False
     assert play_depth_term.params["enable_depth_dropout"] is False
 
     buffered_play_cfg = wf_tron1b_rough_depth_env_cfg(play=True)
@@ -457,6 +468,7 @@ def test_depth_camera_domain_randomization_and_play_overrides() -> None:
     assert buffered_depth_term.params["depth_max_m"] == DEPTH_MAX_M
     assert buffered_depth_term.params["enable_depth_randomization"] is False
     assert buffered_depth_term.params["enable_depth_distance_noise"] is False
+    assert buffered_depth_term.params["enable_depth_gaussian_blur"] is False
     assert buffered_depth_term.params["enable_depth_dropout"] is False
 
 
@@ -518,6 +530,83 @@ def test_depth_frame_processor_validates_noise_range(
             depth_min_m=depth_min_m,
             depth_max_m=depth_max_m,
         )
+
+
+def test_depth_gaussian_blur_flag_parameters_and_invalid_depth_semantics(
+    monkeypatch,
+) -> None:
+    processor = observation_mdp._DepthFrameProcessor()
+    raw_depth = torch.ones(1, 5, 5)
+    raw_depth[0, 1, 1] = 0.0
+    raw_depth[0, 2, 2] = torch.nan
+    raw_depth[0, 3, 3] = torch.inf
+    raw_depth[0, 0, 0] = 0.1
+    raw_depth[0, 0, 1] = 3.0
+    captured: dict[str, object] = {}
+
+    def capture_blur(depth, *, kernel_size, sigma):
+        captured["depth"] = depth.clone()
+        captured["kernel_size"] = kernel_size
+        captured["sigma"] = sigma
+        return depth
+
+    monkeypatch.setattr(observation_mdp, "gaussian_blur", capture_blur)
+    unblurred_input = torch.full((1, 5, 5), 1.1)
+    unblurred = processor(
+        unblurred_input,
+        enable_depth_randomization=True,
+        calibration_scale_range=(1.0, 1.0),
+        calibration_bias_range_m=(0.0, 0.0),
+        enable_depth_distance_noise=False,
+        enable_depth_gaussian_blur=False,
+    )
+    assert captured == {}
+    torch.testing.assert_close(unblurred, unblurred_input)
+
+    processed = processor(
+        raw_depth,
+        depth_min_m=DEPTH_MIN_M,
+        depth_max_m=DEPTH_MAX_M,
+        enable_depth_randomization=True,
+        calibration_scale_range=(1.0, 1.0),
+        calibration_bias_range_m=(0.0, 0.0),
+        enable_depth_distance_noise=False,
+        enable_depth_gaussian_blur=True,
+        gaussian_blur_kernel_size=DEPTH_GAUSSIAN_BLUR_KERNEL_SIZE,
+        gaussian_blur_sigma=DEPTH_GAUSSIAN_BLUR_SIGMA,
+    )
+
+    depth_for_blur = captured["depth"]
+    assert isinstance(depth_for_blur, torch.Tensor)
+    assert depth_for_blur.shape == (1, 1, 5, 5)
+    assert captured["kernel_size"] == [5, 5]
+    assert captured["sigma"] == [1.0, 1.0]
+    torch.testing.assert_close(
+        depth_for_blur[0, 0, [1, 2, 3, 0, 0], [1, 2, 3, 0, 1]],
+        torch.full((5,), DEPTH_MAX_M),
+    )
+    torch.testing.assert_close(
+        processed[0, [1, 2, 3], [1, 2, 3]],
+        torch.zeros(3),
+    )
+    torch.testing.assert_close(
+        processed[0, 0, :2],
+        torch.full((2,), DEPTH_MAX_M),
+    )
+    assert processed.is_contiguous()
+    assert torch.isfinite(processed).all()
+
+    monkeypatch.undo()
+    constant_depth = torch.full((1, 5, 5), 1.1)
+    blurred_constant = processor(
+        constant_depth,
+        enable_depth_randomization=True,
+        calibration_scale_range=(1.0, 1.0),
+        calibration_bias_range_m=(0.0, 0.0),
+        enable_depth_distance_noise=False,
+        enable_depth_gaussian_blur=True,
+    )
+    torch.testing.assert_close(blurred_constant, constant_depth)
 
 
 def test_depth_calibration_is_episode_stable_and_resampled_on_reset() -> None:
@@ -670,7 +759,7 @@ def test_depth_distance_noise_uses_quadratic_sigma(monkeypatch) -> None:
         observation_mdp.AsyncDepthBuffer.__call__,
     ),
 )
-def test_depth_noise_low_level_defaults_match_env_config(callable_obj) -> None:
+def test_depth_randomization_low_level_defaults_match_env_config(callable_obj) -> None:
     parameters = inspect.signature(callable_obj).parameters
 
     assert parameters["noise_base_m"].default == DEPTH_NOISE_BASE_M
@@ -678,6 +767,11 @@ def test_depth_noise_low_level_defaults_match_env_config(callable_obj) -> None:
         parameters["noise_quadratic_coeff"].default
         == DEPTH_NOISE_QUADRATIC_COEFF
     )
+    assert (
+        parameters["gaussian_blur_kernel_size"].default
+        == DEPTH_GAUSSIAN_BLUR_KERNEL_SIZE
+    )
+    assert parameters["gaussian_blur_sigma"].default == DEPTH_GAUSSIAN_BLUR_SIGMA
 
 
 def test_disabled_depth_distance_noise_does_not_sample_rng(monkeypatch) -> None:
@@ -746,7 +840,7 @@ def test_depth_randomization_preserves_original_invalid_pixels(monkeypatch) -> N
         ),
     ),
 )
-def test_depth_noise_is_sampled_only_for_new_buffered_frames(
+def test_depth_randomization_runs_only_for_new_buffered_frames(
     monkeypatch,
     term_factory,
     term_kwargs,
@@ -760,6 +854,7 @@ def test_depth_noise_is_sampled_only_for_new_buffered_frames(
     )
     term = term_factory(cfg=None, env=env)
     noise_calls = 0
+    blur_calls = 0
 
     def get_depth(env, sensor_name):
         del sensor_name
@@ -770,8 +865,16 @@ def test_depth_noise_is_sampled_only_for_new_buffered_frames(
         noise_calls += 1
         return torch.full_like(depth, float(noise_calls))
 
+    def deterministic_blur(depth, *, kernel_size, sigma):
+        nonlocal blur_calls
+        blur_calls += 1
+        assert kernel_size == [5, 5]
+        assert sigma == [1.0, 1.0]
+        return depth
+
     monkeypatch.setattr(observation_mdp, "_camera_depth_image_meters", get_depth)
     monkeypatch.setattr(torch, "randn_like", deterministic_noise)
+    monkeypatch.setattr(observation_mdp, "gaussian_blur", deterministic_blur)
     randomization = {
         "depth_min_m": 0.0,
         "depth_max_m": 10.0,
@@ -779,8 +882,11 @@ def test_depth_noise_is_sampled_only_for_new_buffered_frames(
         "calibration_scale_range": (1.0, 1.0),
         "calibration_bias_range_m": (0.0, 0.0),
         "enable_depth_distance_noise": True,
+        "enable_depth_gaussian_blur": True,
         "noise_base_m": 0.1,
         "noise_quadratic_coeff": 0.0,
+        "gaussian_blur_kernel_size": (5, 5),
+        "gaussian_blur_sigma": 1.0,
         "dropout_probability": 0.0,
     }
 
@@ -789,10 +895,12 @@ def test_depth_noise_is_sampled_only_for_new_buffered_frames(
     repeated = term(env, **term_kwargs, **randomization).clone()
     torch.testing.assert_close(repeated, first)
     assert noise_calls == 1
+    assert blur_calls == 1
 
     env.common_step_counter = capture_step
     captured = term(env, **term_kwargs, **randomization)
     assert noise_calls == 2
+    assert blur_calls == 2
     assert not torch.equal(captured, first)
 
 
@@ -807,6 +915,9 @@ def test_depth_noise_is_sampled_only_for_new_buffered_frames(
         ("noise_quadratic_coeff", -0.1, "noise_quadratic_coeff"),
         ("noise_quadratic_coeff", math.nan, "noise_quadratic_coeff"),
         ("noise_quadratic_coeff", math.inf, "noise_quadratic_coeff"),
+        ("gaussian_blur_kernel_size", (4, 5), "gaussian_blur_kernel_size"),
+        ("gaussian_blur_sigma", 0.0, "gaussian_blur_sigma"),
+        ("gaussian_blur_sigma", math.nan, "gaussian_blur_sigma"),
         ("dropout_probability", 1.1, "dropout_probability"),
         ("dropout_patch_count_range", (0, 3), "dropout_patch_count_range"),
         ("dropout_area_fraction_range", (0.1, 1.1), "dropout_area_fraction_range"),
