@@ -19,7 +19,7 @@ from rsl_rl.utils import unpad_trajectories
 
 
 class DepthPreprocessor(nn.Module):
-    """Convert finite metric depth into normalized camera-range values."""
+    """Map invalid depth to the far plane and clip metric camera values."""
 
     def __init__(self, depth_min_m: float = 0.2, depth_max_m: float = 2.0) -> None:
         """Initialize the metric clipping range."""
@@ -34,16 +34,13 @@ class DepthPreprocessor(nn.Module):
         self.depth_max_m = depth_max_m
 
     def forward(self, depth_m: torch.Tensor) -> torch.Tensor:
-        """Treat depths below the near limit as empty, clip, and normalize."""
+        """Treat depths below the near limit as empty and clip in meters."""
         depth_m = torch.where(
             depth_m >= self.depth_min_m,
             depth_m,
             torch.full_like(depth_m, self.depth_max_m),
         )
-        depth_m = torch.clamp(depth_m, self.depth_min_m, self.depth_max_m)
-        return (depth_m - self.depth_min_m) / (
-            self.depth_max_m - self.depth_min_m
-        )
+        return torch.clamp(depth_m, self.depth_min_m, self.depth_max_m)
 
 
 class DepthRepresentationVelocityActorCritic(RepresentationVelocityActorCritic):
@@ -617,7 +614,7 @@ class _OnnxDepthRepresentationVelocityActorCritic(_TorchDepthRepresentationVeloc
         current_proprio = self.current_proprio_obs_normalizer(proprio_history[:, -1, :])
         hidden_state_out = self.depth_gru(
             torch.cat(
-                (self.depth_encoder(self.depth_preprocessor(depth)), current_proprio),
+                (self.depth_encoder(depth), current_proprio),
                 dim=-1,
             ),
             hidden_state_in,

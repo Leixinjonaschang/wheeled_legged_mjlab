@@ -16,6 +16,7 @@ import torch
 from tensordict import TensorDict
 
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, list_tasks
+from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
 import wheeled_legged_mjlab  # noqa: F401
 from rsl_rl.models import (
@@ -23,7 +24,11 @@ from rsl_rl.models import (
     RepresentationActorCritic,
     RepresentationVelocityActorCritic,
 )
-from wheeled_legged_mjlab.rl.runner import get_wheeled_legged_metadata
+from wheeled_legged_mjlab.rl import runner as runner_module
+from wheeled_legged_mjlab.rl.runner import (
+    WheeledLeggedVelocityOnPolicyRunner,
+    get_wheeled_legged_metadata,
+)
 from wheeled_legged_mjlab.tasks.velocity import mdp
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     DEPTH_BUFFER_SIZE,
@@ -1208,6 +1213,8 @@ def _make_depth_velocity_representation_policy() -> DepthRepresentationVelocityA
         depth_feature_dim=8,
         depth_gru_hidden_dim=8,
         depth_channels=(4, 4),
+        depth_min_m=DEPTH_MIN_M,
+        depth_max_m=DEPTH_MAX_M,
         distribution_cfg={"class_name": "GaussianDistribution"},
     )
 
@@ -1261,10 +1268,48 @@ def test_depth_velocity_representation_metadata_matches_onnx_io() -> None:
     assert metadata["depth_input_dtype"] == "float32"
     assert metadata["depth_input_unit"] == "m"
     assert metadata["depth_input_shape"] == [1, 1, 32, 24]
-    assert metadata["depth_invalid_value"] == 0.0
+    assert metadata["depth_input_range"] == [DEPTH_MIN_M, DEPTH_MAX_M]
+    assert metadata["depth_invalid_value"] == DEPTH_MAX_M
     assert metadata["depth_min_m"] == DEPTH_MIN_M
     assert metadata["depth_max_m"] == DEPTH_MAX_M
-    assert metadata["depth_preprocessing"] == "below_min_to_max,clamp,normalize"
+    assert metadata["depth_preprocessing"] == "external:below_min_to_max,clamp"
+
+
+def test_manual_onnx_export_attaches_wheeled_legged_metadata(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = object.__new__(WheeledLeggedVelocityOnPolicyRunner)
+    env = object()
+    policy = object()
+    runner.env = SimpleNamespace(unwrapped=env)
+    runner.alg = SimpleNamespace(get_policy=lambda: policy)
+    runner.logger = SimpleNamespace(logger_type="disabled")
+
+    calls = {}
+
+    def export_onnx(self, path, filename="policy.onnx", verbose=False):
+        calls["export"] = (self, path, filename, verbose)
+
+    def get_metadata(export_env, run_path, export_policy):
+        calls["metadata"] = (export_env, run_path, export_policy)
+        return {"depth_input_unit": "m"}
+
+    def attach_metadata(path, metadata):
+        calls["attach"] = (path, metadata)
+
+    monkeypatch.setattr(VelocityOnPolicyRunner, "export_policy_to_onnx", export_onnx)
+    monkeypatch.setattr(runner_module, "get_wheeled_legged_metadata", get_metadata)
+    monkeypatch.setattr(runner_module, "attach_metadata_to_onnx", attach_metadata)
+
+    runner.export_policy_to_onnx(str(tmp_path), "policy.onnx", verbose=True)
+
+    assert calls["export"] == (runner, str(tmp_path), "policy.onnx", True)
+    assert calls["metadata"] == (env, "local", policy)
+    assert calls["attach"] == (
+        str(tmp_path / "policy.onnx"),
+        {"depth_input_unit": "m"},
+    )
 
 
 def test_non_representation_metadata_stays_legacy_shape() -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import wandb
 
 from mjlab.envs import ManagerBasedRlEnv
@@ -109,10 +111,14 @@ def get_wheeled_legged_metadata(
                 "depth_input_dtype": "float32",
                 "depth_input_unit": "m",
                 "depth_input_shape": [1, *policy.depth_shape],
-                "depth_invalid_value": 0.0,
+                "depth_input_range": [
+                    policy.depth_preprocessor.depth_min_m,
+                    policy.depth_preprocessor.depth_max_m,
+                ],
+                "depth_invalid_value": policy.depth_preprocessor.depth_max_m,
                 "depth_min_m": policy.depth_preprocessor.depth_min_m,
                 "depth_max_m": policy.depth_preprocessor.depth_max_m,
-                "depth_preprocessing": "below_min_to_max,clamp,normalize",
+                "depth_preprocessing": "external:below_min_to_max,clamp",
             }
         )
     elif isinstance(policy, RepresentationVelocityActorCritic):
@@ -136,18 +142,31 @@ class WheeledLeggedVelocityOnPolicyRunner(VelocityOnPolicyRunner):
 
     env: RslRlVecEnvWrapper
 
+    def export_policy_to_onnx(
+        self,
+        path: str,
+        filename: str = "policy.onnx",
+        verbose: bool = False,
+    ) -> None:
+        """Export ONNX and attach the wheeled-legged input contract."""
+        super().export_policy_to_onnx(path, filename, verbose)
+        run_name = (
+            wandb.run.name
+            if self.logger.logger_type in ("wandb", "WandbLogWriter") and wandb.run
+            else "local"
+        )
+        metadata = get_wheeled_legged_metadata(
+            self.env.unwrapped,
+            run_name,
+            self.alg.get_policy(),
+        )
+        attach_metadata_to_onnx(str(Path(path) / filename), metadata)
+
     def save(self, path: str, infos=None):
         super(VelocityOnPolicyRunner, self).save(path, infos)
         policy_dir, filename, onnx_path = self._get_export_paths(path)
         try:
             self.export_policy_to_onnx(str(policy_dir), filename)
-            run_name = (
-                wandb.run.name
-                if self.logger.logger_type in ("wandb", "WandbLogWriter") and wandb.run
-                else "local"
-            )
-            metadata = get_wheeled_legged_metadata(self.env.unwrapped, run_name, self.alg.get_policy())
-            attach_metadata_to_onnx(str(onnx_path), metadata)
             if (
                 self.logger.logger_type in ("wandb", "WandbLogWriter")
                 and self.cfg["upload_model"]

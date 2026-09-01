@@ -14,6 +14,7 @@ from wheeled_legged_mjlab.assets.WF_TRON1B.wf_tron1b import (
     WF_TRON1B_XML,
 )
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
+    ALIVE_REWARD_DISABLE_AFTER_STEPS,
     BASE_HEIGHT_TARGET,
     FELL_OVER_LIMIT_ANGLE_FINAL,
     FELL_OVER_LIMIT_ANGLE_INITIAL,
@@ -34,6 +35,7 @@ from wheeled_legged_mjlab.tasks.velocity.mdp.curriculums import (
 from wheeled_legged_mjlab.tasks.velocity.mdp import rewards as reward_terms
 from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import (
     base_height_l2,
+    is_alive_before_step,
     variable_posture,
 )
 from wheeled_legged_mjlab.tasks.velocity.mdp.terminations import out_of_terrain_bounds
@@ -58,6 +60,17 @@ class DummyEnv:
         self.common_step_counter = common_step_counter
         self.device = "cpu"
         self.termination_manager = DummyTerminationManager()
+
+
+def alive_reward_env(common_step_counter: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        common_step_counter=common_step_counter,
+        num_envs=2,
+        device="cpu",
+        termination_manager=SimpleNamespace(
+            terminated=torch.tensor([False, True]),
+        ),
+    )
 
 
 def apply_curriculum(env: DummyEnv) -> float:
@@ -105,6 +118,32 @@ def test_training_and_play_configs_use_expected_fell_over_limits() -> None:
             FELL_OVER_LIMIT_ANGLE_FINAL,
         )
         assert play_cfg.curriculum == {}
+
+
+def test_alive_reward_stops_at_configured_step() -> None:
+    assert torch.equal(
+        is_alive_before_step(
+            alive_reward_env(ALIVE_REWARD_DISABLE_AFTER_STEPS - 1),
+            ALIVE_REWARD_DISABLE_AFTER_STEPS,
+        ),
+        torch.tensor([1.0, 0.0]),
+    )
+    assert torch.equal(
+        is_alive_before_step(
+            alive_reward_env(ALIVE_REWARD_DISABLE_AFTER_STEPS),
+            ALIVE_REWARD_DISABLE_AFTER_STEPS,
+        ),
+        torch.zeros(2),
+    )
+
+
+def test_training_configs_use_alive_reward_cutoff() -> None:
+    for cfg_factory in (wf_tron1b_flat_env_cfg, wf_tron1b_rough_env_cfg):
+        alive_cfg = cfg_factory().rewards["alive"]
+        assert alive_cfg.func is is_alive_before_step
+        assert alive_cfg.params == {
+            "disable_after_steps": ALIVE_REWARD_DISABLE_AFTER_STEPS,
+        }
 
 
 EXPECTED_TERRAIN_COLUMNS = (

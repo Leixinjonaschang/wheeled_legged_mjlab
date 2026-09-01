@@ -26,6 +26,16 @@ if TYPE_CHECKING:
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
+def is_alive_before_step(
+  env: ManagerBasedRlEnv,
+  disable_after_steps: int,
+) -> torch.Tensor:
+  """Reward alive environments until the global policy-step cutoff."""
+  if env.common_step_counter >= disable_after_steps:
+    return torch.zeros(env.num_envs, device=env.device)
+  return (~env.termination_manager.terminated).float()
+
+
 class _TerrainRoughnessStats(NamedTuple):
   jump: torch.Tensor
   curvature: torch.Tensor

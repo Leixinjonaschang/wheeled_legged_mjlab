@@ -142,14 +142,14 @@ def make_depth_predictor_model(
     )
 
 
-def test_depth_preprocessor_converts_metric_depth_to_normalized_input() -> None:
+def test_depth_preprocessor_clips_metric_depth_without_normalizing() -> None:
     depth_m = torch.tensor([[[[0.0, -1.0, 0.1, 0.2, 1.1, 2.0, 2.5]]]])
 
     depth = DepthPreprocessor(depth_min_m=0.2, depth_max_m=2.0)(depth_m)
 
     torch.testing.assert_close(
         depth,
-        torch.tensor([[[[1.0, 1.0, 1.0, 0.0, 0.5, 1.0, 1.0]]]]),
+        torch.tensor([[[[2.0, 2.0, 2.0, 0.2, 1.1, 2.0, 2.0]]]]),
     )
 
 
@@ -634,7 +634,7 @@ def test_depth_student_inference_requires_depth_observations() -> None:
         raise AssertionError("student inference without depth should fail")
 
 
-def test_depth_onnx_wrapper_matches_policy_outputs() -> None:
+def test_depth_onnx_wrapper_matches_policy_outputs_with_preprocessed_depth() -> None:
     model = make_depth_model()
     model.eval()
     obs = make_depth_rep_obs()
@@ -648,7 +648,7 @@ def test_depth_onnx_wrapper_matches_policy_outputs() -> None:
         actions, predicted_lin_vel, hidden_state_out = onnx_model(
             obs["proprio_history"],
             obs["actor_command"],
-            obs["depth_camera"],
+            model.depth_preprocessor(obs["depth_camera"]),
             hidden_state,
         )
 
@@ -660,7 +660,7 @@ def test_depth_onnx_wrapper_matches_policy_outputs() -> None:
     assert onnx_model.get_dummy_inputs()[2].shape == (1, *DEPTH_SHAPE)
 
 
-def test_depth_onnx_export_contains_metric_preprocessing(tmp_path: Path) -> None:
+def test_depth_onnx_export_excludes_metric_preprocessing(tmp_path: Path) -> None:
     import onnx
 
     export_model = make_depth_model().as_onnx(verbose=False)
@@ -678,8 +678,7 @@ def test_depth_onnx_export_contains_metric_preprocessing(tmp_path: Path) -> None
 
     graph = onnx.load(export_path).graph
     op_types = {node.op_type for node in graph.node}
-    assert {"GreaterOrEqual", "Where", "Clip", "Sub", "Div"} <= op_types
-    assert {"IsNaN", "IsInf"}.isdisjoint(op_types)
+    assert {"GreaterOrEqual", "Where"}.isdisjoint(op_types)
     depth_input = next(value for value in graph.input if value.name == "depth")
     assert [dim.dim_value for dim in depth_input.type.tensor_type.shape.dim] == [
         1,

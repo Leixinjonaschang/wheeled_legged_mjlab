@@ -85,9 +85,9 @@ WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
 WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
-TERRAIN_SCAN_SIZE = (1.3, 0.7)
+TERRAIN_SCAN_SIZE = (1.0, 0.8)
 TERRAIN_SCAN_RESOLUTION = 0.1
-TERRAIN_SCAN_CENTER = (0.3, 0.0)
+TERRAIN_SCAN_CENTER = (0.1, 0.0)
 TERRAIN_SCAN_GRID_SHAPE = OffsetGridPatternCfg(
     size=TERRAIN_SCAN_SIZE,
     resolution=TERRAIN_SCAN_RESOLUTION,
@@ -100,8 +100,8 @@ DEPTH_CAMERA_WIDTH = 53
 DEPTH_CAMERA_HEIGHT = 30
 DEPTH_LEFT_CROP = 8
 DEPTH_MODEL_WIDTH = DEPTH_CAMERA_WIDTH - DEPTH_LEFT_CROP
-DEPTH_MIN_M = 0.2
-DEPTH_MAX_M = 2.0
+DEPTH_MIN_M = 0.15
+DEPTH_MAX_M = 2.5
 DEPTH_BUFFER_SIZE = 5
 DEPTH_BUFFER_UPDATE_PERIOD = 5
 DEPTH_CAPTURE_FREQUENCY_HZ = 30.0
@@ -120,8 +120,8 @@ DEPTH_DROPOUT_ASPECT_RATIO_RANGE = (0.125, 8.0)
 DEPTH_CAMERA_POSITION_DELTA_RANGE_M = (-0.010, 0.010)
 DEPTH_CAMERA_PITCH_DELTA_RANGE_RAD = (-math.radians(1.0), math.radians(1.0))
 DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG = (-1.0, 1.0)
-ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.0
-ROUGHNESS_GATE_THRESHOLD_FINAL = 0.65
+ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.2
+ROUGHNESS_GATE_THRESHOLD_FINAL = 0.75
 ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 5_000 * 24
 FELL_OVER_LIMIT_ANGLE_INITIAL = math.radians(65.0)
 FELL_OVER_LIMIT_ANGLE_FINAL = math.radians(85.0)
@@ -751,7 +751,11 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
     all_joint_cfg = SceneEntityCfg(ROBOT_ENTITY, joint_names=ALL_JOINT_NAMES)
 
     rewards = {
-        "alive": RewardTermCfg(func=mdp.is_alive, weight=0.1),
+        "alive": RewardTermCfg(
+            func=mdp.is_alive_before_step,
+            weight=0.1,
+            params={"disable_after_steps": 5_000 * 24},
+        ),
         "track_linear_velocity": RewardTermCfg(
             func=mdp.track_linear_velocity,
             weight=4.0,
@@ -879,10 +883,10 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-5.0e-5,
             params={"asset_cfg": all_joint_cfg},
         ),
-        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.2),
+        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
         "self_collisions": RewardTermCfg(
             func=mdp.self_collision_cost,
-            weight=-0.2,
+            weight=-0.1,
             params={"sensor_name": "self_collision"},
         ),
         "illegal_ground_contact": RewardTermCfg(
@@ -892,7 +896,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "soft_landing": RewardTermCfg(
             func=mdp.soft_landing,
-            weight=-3.0e-4,
+            weight=-3.0e-5,
             params={
                 "sensor_name": "wheels_ground_contact",
                 "command_name": COMMAND_NAME,
