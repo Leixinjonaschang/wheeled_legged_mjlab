@@ -10,6 +10,7 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     COMMAND_NAME,
     WORLD_COMMAND_TRACKING_ACTIVATION_STEPS,
     wf_tron1b_flat_env_cfg,
+    wf_tron1b_rough_env_cfg,
 )
 from wheeled_legged_mjlab.tasks.velocity.mdp.commands import (
     UniformVelocityCommand,
@@ -132,6 +133,26 @@ def test_training_and_play_configs_use_current_forward_speed_limits() -> None:
     assert isinstance(play_command_cfg, UniformVelocityCommandCfg)
     assert training_command_cfg.ranges.lin_vel_x == (-1.0, 2.0)
     assert play_command_cfg.ranges.lin_vel_x == (-1.0, 1.0)
+
+
+def test_leg_joint_reset_offsets_stay_inside_all_joint_limits() -> None:
+    for cfg_factory in (wf_tron1b_flat_env_cfg, wf_tron1b_rough_env_cfg):
+        reset_cfg = cfg_factory().events["reset_leg_joints"]
+        assert reset_cfg.params["position_range"] == (-0.3, 0.3)
+
+
+def test_wheel_friction_uses_common_value_with_small_independent_difference() -> None:
+    for cfg_factory in (wf_tron1b_flat_env_cfg, wf_tron1b_rough_env_cfg):
+        events = cfg_factory().events
+        common_cfg = events["wheel_friction"]
+        difference_cfg = events["wheel_friction_difference"]
+
+        assert common_cfg.params["operation"] == "abs"
+        assert common_cfg.params["ranges"] == (0.3, 0.9)
+        assert common_cfg.params["shared_random"] is True
+        assert difference_cfg.params["operation"] == "add"
+        assert difference_cfg.params["ranges"] == (-0.08, 0.08)
+        assert difference_cfg.params["shared_random"] is False
 
 
 def _make_tracking_termination_env(

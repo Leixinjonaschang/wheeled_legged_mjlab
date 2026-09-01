@@ -1221,13 +1221,22 @@ def _normalize_to_unit_range(
 def domain_randomization_delta_quantity(
   env: ManagerBasedRlEnv,
   wheel_friction_event: str = "wheel_friction",
+  wheel_friction_difference_event: str = "wheel_friction_difference",
   encoder_bias_event: str = "encoder_bias",
   base_com_event: str = "base_com",
 ) -> torch.Tensor:
   """Normalized domain-randomization quantities visible to the policy."""
   wheel_friction_cfg = env.event_manager.get_term_cfg(wheel_friction_event)
   friction_asset_cfg: SceneEntityCfg = wheel_friction_cfg.params["asset_cfg"]
-  wheel_friction_range = wheel_friction_cfg.params["ranges"]
+  wheel_friction_common_range = wheel_friction_cfg.params["ranges"]
+  wheel_friction_difference_cfg = env.event_manager.get_term_cfg(
+    wheel_friction_difference_event
+  )
+  wheel_friction_difference_range = wheel_friction_difference_cfg.params["ranges"]
+  wheel_friction_range = (
+    wheel_friction_common_range[0] + wheel_friction_difference_range[0],
+    wheel_friction_common_range[1] + wheel_friction_difference_range[1],
+  )
   friction_asset = env.scene[friction_asset_cfg.name]
   wheel_geom_ids = friction_asset.indexing.geom_ids[friction_asset_cfg.geom_ids]
   wheel_friction = env.sim.model.geom_friction[:, wheel_geom_ids, 0]

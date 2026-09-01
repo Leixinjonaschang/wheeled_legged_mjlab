@@ -635,7 +635,7 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
             func=mdp.reset_joints_by_offset,
             mode="reset",
             params={
-                "position_range": (-0.3, 0.5),
+                "position_range": (-0.3, 0.3),
                 "velocity_range": (-0.2, 0.2),
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
@@ -685,7 +685,20 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                     geom_names=WHEEL_GEOM_NAMES,
                 ),
                 "operation": "abs",
-                "ranges": (0.3, 1.2),
+                "ranges": (0.3, 0.9),
+                "shared_random": True,
+            },
+        ),
+        "wheel_friction_difference": EventTermCfg(
+            func=mdp.dr.geom_friction,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    geom_names=WHEEL_GEOM_NAMES,
+                ),
+                "operation": "add",
+                "ranges": (-0.08, 0.08),
                 "shared_random": False,
             },
         ),
