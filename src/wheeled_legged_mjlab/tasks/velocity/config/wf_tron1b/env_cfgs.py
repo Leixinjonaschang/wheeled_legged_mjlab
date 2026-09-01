@@ -113,8 +113,15 @@ DEPTH_DISTANCE_NOISE_ENABLED = True
 DEPTH_NOISE_BASE_M = 0.001
 DEPTH_NOISE_QUADRATIC_COEFF = 0.005
 DEPTH_GAUSSIAN_BLUR_ENABLED = True
-DEPTH_GAUSSIAN_BLUR_KERNEL_SIZE = (5, 5)
+DEPTH_GAUSSIAN_BLUR_KERNEL_SIZE = (3, 3)
 DEPTH_GAUSSIAN_BLUR_SIGMA = 1.0
+DEPTH_EDGE_NOISE_ENABLED = True
+DEPTH_EDGE_FOCAL_LENGTH_PX = 28.0
+DEPTH_EDGE_BASELINE_M = 0.05
+DEPTH_EDGE_DISPARITY_THRESHOLD_PX = 0.5
+DEPTH_EDGE_BAND_RADIUS_PX = 1
+DEPTH_EDGE_CORRUPTION_PROBABILITY = 0.5
+DEPTH_EDGE_EMPTY_RATIO = 0.5
 DEPTH_DROPOUT_ENABLED = False
 DEPTH_DROPOUT_PROBABILITY = 0.30
 DEPTH_DROPOUT_PATCH_COUNT_RANGE = (1, 3)
@@ -261,6 +268,7 @@ def make_observations(
     async_depth: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
     enable_depth_gaussian_blur: bool = DEPTH_GAUSSIAN_BLUR_ENABLED,
+    enable_depth_edge_noise: bool = DEPTH_EDGE_NOISE_ENABLED,
     enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
@@ -483,11 +491,18 @@ def make_observations(
         "calibration_bias_range_m": DEPTH_CALIBRATION_BIAS_RANGE_M,
         "enable_depth_distance_noise": enable_depth_distance_noise,
         "enable_depth_gaussian_blur": enable_depth_gaussian_blur,
+        "enable_depth_edge_noise": enable_depth_edge_noise,
         "enable_depth_dropout": enable_depth_dropout,
         "noise_base_m": depth_noise_base_m,
         "noise_quadratic_coeff": depth_noise_quadratic_coeff,
         "gaussian_blur_kernel_size": DEPTH_GAUSSIAN_BLUR_KERNEL_SIZE,
         "gaussian_blur_sigma": DEPTH_GAUSSIAN_BLUR_SIGMA,
+        "edge_focal_length_px": DEPTH_EDGE_FOCAL_LENGTH_PX,
+        "edge_baseline_m": DEPTH_EDGE_BASELINE_M,
+        "edge_disparity_threshold_px": DEPTH_EDGE_DISPARITY_THRESHOLD_PX,
+        "edge_band_radius_px": DEPTH_EDGE_BAND_RADIUS_PX,
+        "edge_corruption_probability": DEPTH_EDGE_CORRUPTION_PROBABILITY,
+        "edge_empty_ratio": DEPTH_EDGE_EMPTY_RATIO,
         "dropout_probability": DEPTH_DROPOUT_PROBABILITY,
         "dropout_patch_count_range": DEPTH_DROPOUT_PATCH_COUNT_RANGE,
         "dropout_area_fraction_range": DEPTH_DROPOUT_AREA_FRACTION_RANGE,
@@ -648,7 +663,7 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
         "push_robot": EventTermCfg(
             func=mdp.push_by_setting_velocity,
             mode="interval",
-            interval_range_s=(15.0, 15.5),
+            interval_range_s=(10.0, 15),
             params={
                 "velocity_range": {
                     "x": (-0.5, 0.5),
@@ -1120,6 +1135,7 @@ def make_env_cfg(
     async_depth: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
     enable_depth_gaussian_blur: bool = DEPTH_GAUSSIAN_BLUR_ENABLED,
+    enable_depth_edge_noise: bool = DEPTH_EDGE_NOISE_ENABLED,
     enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
@@ -1133,6 +1149,7 @@ def make_env_cfg(
             async_depth=async_depth,
             enable_depth_distance_noise=enable_depth_distance_noise,
             enable_depth_gaussian_blur=enable_depth_gaussian_blur,
+            enable_depth_edge_noise=enable_depth_edge_noise,
             enable_depth_dropout=enable_depth_dropout,
             depth_noise_base_m=depth_noise_base_m,
             depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,
@@ -1172,6 +1189,7 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
         depth_term.params["enable_depth_randomization"] = False
         depth_term.params["enable_depth_distance_noise"] = False
         depth_term.params["enable_depth_gaussian_blur"] = False
+        depth_term.params["enable_depth_edge_noise"] = False
         depth_term.params["enable_depth_dropout"] = False
         if "system_delay_range_s" in depth_term.params:
             depth_term.params["system_delay_range_s"] = (0.0, 0.0)
@@ -1218,6 +1236,7 @@ def wf_tron1b_rough_depth_env_cfg(
     play: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
     enable_depth_gaussian_blur: bool = DEPTH_GAUSSIAN_BLUR_ENABLED,
+    enable_depth_edge_noise: bool = DEPTH_EDGE_NOISE_ENABLED,
     enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
@@ -1229,6 +1248,7 @@ def wf_tron1b_rough_depth_env_cfg(
         depth=True,
         enable_depth_distance_noise=enable_depth_distance_noise,
         enable_depth_gaussian_blur=enable_depth_gaussian_blur,
+        enable_depth_edge_noise=enable_depth_edge_noise,
         enable_depth_dropout=enable_depth_dropout,
         depth_noise_base_m=depth_noise_base_m,
         depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,
@@ -1249,6 +1269,7 @@ def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(
     play: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
     enable_depth_gaussian_blur: bool = DEPTH_GAUSSIAN_BLUR_ENABLED,
+    enable_depth_edge_noise: bool = DEPTH_EDGE_NOISE_ENABLED,
     enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
@@ -1262,6 +1283,7 @@ def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(
         async_depth=True,
         enable_depth_distance_noise=enable_depth_distance_noise,
         enable_depth_gaussian_blur=enable_depth_gaussian_blur,
+        enable_depth_edge_noise=enable_depth_edge_noise,
         enable_depth_dropout=enable_depth_dropout,
         depth_noise_base_m=depth_noise_base_m,
         depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,

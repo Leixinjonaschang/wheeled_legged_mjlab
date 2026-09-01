@@ -155,11 +155,18 @@ class _DepthFrameProcessor:
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
     enable_depth_gaussian_blur: bool = False,
+    enable_depth_edge_noise: bool = False,
     enable_depth_dropout: bool = False,
     noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
-    gaussian_blur_kernel_size: tuple[int, int] = (5, 5),
+    gaussian_blur_kernel_size: tuple[int, int] = (3, 3),
     gaussian_blur_sigma: float = 1.0,
+    edge_focal_length_px: float = 28.0,
+    edge_baseline_m: float = 0.05,
+    edge_disparity_threshold_px: float = 0.5,
+    edge_band_radius_px: int = 1,
+    edge_corruption_probability: float = 0.5,
+    edge_empty_ratio: float = 0.5,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -173,6 +180,12 @@ class _DepthFrameProcessor:
       noise_quadratic_coeff=noise_quadratic_coeff,
       gaussian_blur_kernel_size=gaussian_blur_kernel_size,
       gaussian_blur_sigma=gaussian_blur_sigma,
+      edge_focal_length_px=edge_focal_length_px,
+      edge_baseline_m=edge_baseline_m,
+      edge_disparity_threshold_px=edge_disparity_threshold_px,
+      edge_band_radius_px=edge_band_radius_px,
+      edge_corruption_probability=edge_corruption_probability,
+      edge_empty_ratio=edge_empty_ratio,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,
@@ -207,6 +220,8 @@ class _DepthFrameProcessor:
         original_invalid = original_invalid.index_select(0, env_ids)
         scale = self._calibration_scale.index_select(0, env_ids)
         bias_m = self._calibration_bias_m.index_select(0, env_ids)
+      edge_reference_depth_m = depth_m
+      edge_reference_invalid = original_invalid
       depth_m = depth_m * scale + bias_m
       if enable_depth_distance_noise:
         depth_for_sigma = torch.nan_to_num(
@@ -234,6 +249,20 @@ class _DepthFrameProcessor:
           kernel_size=list(gaussian_blur_kernel_size),
           sigma=[gaussian_blur_sigma, gaussian_blur_sigma],
         ).squeeze(1)
+      if enable_depth_edge_noise:
+        depth_m = self._apply_depth_edge_noise(
+          depth_m,
+          reference_depth_m=edge_reference_depth_m,
+          reference_invalid=edge_reference_invalid,
+          depth_min_m=depth_min_m,
+          depth_max_m=depth_max_m,
+          focal_length_px=edge_focal_length_px,
+          baseline_m=edge_baseline_m,
+          disparity_threshold_px=edge_disparity_threshold_px,
+          band_radius_px=edge_band_radius_px,
+          corruption_probability=edge_corruption_probability,
+          empty_ratio=edge_empty_ratio,
+        )
       if enable_depth_dropout and dropout_probability > 0.0:
         dropout_mask = self._structured_dropout_mask(
           batch_size=depth_m.shape[0],
@@ -252,6 +281,117 @@ class _DepthFrameProcessor:
 
     depth_m = depth_m.masked_fill(original_invalid, 0.0)
     return _encode_invalid_depth(depth_m)
+
+  @staticmethod
+  def _apply_depth_edge_noise(
+    depth_m: torch.Tensor,
+    *,
+    reference_depth_m: torch.Tensor,
+    reference_invalid: torch.Tensor,
+    depth_min_m: float,
+    depth_max_m: float,
+    focal_length_px: float,
+    baseline_m: float,
+    disparity_threshold_px: float,
+    band_radius_px: int,
+    corruption_probability: float,
+    empty_ratio: float,
+  ) -> torch.Tensor:
+    if corruption_probability <= 0.0:
+      return depth_m
+
+    valid = ~reference_invalid
+    safe_min_m = max(depth_min_m, torch.finfo(reference_depth_m.dtype).eps)
+    reference_depth_m = torch.nan_to_num(
+      reference_depth_m,
+      nan=depth_max_m,
+      posinf=depth_max_m,
+      neginf=safe_min_m,
+    ).clamp(min=safe_min_m, max=depth_max_m)
+    disparity = focal_length_px * baseline_m / reference_depth_m
+
+    edge_band = torch.zeros_like(valid)
+    horizontal_edge = (
+      valid[..., :, :-1]
+      & valid[..., :, 1:]
+      & (
+        torch.abs(disparity[..., :, :-1] - disparity[..., :, 1:])
+        > disparity_threshold_px
+      )
+    )
+    edge_band[..., :, :-1] |= horizontal_edge
+    edge_band[..., :, 1:] |= horizontal_edge
+    vertical_edge = (
+      valid[..., :-1, :]
+      & valid[..., 1:, :]
+      & (
+        torch.abs(disparity[..., :-1, :] - disparity[..., 1:, :])
+        > disparity_threshold_px
+      )
+    )
+    edge_band[..., :-1, :] |= vertical_edge
+    edge_band[..., 1:, :] |= vertical_edge
+
+    for _ in range(band_radius_px - 1):
+      previous_band = edge_band
+      expanded_band = previous_band.clone()
+      expanded_band[..., 1:, :] |= previous_band[..., :-1, :]
+      expanded_band[..., :-1, :] |= previous_band[..., 1:, :]
+      expanded_band[..., :, 1:] |= previous_band[..., :, :-1]
+      expanded_band[..., :, :-1] |= previous_band[..., :, 1:]
+      edge_band = expanded_band
+
+    corrupt_mask = edge_band & (
+      torch.rand_like(depth_m) < corruption_probability
+    )
+    empty_mask = corrupt_mask & (torch.rand_like(depth_m) < empty_ratio)
+    replace_mask = corrupt_mask & ~empty_mask
+
+    replacement = depth_m
+    best_score = torch.full_like(depth_m, -1.0)
+    height, width = depth_m.shape[-2:]
+    for distance in range(1, band_radius_px + 1):
+      for row_offset, col_offset in (
+        (-distance, 0),
+        (distance, 0),
+        (0, -distance),
+        (0, distance),
+      ):
+        shifts = (-row_offset, -col_offset)
+        candidate_disparity = torch.roll(
+          disparity,
+          shifts=shifts,
+          dims=(-2, -1),
+        )
+        candidate_valid = torch.roll(valid, shifts=shifts, dims=(-2, -1))
+        candidate_depth = torch.roll(depth_m, shifts=shifts, dims=(-2, -1))
+        in_bounds = torch.ones_like(valid)
+        if row_offset < 0:
+          in_bounds[..., : -row_offset, :] = False
+        elif row_offset > 0:
+          in_bounds[..., height - row_offset :, :] = False
+        if col_offset < 0:
+          in_bounds[..., :, : -col_offset] = False
+        elif col_offset > 0:
+          in_bounds[..., :, width - col_offset :] = False
+
+        is_cross_edge_neighbor = (
+          replace_mask
+          & valid
+          & candidate_valid
+          & in_bounds
+          & (
+            torch.abs(disparity - candidate_disparity)
+            > disparity_threshold_px
+          )
+        )
+        score = torch.rand_like(depth_m)
+        take_candidate = is_cross_edge_neighbor & (score > best_score)
+        replacement = torch.where(take_candidate, candidate_depth, replacement)
+        best_score = torch.where(take_candidate, score, best_score)
+
+    depth_m = torch.where(empty_mask, torch.zeros_like(depth_m), depth_m)
+    return torch.where(replace_mask & (best_score >= 0.0), replacement, depth_m)
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     if not self._randomization_enabled or self._calibration_scale is None:
@@ -441,6 +581,12 @@ class _DepthFrameProcessor:
     noise_quadratic_coeff: float,
     gaussian_blur_kernel_size: tuple[int, int],
     gaussian_blur_sigma: float,
+    edge_focal_length_px: float,
+    edge_baseline_m: float,
+    edge_disparity_threshold_px: float,
+    edge_band_radius_px: int,
+    edge_corruption_probability: float,
+    edge_empty_ratio: float,
     dropout_probability: float,
     dropout_patch_count_range: tuple[int, int],
     dropout_area_fraction_range: tuple[float, float],
@@ -476,6 +622,36 @@ class _DepthFrameProcessor:
       raise ValueError(
         "gaussian_blur_sigma must be finite and positive, "
         f"got {gaussian_blur_sigma}"
+      )
+    if not math.isfinite(edge_focal_length_px) or edge_focal_length_px <= 0.0:
+      raise ValueError(
+        "edge_focal_length_px must be finite and positive, "
+        f"got {edge_focal_length_px}"
+      )
+    if not math.isfinite(edge_baseline_m) or edge_baseline_m <= 0.0:
+      raise ValueError(
+        f"edge_baseline_m must be finite and positive, got {edge_baseline_m}"
+      )
+    if (
+      not math.isfinite(edge_disparity_threshold_px)
+      or edge_disparity_threshold_px <= 0.0
+    ):
+      raise ValueError(
+        "edge_disparity_threshold_px must be finite and positive, "
+        f"got {edge_disparity_threshold_px}"
+      )
+    if edge_band_radius_px not in (1, 2):
+      raise ValueError(
+        f"edge_band_radius_px must be 1 or 2, got {edge_band_radius_px}"
+      )
+    if not 0.0 <= edge_corruption_probability <= 1.0:
+      raise ValueError(
+        "edge_corruption_probability must be in [0, 1], "
+        f"got {edge_corruption_probability}"
+      )
+    if not 0.0 <= edge_empty_ratio <= 1.0:
+      raise ValueError(
+        f"edge_empty_ratio must be in [0, 1], got {edge_empty_ratio}"
       )
     if not 0.0 <= dropout_probability <= 1.0:
       raise ValueError(
@@ -523,11 +699,18 @@ class DepthBuffer:
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
     enable_depth_gaussian_blur: bool = False,
+    enable_depth_edge_noise: bool = False,
     enable_depth_dropout: bool = False,
     noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
-    gaussian_blur_kernel_size: tuple[int, int] = (5, 5),
+    gaussian_blur_kernel_size: tuple[int, int] = (3, 3),
     gaussian_blur_sigma: float = 1.0,
+    edge_focal_length_px: float = 28.0,
+    edge_baseline_m: float = 0.05,
+    edge_disparity_threshold_px: float = 0.5,
+    edge_band_radius_px: int = 1,
+    edge_corruption_probability: float = 0.5,
+    edge_empty_ratio: float = 0.5,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -568,11 +751,18 @@ class DepthBuffer:
       calibration_bias_range_m=calibration_bias_range_m,
       enable_depth_distance_noise=enable_depth_distance_noise,
       enable_depth_gaussian_blur=enable_depth_gaussian_blur,
+      enable_depth_edge_noise=enable_depth_edge_noise,
       enable_depth_dropout=enable_depth_dropout,
       noise_base_m=noise_base_m,
       noise_quadratic_coeff=noise_quadratic_coeff,
       gaussian_blur_kernel_size=gaussian_blur_kernel_size,
       gaussian_blur_sigma=gaussian_blur_sigma,
+      edge_focal_length_px=edge_focal_length_px,
+      edge_baseline_m=edge_baseline_m,
+      edge_disparity_threshold_px=edge_disparity_threshold_px,
+      edge_band_radius_px=edge_band_radius_px,
+      edge_corruption_probability=edge_corruption_probability,
+      edge_empty_ratio=edge_empty_ratio,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,
@@ -658,11 +848,18 @@ class AsyncDepthBuffer:
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
     enable_depth_gaussian_blur: bool = False,
+    enable_depth_edge_noise: bool = False,
     enable_depth_dropout: bool = False,
     noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
-    gaussian_blur_kernel_size: tuple[int, int] = (5, 5),
+    gaussian_blur_kernel_size: tuple[int, int] = (3, 3),
     gaussian_blur_sigma: float = 1.0,
+    edge_focal_length_px: float = 28.0,
+    edge_baseline_m: float = 0.05,
+    edge_disparity_threshold_px: float = 0.5,
+    edge_band_radius_px: int = 1,
+    edge_corruption_probability: float = 0.5,
+    edge_empty_ratio: float = 0.5,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -726,11 +923,18 @@ class AsyncDepthBuffer:
       calibration_bias_range_m=calibration_bias_range_m,
       enable_depth_distance_noise=enable_depth_distance_noise,
       enable_depth_gaussian_blur=enable_depth_gaussian_blur,
+      enable_depth_edge_noise=enable_depth_edge_noise,
       enable_depth_dropout=enable_depth_dropout,
       noise_base_m=noise_base_m,
       noise_quadratic_coeff=noise_quadratic_coeff,
       gaussian_blur_kernel_size=gaussian_blur_kernel_size,
       gaussian_blur_sigma=gaussian_blur_sigma,
+      edge_focal_length_px=edge_focal_length_px,
+      edge_baseline_m=edge_baseline_m,
+      edge_disparity_threshold_px=edge_disparity_threshold_px,
+      edge_band_radius_px=edge_band_radius_px,
+      edge_corruption_probability=edge_corruption_probability,
+      edge_empty_ratio=edge_empty_ratio,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,
