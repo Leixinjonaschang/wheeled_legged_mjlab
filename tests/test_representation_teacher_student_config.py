@@ -1591,7 +1591,8 @@ def test_manual_onnx_export_attaches_wheeled_legged_metadata(
     policy = object()
     runner.env = SimpleNamespace(unwrapped=env)
     runner.alg = SimpleNamespace(get_policy=lambda: policy)
-    runner.logger = SimpleNamespace(logger_type="disabled")
+    # Play-mode runners have no log_dir, so Logger never creates logger_type.
+    runner.logger = SimpleNamespace()
 
     calls = {}
 

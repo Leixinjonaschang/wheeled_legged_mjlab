@@ -150,9 +150,10 @@ class WheeledLeggedVelocityOnPolicyRunner(VelocityOnPolicyRunner):
     ) -> None:
         """Export ONNX and attach the wheeled-legged input contract."""
         super().export_policy_to_onnx(path, filename, verbose)
+        logger_type = getattr(self.logger, "logger_type", None)
         run_name = (
             wandb.run.name
-            if self.logger.logger_type in ("wandb", "WandbLogWriter") and wandb.run
+            if logger_type in ("wandb", "WandbLogWriter") and wandb.run
             else "local"
         )
         metadata = get_wheeled_legged_metadata(
@@ -168,7 +169,7 @@ class WheeledLeggedVelocityOnPolicyRunner(VelocityOnPolicyRunner):
         try:
             self.export_policy_to_onnx(str(policy_dir), filename)
             if (
-                self.logger.logger_type in ("wandb", "WandbLogWriter")
+                getattr(self.logger, "logger_type", None) in ("wandb", "WandbLogWriter")
                 and self.cfg["upload_model"]
             ):
                 wandb.save(str(onnx_path), base_path=str(policy_dir))
