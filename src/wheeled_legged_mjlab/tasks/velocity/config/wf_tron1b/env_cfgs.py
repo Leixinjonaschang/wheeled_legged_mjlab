@@ -789,7 +789,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         "alive": RewardTermCfg(
             func=mdp.is_alive_before_step,
             weight=0.1,
-            params={"disable_after_steps": 5_000 * 24},
+            params={"disable_after_steps": 5_0000 * 24},
         ),
         "track_linear_velocity": RewardTermCfg(
             func=mdp.track_linear_velocity,
@@ -888,7 +888,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "wheel_joint_vel": RewardTermCfg(
             func=mdp.joint_vel_l2,
-            weight=-0.0005,
+            weight=-0.0002,
             params={"asset_cfg": wheel_joint_cfg},
         ),
         "joint_acc": RewardTermCfg(
@@ -969,7 +969,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         weight=0.5,
         params={
             **roughness_params,
-            "std": 0.1,
+            "std": 0.05,
             "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
             "feet_cfg": wheel_body_cfg,
         },
