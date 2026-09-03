@@ -80,7 +80,7 @@ POSE_TARGET_JOINT_POS = {
     "hip_R_Joint": -0.2,
     "knee_R_Joint": -0.48,
 }
-WHEEL_DISTANCE_RANGE = (0.25, 0.55)
+WHEEL_DISTANCE_RANGE = (0.3, 0.45)
 WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
@@ -801,6 +801,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=1.0,
             params={"command_name": COMMAND_NAME, "std": math.sqrt(0.25)},
         ),
+        "lin_vel_z_l2": RewardTermCfg(func=mdp.lin_vel_z_l2, weight=-0.3),
         "base_ang_vel_xy": RewardTermCfg(
             func=mdp.base_ang_vel_xy_l2,
             weight=-0.15,
@@ -819,18 +820,9 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 "command_norm_threshold": 0.05,
             },
         ),
-        "upright": RewardTermCfg(
-            func=mdp.upright,
-            weight=1.0,
-            params={
-                "std": math.sqrt(0.2),
-                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY, body_names=(BASE_BODY,)),
-                "terrain_sensor_names": ("terrain_scan",) if rough else None,
-            },
-        ),
         "flat_orientation": RewardTermCfg(
             func=mdp.flat_orientation_l2,
-            weight=-3.0,
+            weight=-10.0,
             params={"asset_cfg": SceneEntityCfg(ROBOT_ENTITY)},
         ),
         "base_height": RewardTermCfg(
@@ -879,15 +871,6 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
             },
         ),
-        "wheel_distance": RewardTermCfg(
-            func=mdp.wheel_distance,
-            weight=-5.0,
-            params={
-                "asset_cfg": wheel_body_cfg,
-                "min_distance": WHEEL_DISTANCE_RANGE[0],
-                "max_distance": WHEEL_DISTANCE_RANGE[1],
-            },
-        ),
         "leg_joint_pos_limits": RewardTermCfg(
             func=mdp.joint_pos_limits,
             weight=-5.0,
@@ -919,6 +902,10 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             params={"asset_cfg": all_joint_cfg},
         ),
         "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
+        "action_smoothness": RewardTermCfg(
+            func=mdp.ActionSmoothnessPenalty,
+            weight=-0.01,
+        ),
         "self_collisions": RewardTermCfg(
             func=mdp.self_collision_cost,
             weight=-0.1,
@@ -949,6 +936,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
     }
 
+    roughness_params = {}
     if rough:
         roughness_params = {
             "roughness_sensor_name": "terrain_scan",
@@ -962,6 +950,32 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             ),
             "grid_shape": TERRAIN_SCAN_GRID_SHAPE,
         }
+
+    rewards["non_rough_wheel_distance"] = RewardTermCfg(
+        func=mdp.non_rough_wheel_distance,
+        weight=0.4,
+        params={
+            **roughness_params,
+            "asset_cfg": wheel_body_cfg,
+            "min_dist": WHEEL_DISTANCE_RANGE[0],
+            "max_dist": WHEEL_DISTANCE_RANGE[1],
+            "desired_dist": 0.35,
+            "std": math.sqrt(0.01),
+            "command_name": COMMAND_NAME,
+        },
+    )
+    rewards["non_rough_base_at_midpoint"] = RewardTermCfg(
+        func=mdp.non_rough_base_at_midpoint,
+        weight=0.5,
+        params={
+            **roughness_params,
+            "std": 0.05,
+            "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+            "feet_cfg": wheel_body_cfg,
+        },
+    )
+
+    if rough:
         rewards.update(
             {   # legged motion
                 "rough_wheel_usage": RewardTermCfg(
