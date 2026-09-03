@@ -333,20 +333,20 @@ def stand_still(
   ang_threshold: float = 0.05,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Penalize drifting when the sampled velocity command is near zero."""
+  """Penalize linear and angular motion when their commands are near zero."""
   asset: Entity = env.scene[asset_cfg.name]
   command = env.command_manager.get_command(command_name)
   assert command is not None, f"Command '{command_name}' not found."
 
-  lin_command_norm = torch.norm(command[:, :2], dim=1)
-  ang_command_norm = torch.abs(command[:, 2])
-  still_command = (lin_command_norm < lin_threshold) & (
-    ang_command_norm < ang_threshold
+  lin_drift = torch.sum(
+    torch.abs(asset.data.root_link_lin_vel_w[:, :2])
+    * (torch.norm(command[:, :2], dim=1, keepdim=True) < lin_threshold),
+    dim=1,
   )
-
-  lin_drift = torch.sum(torch.abs(asset.data.root_link_lin_vel_w[:, :2]), dim=1)
-  yaw_drift = torch.abs(asset.data.root_link_ang_vel_w[:, 2])
-  return (lin_drift + yaw_drift) * still_command.float()
+  yaw_drift = torch.abs(asset.data.root_link_ang_vel_w[:, 2]) * (
+    torch.abs(command[:, 2]) < ang_threshold
+  )
+  return lin_drift + yaw_drift
 
 
 class upright:

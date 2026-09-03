@@ -865,7 +865,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "stand_still": RewardTermCfg(
             func=mdp.stand_still,
-            weight=-2.0,
+            weight=-3.0,
             params={
                 "command_name": COMMAND_NAME,
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
@@ -969,7 +969,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         weight=0.5,
         params={
             **roughness_params,
-            "std": 0.05,
+            "std": 0.1,
             "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
             "feet_cfg": wheel_body_cfg,
         },
@@ -1028,16 +1028,6 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_body_cfg,
-                    },
-                ),
-                "non_rough_flat_orientation": RewardTermCfg(
-                    func=mdp.non_rough_flat_orientation,
-                    weight=-10.0,
-                    params={
-                        **roughness_params,
-                        "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
-                        "roll_weight": 2.0,
-                        "pitch_weight": 1.0,
                     },
                 ),
                 "standing_forward_wheel_air_time": RewardTermCfg(
