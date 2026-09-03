@@ -768,15 +768,16 @@ def wheel_distance(
     distance_y > max_dist, distance_y - max_dist, torch.zeros_like(distance_y)
   )
 
-  range_reward = torch.exp(-(d_min + d_max) / std**2)
-  desired_reward = torch.exp(-torch.square((distance_y - desired_dist) / std**2))
+  range_error = d_min + d_max
+  range_reward = torch.exp(-torch.square(range_error) / std**2)
+  desired_reward = torch.exp(-torch.square(distance_y - desired_dist) / std**2)
 
   command = env.command_manager.get_command(command_name)
   assert command is not None, f"Command '{command_name}' not found."
   normalized_vy = torch.clamp(torch.abs(command[:, 1]) / vy_max, 0.0, 1.0)
   desired_weight = (1.0 - normalized_vy) ** decay_power
 
-  return (range_reward + desired_weight * desired_reward) / 2
+  return (range_reward + desired_weight * desired_reward) / (1.0 + desired_weight)
 
 
 def non_rough_wheel_distance(
