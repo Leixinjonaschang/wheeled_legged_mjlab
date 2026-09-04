@@ -73,10 +73,10 @@ NON_WHEEL_COLLISION_GEOMS = (
 
 BASE_HEIGHT_TARGET = 0.82
 POSE_TARGET_JOINT_POS = {
-    "abad_L_Joint": 0.0,
+    "abad_L_Joint": 0.1,
     "hip_L_Joint": 0.2,
     "knee_L_Joint": 0.48,
-    "abad_R_Joint": 0.0,
+    "abad_R_Joint": -0.1,
     "hip_R_Joint": -0.2,
     "knee_R_Joint": -0.48,
 }
@@ -786,6 +786,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
     all_joint_cfg = SceneEntityCfg(ROBOT_ENTITY, joint_names=ALL_JOINT_NAMES)
 
     rewards = {
+        # Task tracking.
         "alive": RewardTermCfg(
             func=mdp.is_alive_before_step,
             weight=0.1,
@@ -801,6 +802,16 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=1.0,
             params={"command_name": COMMAND_NAME, "std": math.sqrt(0.25)},
         ),
+        "track_heading": RewardTermCfg(
+            func=mdp.track_heading,
+            weight=0.5,
+            params={
+                "command_name": COMMAND_NAME,
+                "std": math.sqrt(0.20),
+                "command_norm_threshold": 0.05,
+            },
+        ),
+        # Base stabilization.
         "lin_vel_z_l2": RewardTermCfg(func=mdp.lin_vel_z_l2, weight=-0.3),
         "base_ang_vel_xy": RewardTermCfg(
             func=mdp.base_ang_vel_xy_l2,
@@ -809,15 +820,6 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
                 "roll_weight": 2.0,
                 "pitch_weight": 1.0,
-            },
-        ),
-        "track_heading": RewardTermCfg(
-            func=mdp.track_heading,
-            weight=0.5,
-            params={
-                "command_name": COMMAND_NAME,
-                "std": math.sqrt(0.20),
-                "command_norm_threshold": 0.05,
             },
         ),
         "flat_orientation": RewardTermCfg(
@@ -837,6 +839,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 "terrain_quantile": 0.75,
             },
         ),
+        # Leg posture and zero-command stability.
         "pose": RewardTermCfg(
             func=mdp.variable_posture,
             weight=0.5,
@@ -871,6 +874,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
             },
         ),
+        # Joint and action regularization.
         "leg_joint_pos_limits": RewardTermCfg(
             func=mdp.joint_pos_limits,
             weight=-5.0,
@@ -906,6 +910,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             func=mdp.ActionSmoothnessPenalty,
             weight=-0.01,
         ),
+        # Contact safety and wheel contact quality.
         "self_collisions": RewardTermCfg(
             func=mdp.self_collision_cost,
             weight=-0.1,
@@ -951,6 +956,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             "grid_shape": TERRAIN_SCAN_GRID_SHAPE,
         }
 
+    # Wheel geometry: always active on flat terrain and roughness-gated otherwise.
     rewards["non_rough_wheel_distance"] = RewardTermCfg(
         func=mdp.non_rough_wheel_distance,
         weight=0.4,
@@ -959,7 +965,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             "asset_cfg": wheel_body_cfg,
             "min_dist": WHEEL_DISTANCE_RANGE[0],
             "max_dist": WHEEL_DISTANCE_RANGE[1],
-            "desired_dist": 0.35,
+            "desired_dist": 0.38,
             "std": math.sqrt(0.01),
             "command_name": COMMAND_NAME,
         },
@@ -977,7 +983,8 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
 
     if rough:
         rewards.update(
-            {   # legged motion
+            {
+                # Rough-terrain legged motion.
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
                     weight=-1.5e-2,
@@ -1012,7 +1019,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                         "command_threshold": 0.05,
                     },
                 ),
-                # wheeled motion
+                # Wheeled motion in non-rough regions of the rough environment.
                 "non_rough_wheel_lateral_symmetry": RewardTermCfg(
                     func=mdp.non_rough_wheel_lateral_symmetry,
                     weight=0.5,
@@ -1030,9 +1037,10 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                         "asset_cfg": wheel_body_cfg,
                     },
                 ),
+                # Wheel contact quality when standing or moving forward.
                 "standing_forward_wheel_air_time": RewardTermCfg(
                     func=mdp.standing_forward_wheel_air_time,
-                    weight=-10.0,
+                    weight=-20.0,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
