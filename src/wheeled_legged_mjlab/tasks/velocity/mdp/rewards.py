@@ -1270,6 +1270,118 @@ def rough_contact_pattern(
   return reward
 
 
+def rough_lipm_com_guidance(
+  env: ManagerBasedRlEnv,
+  roughness_sensor_name: str,
+  com_pos_sensor_name: str,
+  com_vel_sensor_name: str,
+  support_contact_sensor_name: str,
+  command_name: str,
+  kp: float = 2.0,
+  max_offset: float = 0.15,
+  sigma_x: float = 0.12,
+  sigma_y: float = 0.12,
+  wheel_radius: float = 0.127,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
+  grid_shape: tuple[int, int] | None = None,
+) -> torch.Tensor:
+  """Guide the whole-body CoM toward a rough-terrain LIPM target."""
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
+  )
+  rough_active = _roughness_gate_active(stats.gate, roughness_gate_threshold)
+
+  command_term = env.command_manager.get_term(command_name)
+  assert isinstance(command_term, UniformVelocityCommand), (
+    "rough_lipm_com_guidance requires UniformVelocityCommand"
+  )
+  command_xy = torch.nan_to_num(command_term.command_w[:, :2])
+
+  com_pos_sensor = env.scene[com_pos_sensor_name]
+  com_vel_sensor = env.scene[com_vel_sensor_name]
+  assert isinstance(com_pos_sensor, BuiltinSensor)
+  assert isinstance(com_vel_sensor, BuiltinSensor)
+  com_pos_w = torch.nan_to_num(com_pos_sensor.data)
+  com_vel_w = torch.nan_to_num(com_vel_sensor.data)
+
+  contact_sensor = env.scene[support_contact_sensor_name]
+  assert isinstance(contact_sensor, ContactSensor)
+  contact_data = contact_sensor.data
+  assert contact_data.found is not None
+  assert contact_data.force is not None
+  assert contact_data.pos is not None
+  in_contact = contact_data.found > 0
+  valid_contact = in_contact.any(dim=1)
+  contact_force_w = torch.nan_to_num(contact_data.force)
+  contact_pos_w = torch.nan_to_num(contact_data.pos)
+
+  contact_mask = in_contact.float()
+  force_norm = torch.linalg.vector_norm(contact_force_w, dim=-1) * contact_mask
+  total_force = force_norm.sum(dim=1, keepdim=True)
+  force_weights = force_norm / total_force.clamp_min(1.0e-6)
+  equal_weights = contact_mask / contact_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+  support_weights = torch.where(
+    total_force > 1.0e-6,
+    force_weights,
+    equal_weights,
+  )
+  support_pos_w = torch.sum(contact_pos_w * support_weights.unsqueeze(-1), dim=1)
+
+  com_height = torch.clamp(com_pos_w[:, 2] - support_pos_w[:, 2], 0.40, 0.90)
+  raw_offset = (
+    (com_height / 9.81).unsqueeze(1)
+    * kp
+    * (command_xy - com_vel_w[:, :2])
+  )
+  raw_offset_norm = torch.linalg.vector_norm(raw_offset, dim=1, keepdim=True)
+  offset_scale = torch.clamp(
+    max_offset / raw_offset_norm.clamp_min(1.0e-6),
+    max=1.0,
+  )
+  desired_offset = raw_offset * offset_scale
+  desired_com_xy = support_pos_w[:, :2] + desired_offset
+  com_error_xy = com_pos_w[:, :2] - desired_com_xy
+  unweighted_reward = torch.exp(
+    -torch.square(com_error_xy[:, 0] / sigma_x)
+    - torch.square(com_error_xy[:, 1] / sigma_y)
+  )
+
+  effective = rough_active * valid_contact.float()
+  effective_count = effective.sum().clamp_min(1.0)
+  rough_count = rough_active.sum().clamp_min(1.0)
+  error_norm = torch.linalg.vector_norm(com_error_xy, dim=1)
+  desired_offset_norm = torch.linalg.vector_norm(desired_offset, dim=1)
+  log_data = env.extras.setdefault("log", {})
+  log_data["Metrics/lipm_com_error_mean"] = (
+    error_norm * effective
+  ).sum() / effective_count
+  log_data["Metrics/lipm_desired_offset_mean"] = (
+    desired_offset_norm * effective
+  ).sum() / effective_count
+  log_data["Metrics/lipm_reward_mean"] = (
+    unweighted_reward * effective
+  ).sum() / effective_count
+  log_data["Metrics/lipm_valid_contact_ratio"] = (
+    valid_contact.float() * rough_active
+  ).sum() / rough_count
+  return unweighted_reward * effective
+
+
 def feet_clearance(
   env: ManagerBasedRlEnv,
   target_height: float,

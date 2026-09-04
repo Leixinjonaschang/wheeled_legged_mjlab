@@ -24,6 +24,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
 from mjlab.sensor import (
+    BuiltinSensorCfg,
     CameraSensorCfg,
     ContactMatch,
     ContactSensorCfg,
@@ -51,6 +52,9 @@ ROBOT_ENTITY = "robot"
 COMMAND_NAME = "twist"
 
 BASE_BODY = "base_Link"
+COM_POS_SENSOR = "robot/whole_body_com_pos"
+COM_VEL_SENSOR = "robot/whole_body_com_vel"
+SUPPORT_CONTACT_SENSOR = "wheel_support_contact"
 LEG_JOINT_NAMES = (
     "abad_[LR]_Joint",
     "hip_[LR]_Joint",
@@ -207,6 +211,32 @@ def make_sensors(*, rough: bool, depth: bool = False) -> tuple:
                 exclude_parent_body=True,
                 include_geom_groups=(0,),
                 debug_vis=True,
+            )
+        )
+        sensors.extend(
+            (
+                BuiltinSensorCfg(
+                    name="whole_body_com_pos",
+                    sensor_type="subtreecom",
+                    obj=ObjRef(type="body", name=BASE_BODY, entity=ROBOT_ENTITY),
+                ),
+                BuiltinSensorCfg(
+                    name="whole_body_com_vel",
+                    sensor_type="subtreelinvel",
+                    obj=ObjRef(type="body", name=BASE_BODY, entity=ROBOT_ENTITY),
+                ),
+                ContactSensorCfg(
+                    name=SUPPORT_CONTACT_SENSOR,
+                    primary=ContactMatch(
+                        mode="geom",
+                        pattern=WHEEL_GEOM_NAMES,
+                        entity=ROBOT_ENTITY,
+                    ),
+                    secondary=ContactMatch(mode="body", pattern="terrain"),
+                    fields=("found", "force", "pos"),
+                    reduce="netforce",
+                    num_slots=1,
+                ),
             )
         )
 
@@ -1017,6 +1047,21 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                         "contact_sensor_name": "wheels_ground_contact",
                         "command_name": COMMAND_NAME,
                         "command_threshold": 0.05,
+                    },
+                ),
+                "rough_lipm_com_guidance": RewardTermCfg(
+                    func=mdp.rough_lipm_com_guidance,
+                    weight=0.5,
+                    params={
+                        **roughness_params,
+                        "com_pos_sensor_name": COM_POS_SENSOR,
+                        "com_vel_sensor_name": COM_VEL_SENSOR,
+                        "support_contact_sensor_name": SUPPORT_CONTACT_SENSOR,
+                        "command_name": COMMAND_NAME,
+                        "kp": 2.0,
+                        "max_offset": 0.15,
+                        "sigma_x": 0.12,
+                        "sigma_y": 0.12,
                     },
                 ),
                 "rough_min_wheel_distance": RewardTermCfg(
