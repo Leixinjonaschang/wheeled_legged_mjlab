@@ -1025,23 +1025,17 @@ def standing_forward_wheel_air_time(
     dim=1,
   )
 
-  command_term = env.command_manager.get_term(command_name)
-  assert command_term is not None, f"Command '{command_name}' not found."
-  if isinstance(command_term, UniformVelocityCommand):
-    standing = command_term.is_standing_env
-    forward = command_term.is_forward_env & ~standing
-  else:
-    command = env.command_manager.get_command(command_name)
-    assert command is not None, f"Command '{command_name}' not found."
-    linear_norm = torch.norm(command[:, :2], dim=1)
-    angular_norm = torch.abs(command[:, 2])
-    standing = (linear_norm < lin_threshold) & (angular_norm < ang_threshold)
-    forward = (
-      (command[:, 0] > forward_speed_threshold)
-      & (torch.abs(command[:, 1]) < forward_lateral_threshold)
-      & (torch.abs(command[:, 2]) < forward_ang_threshold)
-      & ~standing
-    )
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  linear_norm = torch.norm(command[:, :2], dim=1)
+  angular_norm = torch.abs(command[:, 2])
+  standing = (linear_norm < lin_threshold) & (angular_norm < ang_threshold)
+  forward = (
+    (command[:, 0] > forward_speed_threshold)
+    & (torch.abs(command[:, 1]) < forward_lateral_threshold)
+    & (torch.abs(command[:, 2]) < forward_ang_threshold)
+    & ~standing
+  )
 
   standing_cost = air_time * standing.float()
   forward_cost = air_time * forward.float() * non_rough_active
