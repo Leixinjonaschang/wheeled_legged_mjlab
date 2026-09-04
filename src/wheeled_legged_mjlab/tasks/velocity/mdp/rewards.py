@@ -832,6 +832,62 @@ def non_rough_wheel_distance(
   return non_rough_active * reward
 
 
+def rough_min_wheel_distance(
+  env: ManagerBasedRlEnv,
+  min_dist: float,
+  std: float,
+  asset_cfg: SceneEntityCfg,
+  roughness_sensor_name: str,
+  wheel_radius: float = 0.127,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
+  grid_shape: tuple[int, int] | None = None,
+) -> torch.Tensor:
+  """Penalize wheel spacing below a minimum only on rough terrain."""
+  asset: Entity = env.scene[asset_cfg.name]
+  left_idx = asset_cfg.body_ids[0]
+  right_idx = asset_cfg.body_ids[1]
+  heading_aligned = yaw_quat(asset.data.root_link_quat_w)
+  left_pos = quat_apply_inverse(
+    heading_aligned, asset.data.body_link_pos_w[:, left_idx]
+  )
+  right_pos = quat_apply_inverse(
+    heading_aligned, asset.data.body_link_pos_w[:, right_idx]
+  )
+  distance_y = torch.abs(left_pos[:, 1] - right_pos[:, 1])
+  distance_violation = torch.clamp(min_dist - distance_y, min=0.0)
+
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
+  )
+  rough_active = _roughness_gate_active(stats.gate, roughness_gate_threshold)
+  cost = rough_active * torch.square(distance_violation / std)
+
+  rough_count = torch.clamp(rough_active.sum(), min=1.0)
+  log_data = env.extras.setdefault("log", {})
+  log_data["Metrics/rough_wheel_distance_mean"] = (
+    distance_y * rough_active
+  ).sum() / rough_count
+  log_data["Metrics/rough_wheel_distance_violation_mean"] = (
+    distance_violation * rough_active
+  ).sum() / rough_count
+  return cost
+
+
 def non_rough_base_at_midpoint(
   env: ManagerBasedRlEnv,
   std: float,

@@ -1019,6 +1019,16 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                         "command_threshold": 0.05,
                     },
                 ),
+                "rough_min_wheel_distance": RewardTermCfg(
+                    func=mdp.rough_min_wheel_distance,
+                    weight=-0.5,
+                    params={
+                        **roughness_params,
+                        "asset_cfg": wheel_body_cfg,
+                        "min_dist": 0.25,
+                        "std": 0.05,
+                    },
+                ),
                 # Wheeled motion in non-rough regions of the rough environment.
                 "non_rough_wheel_lateral_symmetry": RewardTermCfg(
                     func=mdp.non_rough_wheel_lateral_symmetry,
