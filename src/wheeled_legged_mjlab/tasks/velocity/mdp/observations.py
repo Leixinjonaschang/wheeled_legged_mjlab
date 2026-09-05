@@ -1218,14 +1218,30 @@ def _normalize_to_unit_range(
   return torch.clamp(scaled, -1.0, 1.0)
 
 
+def _normalized_ratio_to_default(
+  current: torch.Tensor,
+  default: torch.Tensor,
+  scale_range: tuple[float, float],
+) -> torch.Tensor:
+  ratio = current / default
+  return _normalize_to_unit_range(ratio, *scale_range)
+
+
 def domain_randomization_delta_quantity(
   env: ManagerBasedRlEnv,
   wheel_friction_event: str = "wheel_friction",
   wheel_friction_difference_event: str = "wheel_friction_difference",
   encoder_bias_event: str = "encoder_bias",
   base_com_event: str = "base_com",
+  mass_inertia_event: str = "body_mass_inertia",
+  pd_gains_event: str = "pd_gains",
 ) -> torch.Tensor:
-  """Normalized domain-randomization quantities visible to the policy."""
+  """Return normalized domain-randomization quantities in a stable order.
+
+  The WF-TRON1B layout is wheel friction (2), encoder bias (8), base COM
+  offset (3), body mass scale (9), principal-inertia scale (27), leg Kp
+  scale (6), and leg Kd plus wheel Kv scale (8), for 63 values in total.
+  """
   wheel_friction_cfg = env.event_manager.get_term_cfg(wheel_friction_event)
   friction_asset_cfg: SceneEntityCfg = wheel_friction_cfg.params["asset_cfg"]
   wheel_friction_common_range = wheel_friction_cfg.params["ranges"]
@@ -1277,4 +1293,61 @@ def domain_randomization_delta_quantity(
     dim=1,
   )
 
-  return torch.cat((wheel_friction, encoder_bias, base_com_delta), dim=1)
+  mass_inertia_cfg = env.event_manager.get_term_cfg(mass_inertia_event)
+  mass_inertia_asset_cfg: SceneEntityCfg = mass_inertia_cfg.params["asset_cfg"]
+  mass_inertia_asset = env.scene[mass_inertia_asset_cfg.name]
+  body_ids = mass_inertia_asset.indexing.body_ids[mass_inertia_asset_cfg.body_ids]
+  alpha_range = mass_inertia_cfg.params["alpha_range"]
+  mass_inertia_scale_range = tuple(math.exp(2.0 * alpha) for alpha in alpha_range)
+
+  body_mass_scale = _normalized_ratio_to_default(
+    env.sim.model.body_mass[:, body_ids],
+    env.sim.get_default_field("body_mass")[body_ids],
+    mass_inertia_scale_range,
+  )
+  body_inertia_scale = _normalized_ratio_to_default(
+    env.sim.model.body_inertia[:, body_ids, :],
+    env.sim.get_default_field("body_inertia")[body_ids, :],
+    mass_inertia_scale_range,
+  ).reshape(env.num_envs, -1)
+
+  pd_gains_cfg = env.event_manager.get_term_cfg(pd_gains_event)
+  pd_asset_cfg: SceneEntityCfg = pd_gains_cfg.params["asset_cfg"]
+  pd_asset = env.scene[pd_asset_cfg.name]
+  stiffness_scale_range = pd_gains_cfg.params["stiffness_scale_range"]
+  damping_scale_range = pd_gains_cfg.params["damping_scale_range"]
+  default_gainprm = env.sim.get_default_field("actuator_gainprm")
+  default_biasprm = env.sim.get_default_field("actuator_biasprm")
+  stiffness_scales = []
+  damping_scales = []
+  for actuator in pd_asset.actuators:
+    ctrl_ids = actuator.global_ctrl_ids
+    if actuator.command_field == "position":
+      stiffness_scales.append(
+        _normalized_ratio_to_default(
+          env.sim.model.actuator_gainprm[:, ctrl_ids, 0],
+          default_gainprm[ctrl_ids, 0],
+          stiffness_scale_range,
+        )
+      )
+    if actuator.command_field in ("position", "velocity"):
+      damping_scales.append(
+        _normalized_ratio_to_default(
+          env.sim.model.actuator_biasprm[:, ctrl_ids, 2],
+          default_biasprm[ctrl_ids, 2],
+          damping_scale_range,
+        )
+      )
+
+  return torch.cat(
+    (
+      wheel_friction,
+      encoder_bias,
+      base_com_delta,
+      body_mass_scale,
+      body_inertia_scale,
+      *stiffness_scales,
+      *damping_scales,
+    ),
+    dim=1,
+  )

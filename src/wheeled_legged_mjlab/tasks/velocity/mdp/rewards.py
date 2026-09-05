@@ -214,11 +214,6 @@ def _terrain_roughness_from_sensor(
   if log:
     log_data = env.extras.setdefault("log", {})
     log_data["Metrics/roughness_mean"] = stats.foot_roughness.mean()
-    if stats.foot_roughness.shape[1] >= 2:
-      log_data["Metrics/roughness_left_mean"] = stats.foot_roughness[:, 0].mean()
-      log_data["Metrics/roughness_right_mean"] = stats.foot_roughness[:, 1].mean()
-    log_data["Metrics/roughness_max_mean"] = stats.robot_roughness.mean()
-    log_data["Metrics/roughness_lambda_mean"] = stats.gate.mean()
     log_data["Metrics/roughness_jump_over_R_mean"] = (
       stats.jump / wheel_radius
     ).mean()
@@ -489,8 +484,6 @@ def angular_momentum_penalty(
   angmom_sensor: BuiltinSensor = env.scene[sensor_name]
   angmom = angmom_sensor.data
   angmom_magnitude_sq = torch.sum(torch.square(angmom), dim=-1)
-  angmom_magnitude = torch.sqrt(angmom_magnitude_sq)
-  env.extras["log"]["Metrics/angular_momentum_mean"] = torch.mean(angmom_magnitude)
   return angmom_magnitude_sq
 
 
@@ -1008,12 +1001,6 @@ def feet_air_time(
   assert current_air_time is not None
   in_range = (current_air_time > threshold_min) & (current_air_time < threshold_max)
   reward = torch.sum(in_range.float(), dim=1)
-  in_air = current_air_time > 0
-  num_in_air = torch.sum(in_air.float())
-  mean_air_time = torch.sum(current_air_time * in_air.float()) / torch.clamp(
-    num_in_air, min=1
-  )
-  env.extras["log"]["Metrics/air_time_mean"] = mean_air_time
   if command_name is not None:
     command = env.command_manager.get_command(command_name)
     if command is not None:
@@ -1160,10 +1147,6 @@ def standing_forward_wheel_air_time(
   forward_cost = air_time * forward.float() * non_rough_active
   cost = standing_cost + forward_cost
 
-  log_data = env.extras.setdefault("log", {})
-  log_data["Metrics/standing_forward_wheel_air_time_mean"] = cost.mean()
-  log_data["Metrics/standing_wheel_air_time_mean"] = standing_cost.mean()
-  log_data["Metrics/non_rough_forward_wheel_air_time_mean"] = forward_cost.mean()
   return cost
 
 
@@ -1327,9 +1310,6 @@ def rough_contact_pattern(
   log_data = env.extras.setdefault("log", {})
   log_data["Metrics/rough_double_contact_mean"] = double_contact.float().mean()
   log_data["Metrics/rough_no_contact_mean"] = no_contact.float().mean()
-  log_data["Metrics/rough_single_contact_mean"] = (
-    (contact_count == 1).float().mean()
-  )
   return reward
 
 
@@ -1404,12 +1384,6 @@ class feet_swing_height:
     active = (total_command > command_threshold).float()
     error = self.peak_heights / target_height - 1.0
     cost = torch.sum(torch.square(error) * first_contact.float(), dim=1) * active
-    num_landings = torch.sum(first_contact.float())
-    peak_heights_at_landing = self.peak_heights * first_contact.float()
-    mean_peak_height = torch.sum(peak_heights_at_landing) / torch.clamp(
-      num_landings, min=1
-    )
-    env.extras["log"]["Metrics/peak_height_mean"] = mean_peak_height
     self.peak_heights = torch.where(
       first_contact,
       torch.zeros_like(self.peak_heights),
@@ -1440,11 +1414,6 @@ def feet_slip(
   vel_xy_norm = torch.norm(foot_vel_xy, dim=-1)  # [B, N]
   vel_xy_norm_sq = torch.square(vel_xy_norm)  # [B, N]
   cost = torch.sum(vel_xy_norm_sq * in_contact, dim=1) * active
-  num_in_contact = torch.sum(in_contact)
-  mean_slip_vel = torch.sum(vel_xy_norm * in_contact) / torch.clamp(
-    num_in_contact, min=1
-  )
-  env.extras["log"]["Metrics/slip_velocity_mean"] = mean_slip_vel
   return cost
 
 

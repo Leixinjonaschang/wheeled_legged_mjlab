@@ -195,14 +195,12 @@ class world_command_tracking_failure:
     )
 
     log_data = env.extras.setdefault("log", {})
-    angle = torch.acos(cos_angle) * (180.0 / math.pi)
     log_data["Metrics/world_command_tracking_progress_deficit_mean"] = (
       progress_deficit.mean()
     )
     log_data["Metrics/world_command_tracking_progress_bad_frac"] = (
       bad_progress.float().mean()
     )
-    log_data["Metrics/world_command_tracking_direction_angle_mean"] = angle.mean()
     log_data["Metrics/world_command_tracking_direction_bad_frac"] = (
       bad_direction.float().mean()
     )
@@ -212,14 +210,6 @@ class world_command_tracking_failure:
     log_data["Metrics/world_command_tracking_heading_bad_frac"] = (
       bad_heading.float().mean()
     )
-    log_data["Metrics/world_command_tracking_airborne_frac"] = (
-      (~grounded).float().mean()
-    )
-    log_data["Metrics/world_command_tracking_active"] = torch.tensor(
-      float(env.common_step_counter >= activation_step),
-      device=env.device,
-    )
-
     return (
       (self._progress_bad_steps >= progress_duration_steps)
       | (self._direction_bad_steps >= direction_duration_steps)

@@ -648,7 +648,7 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
             mode="reset",
             params={
                 "position_range": (0.0, 0.0),
-                "velocity_range": (-0.1, 0.1),
+                "velocity_range": (-0.5, 0.5),
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
                     joint_names=WHEEL_JOINT_NAMES,
@@ -663,11 +663,11 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
         "push_robot": EventTermCfg(
             func=mdp.push_by_setting_velocity,
             mode="interval",
-            interval_range_s=(10.0, 15),
+            interval_range_s=(8, 15),
             params={
                 "velocity_range": {
                     "x": (-0.5, 0.5),
-                    "y": (-0.5, 0.5),
+                    "y": (-0.8, 0.8),
                     "z": (-0.2, 0.2),
                     "roll": (-0.35, 0.35),
                     "pitch": (-0.35, 0.35),
@@ -685,7 +685,7 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                     geom_names=WHEEL_GEOM_NAMES,
                 ),
                 "operation": "abs",
-                "ranges": (0.3, 0.9),
+                "ranges": (0.4, 1.2),
                 "shared_random": True,
             },
         ),
@@ -702,6 +702,16 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                 "shared_random": False,
             },
         ),
+        # Keep the sampled mass and inertia physically consistent. For the
+        # pseudo-inertia global scale alpha, both scale by exp(2 * alpha).
+        "body_mass_inertia": EventTermCfg(
+            func=mdp.dr.pseudo_inertia,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "alpha_range": (0.5 * math.log(0.8), 0.5 * math.log(1.2)),
+            },
+        ),
         "encoder_bias": EventTermCfg(
             func=mdp.dr.encoder_bias,
             mode="startup",
@@ -710,16 +720,25 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                 "bias_range": (-0.015, 0.015),
             },
         ),
+        "pd_gains": EventTermCfg(
+            func=mdp.randomize_pd_gains,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "stiffness_scale_range": (0.8, 1.2),
+                "damping_scale_range": (0.8, 1.2),
+            },
+        ),
         "base_com": EventTermCfg(
             func=mdp.dr.body_com_offset,
             mode="startup",
             params={
-                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY, body_names=(BASE_BODY,)),
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
                 "operation": "add",
                 "ranges": {
-                    0: (-0.025, 0.025),
-                    1: (-0.025, 0.025),
-                    2: (-0.03, 0.03),
+                    0: (-0.05, 0.05),
+                    1: (-0.05, 0.05),
+                    2: (-0.05, 0.05),
                 },
             },
         ),
@@ -912,12 +931,12 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "leg_action_rate": RewardTermCfg(
             func=mdp.action_term_rate_l2,
-            weight=-0.3,
+            weight=-0.03,
             params={"action_term_name": "leg_pos"},
         ),
         "wheel_action_rate": RewardTermCfg(
             func=mdp.action_term_rate_l2,
-            weight=-0.1,
+            weight=-0.01,
             params={"action_term_name": "wheel_vel"},
         ),
         "leg_action_smoothness": RewardTermCfg(
@@ -1152,7 +1171,6 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
 
 def make_metrics() -> dict[str, MetricsTermCfg]:
     return {
-        "mean_action_acc": MetricsTermCfg(func=mdp.mean_action_acc),
         "leg_action_rate": MetricsTermCfg(
             func=mdp.action_term_rate_l2,
             params={"action_term_name": "leg_pos"},

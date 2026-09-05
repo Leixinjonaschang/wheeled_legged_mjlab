@@ -438,6 +438,39 @@ assert resolve_callable(cfg["algorithm"]["class_name"]).__module__.endswith(
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_dynamics_domain_randomization_events() -> None:
+    events = wf_tron1b_rough_env_cfg().events
+
+    mass_inertia = events["body_mass_inertia"]
+    assert mass_inertia.func is mdp.dr.pseudo_inertia
+    assert mass_inertia.mode == "startup"
+    assert mass_inertia.params["asset_cfg"].body_names is None
+    alpha_range = mass_inertia.params["alpha_range"]
+    assert tuple(math.exp(2.0 * alpha) for alpha in alpha_range) == pytest.approx(
+        (0.8, 1.2)
+    )
+
+    com = events["base_com"]
+    assert com.func is mdp.dr.body_com_offset
+    assert com.mode == "startup"
+    assert com.params["asset_cfg"].body_names is None
+    assert com.params["operation"] == "add"
+    assert com.params["ranges"] == {
+        0: (-0.05, 0.05),
+        1: (-0.05, 0.05),
+        2: (-0.05, 0.05),
+    }
+
+    pd_gains = events["pd_gains"]
+    assert pd_gains.func is mdp.randomize_pd_gains
+    assert pd_gains.mode == "startup"
+    assert pd_gains.params["asset_cfg"].actuator_names is None
+    assert pd_gains.params["stiffness_scale_range"] == (0.8, 1.2)
+    assert pd_gains.params["damping_scale_range"] == (0.8, 1.2)
+
+
 def test_depth_camera_domain_randomization_and_play_overrides() -> None:
     cfg = wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg()
 
@@ -1432,7 +1465,7 @@ def _make_representation_policy() -> RepresentationActorCritic:
             "actor": torch.randn(2, 3),
             "actor_history": torch.randn(2, 5, 3),
             "critic": torch.randn(2, 4),
-            "dynamics_context": torch.randn(2, 13),
+            "dynamics_context": torch.randn(2, 63),
         },
         batch_size=[2],
     )
@@ -1471,7 +1504,7 @@ def _make_velocity_representation_policy() -> RepresentationVelocityActorCritic:
             "lin_vel_target": torch.randn(2, 3),
             "critic": torch.randn(2, 5),
             "privileged_encoder": torch.randn(2, 4),
-            "dynamics_context": torch.randn(2, 13),
+            "dynamics_context": torch.randn(2, 63),
         },
         batch_size=[2],
     )
@@ -1499,7 +1532,7 @@ def _make_depth_velocity_representation_policy() -> DepthRepresentationVelocityA
             "lin_vel_target": torch.randn(2, 3),
             "critic": torch.randn(2, 5),
             "privileged_encoder": torch.randn(2, 4),
-            "dynamics_context": torch.randn(2, 13),
+            "dynamics_context": torch.randn(2, 63),
             "depth_camera": torch.randn(2, 1, 32, 24),
         },
         batch_size=[2],
