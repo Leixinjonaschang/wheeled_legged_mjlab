@@ -26,12 +26,16 @@ from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import (
 def test_flat_environment_terms_have_strict_vector_outputs() -> None:
     cfg = load_env_cfg("Mjlab-Velocity-Flat-WF-Tron1B")
     cfg.scene.num_envs = 2
-    assert cfg.rewards["action_rate"].func is weighted_action_rate_l2
-    for name in ("action_rate", "action_smoothness"):
-        assert cfg.rewards[name].params == {
-            "leg_coefficient": 1.0, "wheel_coefficient": 1.0
-        }
-        cfg.rewards[name].params.update(leg_coefficient=0.2, wheel_coefficient=2.0)
+    assert "action_rate" not in cfg.rewards
+    assert "action_smoothness" not in cfg.rewards
+    for group, action_term_name in (("leg", "leg_pos"), ("wheel", "wheel_vel")):
+        for name, func in (
+            ("action_rate", action_term_rate_l2),
+            ("action_smoothness", action_term_smoothness_l2),
+        ):
+            term = cfg.rewards[f"{group}_{name}"]
+            assert term.func is func
+            assert term.params == {"action_term_name": action_term_name}
     env = ManagerBasedRlEnv(cfg=cfg, device="cuda:0", render_mode=None)
     try:
         env.reset()
@@ -173,12 +177,14 @@ def test_weighted_action_costs_and_partial_reset(
     if reverse_terms:
         manager.active_terms.reverse()
     smoothness = ActionSmoothnessPenalty(None, env)
+    default_smoothness = ActionSmoothnessPenalty(None, env)
     coefficients = {
         "leg_coefficient": leg_coefficient, "wheel_coefficient": wheel_coefficient
     }
     for step, multiplier in enumerate((1.0, 2.0, 4.0, 7.0, 11.0, 16.0), start=1):
         if step == 4:
             smoothness.reset(torch.tensor([0]))
+            default_smoothness.reset(torch.tensor([0]))
             for history in (manager.action, manager.prev_action, manager.prev_prev_action):
                 history[0] = 0.0
             env.episode_length_buf[0] = 0
@@ -198,6 +204,11 @@ def test_weighted_action_costs_and_partial_reset(
         torch.testing.assert_close(weighted_action_rate_l2(env, **coefficients), expected_rate)
         torch.testing.assert_close(smoothness(env, **coefficients), expected_smoothness)
         torch.testing.assert_close(weighted_action_rate_l2(env), action_rate_l2(env))
+        expected_default_smoothness = torch.sum(
+            (manager.action - 2 * manager.prev_action + manager.prev_prev_action).square(), dim=1
+        )
+        expected_default_smoothness[env.episode_length_buf < 3] = 0.0
+        torch.testing.assert_close(default_smoothness(env), expected_default_smoothness)
         if step == 3:
             # Second difference is exactly base: leg sum=91, wheel sum=113.
             torch.testing.assert_close(

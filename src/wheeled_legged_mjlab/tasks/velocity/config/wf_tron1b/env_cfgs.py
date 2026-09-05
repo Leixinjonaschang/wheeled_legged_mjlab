@@ -85,7 +85,7 @@ WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
 WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
-TERRAIN_SCAN_SIZE = (1.0, 0.8)
+TERRAIN_SCAN_SIZE = (1.0, 1.0)
 TERRAIN_SCAN_RESOLUTION = 0.1
 TERRAIN_SCAN_CENTER = (0.1, 0.0)
 TERRAIN_SCAN_GRID_SHAPE = OffsetGridPatternCfg(
@@ -895,26 +895,40 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-0.0002,
             params={"asset_cfg": wheel_joint_cfg},
         ),
-        "joint_acc": RewardTermCfg(
+        "leg_joint_acc": RewardTermCfg(
+            func=mdp.joint_acc_l2,
+            weight=-3.0e-7,
+            params={"asset_cfg": leg_joint_cfg},
+        ),
+        "wheel_joint_acc": RewardTermCfg(
             func=mdp.joint_acc_l2,
             weight=-1.0e-7,
-            params={"asset_cfg": all_joint_cfg},
+            params={"asset_cfg": wheel_joint_cfg},
         ),
         "joint_power": RewardTermCfg(
             func=mdp.joint_power_l1,
             weight=-5.0e-5,
             params={"asset_cfg": all_joint_cfg},
         ),
-        # Group multipliers apply to raw squared costs, then weight scales the sum.
-        "action_rate": RewardTermCfg(
-            func=mdp.action_rate_l2,
-            weight=-0.1,
-            params={"leg_coefficient": 3.0, "wheel_coefficient": 1.0},
+        "leg_action_rate": RewardTermCfg(
+            func=mdp.action_term_rate_l2,
+            weight=-0.3,
+            params={"action_term_name": "leg_pos"},
         ),
-        "action_smoothness": RewardTermCfg(
-            func=mdp.ActionSmoothnessPenalty,
+        "wheel_action_rate": RewardTermCfg(
+            func=mdp.action_term_rate_l2,
+            weight=-0.1,
+            params={"action_term_name": "wheel_vel"},
+        ),
+        "leg_action_smoothness": RewardTermCfg(
+            func=mdp.action_term_smoothness_l2,
+            weight=-0.03,
+            params={"action_term_name": "leg_pos"},
+        ),
+        "wheel_action_smoothness": RewardTermCfg(
+            func=mdp.action_term_smoothness_l2,
             weight=-0.01,
-            params={"leg_coefficient": 3.0, "wheel_coefficient": 1.0},
+            params={"action_term_name": "wheel_vel"},
         ),
         # Contact safety and wheel contact quality.
         "self_collisions": RewardTermCfg(
