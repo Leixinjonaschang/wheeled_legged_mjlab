@@ -905,10 +905,16 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=-5.0e-5,
             params={"asset_cfg": all_joint_cfg},
         ),
-        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
+        # Group multipliers apply to raw squared costs, then weight scales the sum.
+        "action_rate": RewardTermCfg(
+            func=mdp.action_rate_l2,
+            weight=-0.1,
+            params={"leg_coefficient": 3.0, "wheel_coefficient": 1.0},
+        ),
         "action_smoothness": RewardTermCfg(
             func=mdp.ActionSmoothnessPenalty,
             weight=-0.01,
+            params={"leg_coefficient": 3.0, "wheel_coefficient": 1.0},
         ),
         # Contact safety and wheel contact quality.
         "self_collisions": RewardTermCfg(

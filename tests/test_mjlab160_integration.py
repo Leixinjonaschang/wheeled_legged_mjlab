@@ -13,8 +13,12 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
     make_metrics,
 )
 from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import (
+    ActionSmoothnessPenalty,
     action_term_rate_l2,
     action_term_smoothness_l2,
+)
+from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import (
+    action_rate_l2 as weighted_action_rate_l2,
 )
 
 
@@ -22,6 +26,12 @@ from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import (
 def test_flat_environment_terms_have_strict_vector_outputs() -> None:
     cfg = load_env_cfg("Mjlab-Velocity-Flat-WF-Tron1B")
     cfg.scene.num_envs = 2
+    assert cfg.rewards["action_rate"].func is weighted_action_rate_l2
+    for name in ("action_rate", "action_smoothness"):
+        assert cfg.rewards[name].params == {
+            "leg_coefficient": 1.0, "wheel_coefficient": 1.0
+        }
+        cfg.rewards[name].params.update(leg_coefficient=0.2, wheel_coefficient=2.0)
     env = ManagerBasedRlEnv(cfg=cfg, device="cuda:0", render_mode=None)
     try:
         env.reset()
@@ -141,3 +151,56 @@ def test_make_metrics_registers_split_action_metrics() -> None:
     assert metrics["wheel_action_smoothness"].params == {
         "action_term_name": "wheel_vel"
     }
+
+
+@pytest.mark.parametrize("reverse_terms", [False, True])
+@pytest.mark.parametrize(
+    ("leg_coefficient", "wheel_coefficient"),
+    [(1.0, 1.0), (0.2, 1.0), (0.0, 1.0), (1.0, 0.0), (0.0, 0.0)],
+)
+def test_weighted_action_costs_and_partial_reset(
+    reverse_terms: bool, leg_coefficient: float, wheel_coefficient: float
+) -> None:
+    # Nonuniform actions distinguish both groups and catch incorrect slicing.
+    base = torch.arange(1.0, 9.0).repeat(2, 1)
+    if reverse_terms:
+        base = torch.cat((base[:, 6:], base[:, :6]), dim=1)
+    env = _make_action_metric_env(
+        torch.zeros_like(base), torch.zeros_like(base), torch.zeros_like(base),
+        torch.zeros(2, dtype=torch.long),
+    )
+    manager = env.action_manager
+    if reverse_terms:
+        manager.active_terms.reverse()
+    smoothness = ActionSmoothnessPenalty(None, env)
+    coefficients = {
+        "leg_coefficient": leg_coefficient, "wheel_coefficient": wheel_coefficient
+    }
+    for step, multiplier in enumerate((1.0, 2.0, 4.0, 7.0, 11.0, 16.0), start=1):
+        if step == 4:
+            smoothness.reset(torch.tensor([0]))
+            for history in (manager.action, manager.prev_action, manager.prev_prev_action):
+                history[0] = 0.0
+            env.episode_length_buf[0] = 0
+        manager.prev_prev_action = manager.prev_action.clone()
+        manager.prev_action = manager.action.clone()
+        manager.action = multiplier * base
+        env.episode_length_buf += 1
+
+        expected_rate = (
+            leg_coefficient * action_term_rate_l2(env, "leg_pos")
+            + wheel_coefficient * action_term_rate_l2(env, "wheel_vel")
+        )
+        expected_smoothness = (
+            leg_coefficient * action_term_smoothness_l2(env, "leg_pos")
+            + wheel_coefficient * action_term_smoothness_l2(env, "wheel_vel")
+        )
+        torch.testing.assert_close(weighted_action_rate_l2(env, **coefficients), expected_rate)
+        torch.testing.assert_close(smoothness(env, **coefficients), expected_smoothness)
+        torch.testing.assert_close(weighted_action_rate_l2(env), action_rate_l2(env))
+        if step == 3:
+            # Second difference is exactly base: leg sum=91, wheel sum=113.
+            torch.testing.assert_close(
+                expected_smoothness,
+                torch.full((2,), leg_coefficient * 91.0 + wheel_coefficient * 113.0),
+            )

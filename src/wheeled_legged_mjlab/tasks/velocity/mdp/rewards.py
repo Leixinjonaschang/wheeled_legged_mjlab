@@ -567,15 +567,35 @@ def joint_power_l1(
   return torch.sum(torch.abs(joint_power), dim=1)
 
 
+def action_rate_l2(
+  env: ManagerBasedRlEnv,
+  leg_coefficient: float = 1.0,
+  wheel_coefficient: float = 1.0,
+) -> torch.Tensor:
+  """Sum raw action-rate costs with separate leg/wheel multipliers.
+
+  Coefficients multiply the squared costs, before the reward term's weight.
+  """
+  return (
+    leg_coefficient * action_term_rate_l2(env, "leg_pos")
+    + wheel_coefficient * action_term_rate_l2(env, "wheel_vel")
+  )
+
+
 class ActionSmoothnessPenalty:
-  """Penalize the second finite difference of raw policy actions."""
+  """Penalize raw action second differences with leg/wheel cost multipliers."""
 
   def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
     del cfg, env
     self.prev_prev_action: torch.Tensor | None = None
     self.prev_action: torch.Tensor | None = None
 
-  def __call__(self, env: ManagerBasedRlEnv) -> torch.Tensor:
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    leg_coefficient: float = 1.0,
+    wheel_coefficient: float = 1.0,
+  ) -> torch.Tensor:
     current_action = env.action_manager.action.clone()
     if self.prev_action is None:
       self.prev_action = current_action
@@ -586,7 +606,13 @@ class ActionSmoothnessPenalty:
       return torch.zeros(current_action.shape[0], device=current_action.device)
 
     action_second_diff = current_action - 2 * self.prev_action + self.prev_prev_action
-    penalty = torch.sum(torch.square(action_second_diff), dim=1)
+    leg_slice = _action_term_slice(env, "leg_pos")
+    wheel_slice = _action_term_slice(env, "wheel_vel")
+    penalty = (
+      leg_coefficient * torch.sum(torch.square(action_second_diff[:, leg_slice]), dim=1)
+      + wheel_coefficient
+      * torch.sum(torch.square(action_second_diff[:, wheel_slice]), dim=1)
+    )
     self.prev_prev_action = self.prev_action
     self.prev_action = current_action
     penalty[env.episode_length_buf < 3] = 0.0
