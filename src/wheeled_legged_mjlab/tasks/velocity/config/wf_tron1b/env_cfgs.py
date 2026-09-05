@@ -1133,6 +1133,22 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
 def make_metrics() -> dict[str, MetricsTermCfg]:
     return {
         "mean_action_acc": MetricsTermCfg(func=mdp.mean_action_acc),
+        "leg_action_rate": MetricsTermCfg(
+            func=mdp.action_term_rate_l2,
+            params={"action_term_name": "leg_pos"},
+        ),
+        "wheel_action_rate": MetricsTermCfg(
+            func=mdp.action_term_rate_l2,
+            params={"action_term_name": "wheel_vel"},
+        ),
+        "leg_action_smoothness": MetricsTermCfg(
+            func=mdp.action_term_smoothness_l2,
+            params={"action_term_name": "leg_pos"},
+        ),
+        "wheel_action_smoothness": MetricsTermCfg(
+            func=mdp.action_term_smoothness_l2,
+            params={"action_term_name": "wheel_vel"},
+        ),
     }
 
 

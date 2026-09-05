@@ -601,6 +601,43 @@ class ActionSmoothnessPenalty:
     self.prev_prev_action[env_ids] = 0.0
 
 
+def _action_term_slice(env: ManagerBasedRlEnv, action_term_name: str) -> slice:
+  start = 0
+  for name in env.action_manager.active_terms:
+    action_dim = env.action_manager.get_term(name).action_dim
+    if name == action_term_name:
+      return slice(start, start + action_dim)
+    start += action_dim
+  raise ValueError(f"Unknown action term: {action_term_name}")
+
+
+def action_term_rate_l2(
+  env: ManagerBasedRlEnv, action_term_name: str
+) -> torch.Tensor:
+  """Return the squared action rate summed over one action term."""
+  term_slice = _action_term_slice(env, action_term_name)
+  action_rate = (
+    env.action_manager.action[:, term_slice]
+    - env.action_manager.prev_action[:, term_slice]
+  )
+  return torch.sum(torch.square(action_rate), dim=1)
+
+
+def action_term_smoothness_l2(
+  env: ManagerBasedRlEnv, action_term_name: str
+) -> torch.Tensor:
+  """Return the squared second action difference for one action term."""
+  term_slice = _action_term_slice(env, action_term_name)
+  action_second_diff = (
+    env.action_manager.action[:, term_slice]
+    - 2 * env.action_manager.prev_action[:, term_slice]
+    + env.action_manager.prev_prev_action[:, term_slice]
+  )
+  penalty = torch.sum(torch.square(action_second_diff), dim=1)
+  penalty[env.episode_length_buf < 3] = 0.0
+  return penalty
+
+
 def _body_positions_in_base_frame(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg,
