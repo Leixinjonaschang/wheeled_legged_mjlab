@@ -455,12 +455,28 @@ def test_dynamics_domain_randomization_events() -> None:
     com = events["base_com"]
     assert com.func is mdp.dr.body_com_offset
     assert com.mode == "startup"
-    assert com.params["asset_cfg"].body_names is None
+    assert com.params["asset_cfg"].body_names == ("base_Link",)
     assert com.params["operation"] == "add"
     assert com.params["ranges"] == {
         0: (-0.05, 0.05),
         1: (-0.05, 0.05),
         2: (-0.05, 0.05),
+    }
+
+    link_com = events["link_com"]
+    assert link_com.func is mdp.dr.body_com_offset
+    assert link_com.mode == "startup"
+    assert link_com.params["asset_cfg"].body_names == (
+        "abad_[LR]_Link",
+        "hip_[LR]_Link",
+        "knee_[LR]_Link",
+        "wheel_[LR]_Link",
+    )
+    assert link_com.params["operation"] == "add"
+    assert link_com.params["ranges"] == {
+        0: (-0.03, 0.03),
+        1: (-0.03, 0.03),
+        2: (-0.03, 0.03),
     }
 
     pd_gains = events["pd_gains"]
@@ -1465,7 +1481,7 @@ def _make_representation_policy() -> RepresentationActorCritic:
             "actor": torch.randn(2, 3),
             "actor_history": torch.randn(2, 5, 3),
             "critic": torch.randn(2, 4),
-            "dynamics_context": torch.randn(2, 63),
+            "dynamics_context": torch.randn(2, 87),
         },
         batch_size=[2],
     )
@@ -1504,7 +1520,7 @@ def _make_velocity_representation_policy() -> RepresentationVelocityActorCritic:
             "lin_vel_target": torch.randn(2, 3),
             "critic": torch.randn(2, 5),
             "privileged_encoder": torch.randn(2, 4),
-            "dynamics_context": torch.randn(2, 63),
+            "dynamics_context": torch.randn(2, 87),
         },
         batch_size=[2],
     )
@@ -1532,7 +1548,7 @@ def _make_depth_velocity_representation_policy() -> DepthRepresentationVelocityA
             "lin_vel_target": torch.randn(2, 3),
             "critic": torch.randn(2, 5),
             "privileged_encoder": torch.randn(2, 4),
-            "dynamics_context": torch.randn(2, 63),
+            "dynamics_context": torch.randn(2, 87),
             "depth_camera": torch.randn(2, 1, 32, 24),
         },
         batch_size=[2],

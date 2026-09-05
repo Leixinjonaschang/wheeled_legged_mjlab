@@ -67,6 +67,68 @@ def test_flat_environment_terms_have_strict_vector_outputs() -> None:
         env.close()
 
 
+DYNAMICS_CONTEXT_DIM = 87
+"""wheel friction (2) + encoder bias (8) + base COM (3) + link COM (24)
++ body mass (9) + principal inertia (27) + leg Kp (6) + leg Kd/wheel Kv (8)."""
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="MJLab GPU integration test")
+def test_dynamics_context_width_matches_declared_layout() -> None:
+    """The critic context width is only implied by the event configs.
+
+    Adding or resizing a DR event silently changes it, so pin it at runtime
+    rather than only in the hand-written policy fixtures.
+    """
+    cfg = load_env_cfg("Mjlab-Velocity-Flat-WF-Tron1B-RepTS-LinVel")
+    cfg.scene.num_envs = 8
+    env = ManagerBasedRlEnv(cfg=cfg, device="cuda:0", render_mode=None)
+    try:
+        obs, _ = env.reset()
+        context = obs["dynamics_context"]
+        assert context.shape == (env.num_envs, DYNAMICS_CONTEXT_DIM)
+        assert torch.isfinite(context).all()
+        assert context.abs().max() <= 1.0 + 1e-6
+    finally:
+        env.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="MJLab GPU integration test")
+def test_wheel_friction_randomization_spans_its_configured_range() -> None:
+    """Guard against a later event clobbering an earlier one on the same field.
+
+    ``wheel_friction_difference`` used the built-in ``add`` operation, which
+    reads the compile-time default rather than the current model value. That
+    discarded the shared sample from ``wheel_friction`` and pinned friction to
+    the XML default plus the small difference.
+    """
+    cfg = load_env_cfg("Mjlab-Velocity-Flat-WF-Tron1B")
+    cfg.scene.num_envs = 256
+    common_lo, common_hi = cfg.events["wheel_friction"].params["ranges"]
+    diff_lo, diff_hi = cfg.events["wheel_friction_difference"].params["ranges"]
+    env = ManagerBasedRlEnv(cfg=cfg, device="cuda:0", render_mode=None)
+    try:
+        env.reset()
+        # Read the manager's copy: the config's SceneEntityCfg is unresolved, so
+        # its geom_ids would still be a full slice here.
+        term_cfg = env.event_manager.get_term_cfg("wheel_friction")
+        asset_cfg = term_cfg.params["asset_cfg"]
+        asset = env.scene[asset_cfg.name]
+        geom_ids = asset.indexing.geom_ids[asset_cfg.geom_ids]
+        friction = env.sim.model.geom_friction[:, geom_ids, 0]
+
+        # The shared per-environment level must cover most of its range.
+        common = friction.mean(dim=1)
+        assert common.min() < common_lo + 0.1 * (common_hi - common_lo)
+        assert common.max() > common_hi - 0.1 * (common_hi - common_lo)
+
+        # The per-wheel difference must survive on top of it.
+        difference = friction[:, 0] - friction[:, 1]
+        assert difference.abs().max() > 0.5 * (diff_hi - diff_lo)
+        assert difference.abs().max() <= 2 * max(abs(diff_lo), abs(diff_hi)) + 1e-6
+    finally:
+        env.close()
+
+
 class _ActionManager:
     def __init__(
         self,

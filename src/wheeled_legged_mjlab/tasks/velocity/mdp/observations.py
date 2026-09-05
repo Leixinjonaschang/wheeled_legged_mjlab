@@ -1233,14 +1233,16 @@ def domain_randomization_delta_quantity(
   wheel_friction_difference_event: str = "wheel_friction_difference",
   encoder_bias_event: str = "encoder_bias",
   base_com_event: str = "base_com",
+  link_com_event: str = "link_com",
   mass_inertia_event: str = "body_mass_inertia",
   pd_gains_event: str = "pd_gains",
 ) -> torch.Tensor:
   """Return normalized domain-randomization quantities in a stable order.
 
   The WF-TRON1B layout is wheel friction (2), encoder bias (8), base COM
-  offset (3), body mass scale (9), principal-inertia scale (27), leg Kp
-  scale (6), and leg Kd plus wheel Kv scale (8), for 63 values in total.
+  offset (3), non-base body COM offsets (24), body mass scale (9),
+  principal-inertia scale (27), leg Kp scale (6), and leg Kd plus wheel Kv
+  scale (8), for 87 values in total.
   """
   wheel_friction_cfg = env.event_manager.get_term_cfg(wheel_friction_event)
   friction_asset_cfg: SceneEntityCfg = wheel_friction_cfg.params["asset_cfg"]
@@ -1273,25 +1275,26 @@ def domain_randomization_delta_quantity(
     encoder_bias_range[1],
   )
 
-  base_com_cfg = env.event_manager.get_term_cfg(base_com_event)
-  base_com_asset_cfg: SceneEntityCfg = base_com_cfg.params["asset_cfg"]
-  base_com_ranges = base_com_cfg.params["ranges"]
-  base_com_asset = env.scene[base_com_asset_cfg.name]
-  base_body_ids = base_com_asset.indexing.body_ids[base_com_asset_cfg.body_ids]
-  current_body_ipos = env.sim.model.body_ipos[:, base_body_ids, :].reshape(
-    env.num_envs, -1
-  )
-  default_body_ipos = env.sim.get_default_field("body_ipos")[base_body_ids, :].reshape(
-    1, -1
-  )
-  base_com_delta = current_body_ipos - default_body_ipos
-  base_com_delta = torch.stack(
-    [
-      _normalize_to_unit_range(base_com_delta[:, axis], *base_com_ranges[axis])
-      for axis in range(3)
-    ],
-    dim=1,
-  )
+  com_deltas = []
+  for com_event in (base_com_event, link_com_event):
+    com_cfg = env.event_manager.get_term_cfg(com_event)
+    com_asset_cfg: SceneEntityCfg = com_cfg.params["asset_cfg"]
+    com_ranges = com_cfg.params["ranges"]
+    com_asset = env.scene[com_asset_cfg.name]
+    com_body_ids = com_asset.indexing.body_ids[com_asset_cfg.body_ids]
+    current_body_ipos = env.sim.model.body_ipos[:, com_body_ids, :]
+    default_body_ipos = env.sim.get_default_field("body_ipos")[
+      com_body_ids, :
+    ].unsqueeze(0)
+    com_delta = current_body_ipos - default_body_ipos
+    normalized_com_delta = torch.stack(
+      [
+        _normalize_to_unit_range(com_delta[..., axis], *com_ranges[axis])
+        for axis in range(3)
+      ],
+      dim=-1,
+    ).reshape(env.num_envs, -1)
+    com_deltas.append(normalized_com_delta)
 
   mass_inertia_cfg = env.event_manager.get_term_cfg(mass_inertia_event)
   mass_inertia_asset_cfg: SceneEntityCfg = mass_inertia_cfg.params["asset_cfg"]
@@ -1343,7 +1346,7 @@ def domain_randomization_delta_quantity(
     (
       wheel_friction,
       encoder_bias,
-      base_com_delta,
+      *com_deltas,
       body_mass_scale,
       body_inertia_scale,
       *stiffness_scales,

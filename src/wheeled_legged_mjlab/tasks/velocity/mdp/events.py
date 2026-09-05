@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from mjlab.entity import Entity
+from mjlab.envs.mdp.dr import Operation
 from mjlab.managers.event_manager import requires_model_fields
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
@@ -13,6 +14,20 @@ from mjlab.utils.lab_api.math import quat_apply_inverse
 from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
+ADD_TO_CURRENT = Operation(
+    name="add_to_current",
+    initialize=torch.zeros_like,
+    combine=torch.add,
+    uses_defaults=False,
+)
+"""Additive DR operation that stacks on the current model value.
+
+The built-in ``add`` operation reads the compile-time default instead of the
+current value, so chaining it after an ``abs`` event on the same field and axis
+silently discards the ``abs`` result. Use this when an additive per-entity
+event must compose with an earlier event rather than replace it.
+"""
 
 
 @requires_model_fields("actuator_gainprm", "actuator_biasprm")

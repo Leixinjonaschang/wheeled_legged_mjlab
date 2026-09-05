@@ -51,6 +51,12 @@ ROBOT_ENTITY = "robot"
 COMMAND_NAME = "twist"
 
 BASE_BODY = "base_Link"
+NON_BASE_BODY_NAMES = (
+    "abad_[LR]_Link",
+    "hip_[LR]_Link",
+    "knee_[LR]_Link",
+    "wheel_[LR]_Link",
+)
 LEG_JOINT_NAMES = (
     "abad_[LR]_Joint",
     "hip_[LR]_Joint",
@@ -313,8 +319,8 @@ def make_observations(
                     joint_names=WHEEL_JOINT_NAMES,
                 )
             },
-            noise=Unoise(n_min=-0.2, n_max=0.2),
-            scale=0.5,
+            noise=Unoise(n_min=-1.5, n_max=1.5),
+            scale=0.05,
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
         "command": ObservationTermCfg(
@@ -361,7 +367,7 @@ def make_observations(
                     joint_names=WHEEL_JOINT_NAMES,
                 )
             },
-            scale=0.5,
+            scale=0.05,
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
         "command": ObservationTermCfg(
@@ -625,7 +631,10 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                 },
                 "velocity_range": {
                     "x": (-0.3, 0.3),
-                    "y": (-0.2, 0.2),
+                    "y": (-0.5, 0.5),
+                    "z": (-0.5, 0.5),
+                    "roll": (-0.5, 0.5),
+                    "pitch": (-0.5, 0.5),
                     "yaw": (-0.2, 0.2),
                 },
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
@@ -689,6 +698,9 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                 "shared_random": True,
             },
         ),
+        # Must stack on the value written by "wheel_friction" above. The built-in
+        # "add" operation reads the compile-time default, which would discard that
+        # event's shared sample and pin friction to the XML default.
         "wheel_friction_difference": EventTermCfg(
             func=mdp.dr.geom_friction,
             mode="startup",
@@ -697,7 +709,7 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                     ROBOT_ENTITY,
                     geom_names=WHEEL_GEOM_NAMES,
                 ),
-                "operation": "add",
+                "operation": mdp.ADD_TO_CURRENT,
                 "ranges": (-0.08, 0.08),
                 "shared_random": False,
             },
@@ -733,12 +745,31 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
             func=mdp.dr.body_com_offset,
             mode="startup",
             params={
-                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    body_names=(BASE_BODY,),
+                ),
                 "operation": "add",
                 "ranges": {
                     0: (-0.05, 0.05),
                     1: (-0.05, 0.05),
                     2: (-0.05, 0.05),
+                },
+            },
+        ),
+        "link_com": EventTermCfg(
+            func=mdp.dr.body_com_offset,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    body_names=NON_BASE_BODY_NAMES,
+                ),
+                "operation": "add",
+                "ranges": {
+                    0: (-0.03, 0.03),
+                    1: (-0.03, 0.03),
+                    2: (-0.03, 0.03),
                 },
             },
         ),
