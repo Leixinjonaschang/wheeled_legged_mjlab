@@ -78,6 +78,7 @@ NON_WHEEL_COLLISION_GEOMS = (
 )
 
 BASE_HEIGHT_TARGET = 0.82
+BASE_HEIGHT_TERMINATION_MINIMUM = 0.55
 POSE_TARGET_JOINT_POS = {
     "abad_L_Joint": 0.1,
     "hip_L_Joint": 0.2,
@@ -879,7 +880,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "base_height": RewardTermCfg(
             func=mdp.base_height_l2,
-            weight=-50.0,
+            weight=-300.0,
             params={
                 "target_height": BASE_HEIGHT_TARGET,
                 "deadband": 0.04,
@@ -962,12 +963,12 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "leg_action_rate": RewardTermCfg(
             func=mdp.action_term_rate_l2,
-            weight=-0.03,
+            weight=-0.3,
             params={"action_term_name": "leg_pos"},
         ),
         "wheel_action_rate": RewardTermCfg(
             func=mdp.action_term_rate_l2,
-            weight=-0.01,
+            weight=-0.1,
             params={"action_term_name": "wheel_vel"},
         ),
         "leg_action_smoothness": RewardTermCfg(
@@ -1126,7 +1127,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                         "contact_sensor_name": "wheels_ground_contact",
                         "command_name": COMMAND_NAME,
                         "max_time": 0.5,
-                        "air_time_offset": 0.05,
+                        "air_time_offset": 0.2,
                     },
                 ),
             }
@@ -1143,6 +1144,16 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
         "fell_over": TerminationTermCfg(
             func=mdp.bad_orientation,
             params={"limit_angle": FELL_OVER_LIMIT_ANGLE_INITIAL},
+        ),
+        "base_height_below_minimum": TerminationTermCfg(
+            func=mdp.base_height_below_minimum,
+            params={
+                "minimum_height": BASE_HEIGHT_TERMINATION_MINIMUM,
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "sensor_name": "terrain_scan" if rough else None,
+                "terrain_sample": "quantile" if rough else "center",
+                "terrain_quantile": 0.75,
+            },
         ),
         "illegal_contact": TerminationTermCfg(
             func=mdp.illegal_contact,

@@ -487,22 +487,19 @@ def angular_momentum_penalty(
   return angmom_magnitude_sq
 
 
-def base_height_l2(
+def base_height(
   env: ManagerBasedRlEnv,
-  target_height: float,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
   sensor_name: str | None = None,
   terrain_sample: str = "mean",
   terrain_quantile: float = 0.5,
-  deadband: float = 0.0,
 ) -> torch.Tensor:
-  """Penalize base height error outside a symmetric deadband using an L2 kernel.
+  """Return base height in the world frame or relative to local terrain.
 
   When a terrain raycast sensor is provided, height is measured relative to the
   local terrain under the scan instead of world z. ``terrain_sample="quantile"``
   uses a height quantile over the scan and is robust to sparse deep holes such
-  as stepping-stone pits. Errors inside the deadband produce zero cost; only
-  the excess error is penalized.
+  as stepping-stone pits.
   """
   asset: Entity = env.scene[asset_cfg.name]
   base_z = asset.data.root_link_pos_w[:, 2]
@@ -512,7 +509,7 @@ def base_height_l2(
     sensor = env.scene[sensor_name]
     if not isinstance(sensor, RayCastSensor):
       raise TypeError(
-        "base_height_l2 terrain-relative mode requires a RayCastSensor, "
+        "base_height terrain-relative mode requires a RayCastSensor, "
         f"got {type(sensor).__name__}"
       )
     data = sensor.data
@@ -541,8 +538,28 @@ def base_height_l2(
     else:
       raise ValueError(f"Unsupported terrain_sample: {terrain_sample}")
     base_height = base_z - ground_z
+  return base_height
+
+
+def base_height_l2(
+  env: ManagerBasedRlEnv,
+  target_height: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  sensor_name: str | None = None,
+  terrain_sample: str = "mean",
+  terrain_quantile: float = 0.5,
+  deadband: float = 0.0,
+) -> torch.Tensor:
+  """Penalize base height error outside a symmetric deadband using an L2 kernel."""
+  measured_height = base_height(
+    env,
+    asset_cfg=asset_cfg,
+    sensor_name=sensor_name,
+    terrain_sample=terrain_sample,
+    terrain_quantile=terrain_quantile,
+  )
   height_error = torch.clamp(
-    torch.abs(base_height - target_height) - deadband,
+    torch.abs(measured_height - target_height) - deadband,
     min=0.0,
   )
   return torch.square(height_error)

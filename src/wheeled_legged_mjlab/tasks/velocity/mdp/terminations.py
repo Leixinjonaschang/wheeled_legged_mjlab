@@ -11,6 +11,7 @@ from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import wrap_to_pi
 
 from .commands import UniformVelocityCommand
+from .rewards import base_height
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -77,6 +78,27 @@ def illegal_contact(
     return (force_mag > force_threshold).any(dim=-1).any(dim=-1)  # [B]
   assert data.found is not None
   return torch.any(data.found, dim=-1)
+
+
+def base_height_below_minimum(
+  env: ManagerBasedRlEnv,
+  minimum_height: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  sensor_name: str | None = None,
+  terrain_sample: str = "mean",
+  terrain_quantile: float = 0.5,
+) -> torch.Tensor:
+  """Terminate when terrain-relative base height falls below the minimum."""
+  return (
+    base_height(
+      env,
+      asset_cfg=asset_cfg,
+      sensor_name=sensor_name,
+      terrain_sample=terrain_sample,
+      terrain_quantile=terrain_quantile,
+    )
+    < minimum_height
+  )
 
 
 class world_command_tracking_failure:
