@@ -11,6 +11,7 @@ from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import wrap_to_pi
 
 from .commands import UniformVelocityCommand
+from .rewards import base_height
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -77,6 +78,27 @@ def illegal_contact(
     return (force_mag > force_threshold).any(dim=-1).any(dim=-1)  # [B]
   assert data.found is not None
   return torch.any(data.found, dim=-1)
+
+
+def base_height_below_minimum(
+  env: ManagerBasedRlEnv,
+  minimum_height: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  sensor_name: str | None = None,
+  terrain_sample: str = "mean",
+  terrain_quantile: float = 0.5,
+) -> torch.Tensor:
+  """Terminate when terrain-relative base height falls below the minimum."""
+  return (
+    base_height(
+      env,
+      asset_cfg=asset_cfg,
+      sensor_name=sensor_name,
+      terrain_sample=terrain_sample,
+      terrain_quantile=terrain_quantile,
+    )
+    < minimum_height
+  )
 
 
 class world_command_tracking_failure:
@@ -195,14 +217,12 @@ class world_command_tracking_failure:
     )
 
     log_data = env.extras.setdefault("log", {})
-    angle = torch.acos(cos_angle) * (180.0 / math.pi)
     log_data["Metrics/world_command_tracking_progress_deficit_mean"] = (
       progress_deficit.mean()
     )
     log_data["Metrics/world_command_tracking_progress_bad_frac"] = (
       bad_progress.float().mean()
     )
-    log_data["Metrics/world_command_tracking_direction_angle_mean"] = angle.mean()
     log_data["Metrics/world_command_tracking_direction_bad_frac"] = (
       bad_direction.float().mean()
     )
@@ -212,14 +232,6 @@ class world_command_tracking_failure:
     log_data["Metrics/world_command_tracking_heading_bad_frac"] = (
       bad_heading.float().mean()
     )
-    log_data["Metrics/world_command_tracking_airborne_frac"] = (
-      (~grounded).float().mean()
-    )
-    log_data["Metrics/world_command_tracking_active"] = torch.tensor(
-      float(env.common_step_counter >= activation_step),
-      device=env.device,
-    )
-
     return (
       (self._progress_bad_steps >= progress_duration_steps)
       | (self._direction_bad_steps >= direction_duration_steps)

@@ -51,6 +51,12 @@ ROBOT_ENTITY = "robot"
 COMMAND_NAME = "twist"
 
 BASE_BODY = "base_Link"
+NON_BASE_BODY_NAMES = (
+    "abad_[LR]_Link",
+    "hip_[LR]_Link",
+    "knee_[LR]_Link",
+    "wheel_[LR]_Link",
+)
 LEG_JOINT_NAMES = (
     "abad_[LR]_Joint",
     "hip_[LR]_Joint",
@@ -72,22 +78,23 @@ NON_WHEEL_COLLISION_GEOMS = (
 )
 
 BASE_HEIGHT_TARGET = 0.82
+BASE_HEIGHT_TERMINATION_MINIMUM = 0.55
 POSE_TARGET_JOINT_POS = {
-    "abad_L_Joint": 0.0,
+    "abad_L_Joint": 0.1,
     "hip_L_Joint": 0.2,
     "knee_L_Joint": 0.48,
-    "abad_R_Joint": 0.0,
+    "abad_R_Joint": -0.1,
     "hip_R_Joint": -0.2,
     "knee_R_Joint": -0.48,
 }
-WHEEL_DISTANCE_RANGE = (0.25, 0.55)
+WHEEL_DISTANCE_RANGE = (0.3, 0.45)
 WHEEL_RADIUS = 0.127
 WHEEL_HEIGHT_SCAN_SIZE = (0.40, 0.40)
 WHEEL_HEIGHT_SCAN_RESOLUTION = 0.10
 WHEEL_HEIGHT_GRID_SHAPE = (5, 5)
-TERRAIN_SCAN_SIZE = (1.3, 0.7)
+TERRAIN_SCAN_SIZE = (1.0, 1.0)
 TERRAIN_SCAN_RESOLUTION = 0.1
-TERRAIN_SCAN_CENTER = (0.3, 0.0)
+TERRAIN_SCAN_CENTER = (0.1, 0.0)
 TERRAIN_SCAN_GRID_SHAPE = OffsetGridPatternCfg(
     size=TERRAIN_SCAN_SIZE,
     resolution=TERRAIN_SCAN_RESOLUTION,
@@ -100,8 +107,8 @@ DEPTH_CAMERA_WIDTH = 53
 DEPTH_CAMERA_HEIGHT = 30
 DEPTH_LEFT_CROP = 8
 DEPTH_MODEL_WIDTH = DEPTH_CAMERA_WIDTH - DEPTH_LEFT_CROP
-DEPTH_MIN_M = 0.2
-DEPTH_MAX_M = 2.0
+DEPTH_MIN_M = 0.15
+DEPTH_MAX_M = 2.5
 DEPTH_BUFFER_SIZE = 5
 DEPTH_BUFFER_UPDATE_PERIOD = 5
 DEPTH_CAPTURE_FREQUENCY_HZ = 30.0
@@ -112,6 +119,16 @@ DEPTH_CALIBRATION_BIAS_RANGE_M = (-0.01, 0.01)
 DEPTH_DISTANCE_NOISE_ENABLED = True
 DEPTH_NOISE_BASE_M = 0.001
 DEPTH_NOISE_QUADRATIC_COEFF = 0.005
+DEPTH_GAUSSIAN_BLUR_ENABLED = True
+DEPTH_GAUSSIAN_BLUR_KERNEL_SIZE = (3, 3)
+DEPTH_GAUSSIAN_BLUR_SIGMA = 1.0
+DEPTH_EDGE_NOISE_ENABLED = True
+DEPTH_EDGE_FOCAL_LENGTH_PX = 28.0
+DEPTH_EDGE_BASELINE_M = 0.05
+DEPTH_EDGE_DISPARITY_THRESHOLD_PX = 0.5
+DEPTH_EDGE_BAND_RADIUS_PX = 1
+DEPTH_EDGE_CORRUPTION_PROBABILITY = 0.5
+DEPTH_EDGE_EMPTY_RATIO = 0.5
 DEPTH_DROPOUT_ENABLED = False
 DEPTH_DROPOUT_PROBABILITY = 0.30
 DEPTH_DROPOUT_PATCH_COUNT_RANGE = (1, 3)
@@ -120,9 +137,9 @@ DEPTH_DROPOUT_ASPECT_RATIO_RANGE = (0.125, 8.0)
 DEPTH_CAMERA_POSITION_DELTA_RANGE_M = (-0.010, 0.010)
 DEPTH_CAMERA_PITCH_DELTA_RANGE_RAD = (-math.radians(1.0), math.radians(1.0))
 DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG = (-1.0, 1.0)
-ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.0
-ROUGHNESS_GATE_THRESHOLD_FINAL = 0.65
-ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 5_000 * 24
+ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.2
+ROUGHNESS_GATE_THRESHOLD_FINAL = 0.75
+ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 10_000 * 24
 FELL_OVER_LIMIT_ANGLE_INITIAL = math.radians(65.0)
 FELL_OVER_LIMIT_ANGLE_FINAL = math.radians(85.0)
 FELL_OVER_LIMIT_ANGLE_RAMP_STEPS = 5_000 * 24
@@ -257,6 +274,8 @@ def make_observations(
     lin_vel_representation: bool = False,
     async_depth: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    enable_depth_gaussian_blur: bool = DEPTH_GAUSSIAN_BLUR_ENABLED,
+    enable_depth_edge_noise: bool = DEPTH_EDGE_NOISE_ENABLED,
     enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
@@ -301,8 +320,8 @@ def make_observations(
                     joint_names=WHEEL_JOINT_NAMES,
                 )
             },
-            noise=Unoise(n_min=-0.2, n_max=0.2),
-            scale=0.5,
+            noise=Unoise(n_min=-1.5, n_max=1.5),
+            scale=0.05,
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
         "command": ObservationTermCfg(
@@ -349,7 +368,7 @@ def make_observations(
                     joint_names=WHEEL_JOINT_NAMES,
                 )
             },
-            scale=0.5,
+            scale=0.05,
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
         "command": ObservationTermCfg(
@@ -478,9 +497,19 @@ def make_observations(
         "calibration_scale_range": DEPTH_CALIBRATION_SCALE_RANGE,
         "calibration_bias_range_m": DEPTH_CALIBRATION_BIAS_RANGE_M,
         "enable_depth_distance_noise": enable_depth_distance_noise,
+        "enable_depth_gaussian_blur": enable_depth_gaussian_blur,
+        "enable_depth_edge_noise": enable_depth_edge_noise,
         "enable_depth_dropout": enable_depth_dropout,
         "noise_base_m": depth_noise_base_m,
         "noise_quadratic_coeff": depth_noise_quadratic_coeff,
+        "gaussian_blur_kernel_size": DEPTH_GAUSSIAN_BLUR_KERNEL_SIZE,
+        "gaussian_blur_sigma": DEPTH_GAUSSIAN_BLUR_SIGMA,
+        "edge_focal_length_px": DEPTH_EDGE_FOCAL_LENGTH_PX,
+        "edge_baseline_m": DEPTH_EDGE_BASELINE_M,
+        "edge_disparity_threshold_px": DEPTH_EDGE_DISPARITY_THRESHOLD_PX,
+        "edge_band_radius_px": DEPTH_EDGE_BAND_RADIUS_PX,
+        "edge_corruption_probability": DEPTH_EDGE_CORRUPTION_PROBABILITY,
+        "edge_empty_ratio": DEPTH_EDGE_EMPTY_RATIO,
         "dropout_probability": DEPTH_DROPOUT_PROBABILITY,
         "dropout_patch_count_range": DEPTH_DROPOUT_PATCH_COUNT_RANGE,
         "dropout_area_fraction_range": DEPTH_DROPOUT_AREA_FRACTION_RANGE,
@@ -603,7 +632,10 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                 },
                 "velocity_range": {
                     "x": (-0.3, 0.3),
-                    "y": (-0.2, 0.2),
+                    "y": (-0.5, 0.5),
+                    "z": (-0.5, 0.5),
+                    "roll": (-0.5, 0.5),
+                    "pitch": (-0.5, 0.5),
                     "yaw": (-0.2, 0.2),
                 },
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
@@ -613,7 +645,7 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
             func=mdp.reset_joints_by_offset,
             mode="reset",
             params={
-                "position_range": (-0.3, 0.5),
+                "position_range": (-0.3, 0.3),
                 "velocity_range": (-0.2, 0.2),
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
@@ -626,7 +658,7 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
             mode="reset",
             params={
                 "position_range": (0.0, 0.0),
-                "velocity_range": (-0.1, 0.1),
+                "velocity_range": (-0.5, 0.5),
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
                     joint_names=WHEEL_JOINT_NAMES,
@@ -641,11 +673,11 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
         "push_robot": EventTermCfg(
             func=mdp.push_by_setting_velocity,
             mode="interval",
-            interval_range_s=(15.0, 15.5),
+            interval_range_s=(8, 15),
             params={
                 "velocity_range": {
                     "x": (-0.5, 0.5),
-                    "y": (-0.5, 0.5),
+                    "y": (-0.8, 0.8),
                     "z": (-0.2, 0.2),
                     "roll": (-0.35, 0.35),
                     "pitch": (-0.35, 0.35),
@@ -663,8 +695,34 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                     geom_names=WHEEL_GEOM_NAMES,
                 ),
                 "operation": "abs",
-                "ranges": (0.3, 1.2),
+                "ranges": (0.4, 1.2),
+                "shared_random": True,
+            },
+        ),
+        # Must stack on the value written by "wheel_friction" above. The built-in
+        # "add" operation reads the compile-time default, which would discard that
+        # event's shared sample and pin friction to the XML default.
+        "wheel_friction_difference": EventTermCfg(
+            func=mdp.dr.geom_friction,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    geom_names=WHEEL_GEOM_NAMES,
+                ),
+                "operation": mdp.ADD_TO_CURRENT,
+                "ranges": (-0.08, 0.08),
                 "shared_random": False,
+            },
+        ),
+        # Keep the sampled mass and inertia physically consistent. For the
+        # pseudo-inertia global scale alpha, both scale by exp(2 * alpha).
+        "body_mass_inertia": EventTermCfg(
+            func=mdp.dr.pseudo_inertia,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "alpha_range": (0.5 * math.log(0.8), 0.5 * math.log(1.2)),
             },
         ),
         "encoder_bias": EventTermCfg(
@@ -675,15 +733,43 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                 "bias_range": (-0.015, 0.015),
             },
         ),
+        "pd_gains": EventTermCfg(
+            func=mdp.randomize_pd_gains,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "stiffness_scale_range": (0.8, 1.2),
+                "damping_scale_range": (0.8, 1.2),
+            },
+        ),
         "base_com": EventTermCfg(
             func=mdp.dr.body_com_offset,
             mode="startup",
             params={
-                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY, body_names=(BASE_BODY,)),
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    body_names=(BASE_BODY,),
+                ),
                 "operation": "add",
                 "ranges": {
-                    0: (-0.025, 0.025),
-                    1: (-0.025, 0.025),
+                    0: (-0.05, 0.05),
+                    1: (-0.05, 0.05),
+                    2: (-0.05, 0.05),
+                },
+            },
+        ),
+        "link_com": EventTermCfg(
+            func=mdp.dr.body_com_offset,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    body_names=NON_BASE_BODY_NAMES,
+                ),
+                "operation": "add",
+                "ranges": {
+                    0: (-0.03, 0.03),
+                    1: (-0.03, 0.03),
                     2: (-0.03, 0.03),
                 },
             },
@@ -751,7 +837,12 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
     all_joint_cfg = SceneEntityCfg(ROBOT_ENTITY, joint_names=ALL_JOINT_NAMES)
 
     rewards = {
-        "alive": RewardTermCfg(func=mdp.is_alive, weight=0.1),
+        # Task tracking.
+        "alive": RewardTermCfg(
+            func=mdp.is_alive_before_step,
+            weight=0.1,
+            params={"disable_after_steps": 5_0000 * 24},
+        ),
         "track_linear_velocity": RewardTermCfg(
             func=mdp.track_linear_velocity,
             weight=4.0,
@@ -762,15 +853,6 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             weight=1.0,
             params={"command_name": COMMAND_NAME, "std": math.sqrt(0.25)},
         ),
-        "base_ang_vel_xy": RewardTermCfg(
-            func=mdp.base_ang_vel_xy_l2,
-            weight=-0.15,
-            params={
-                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
-                "roll_weight": 2.0,
-                "pitch_weight": 1.0,
-            },
-        ),
         "track_heading": RewardTermCfg(
             func=mdp.track_heading,
             weight=0.5,
@@ -780,23 +862,25 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 "command_norm_threshold": 0.05,
             },
         ),
-        "upright": RewardTermCfg(
-            func=mdp.upright,
-            weight=1.0,
+        # Base stabilization.
+        "lin_vel_z_l2": RewardTermCfg(func=mdp.lin_vel_z_l2, weight=-0.3),
+        "base_ang_vel_xy": RewardTermCfg(
+            func=mdp.base_ang_vel_xy_l2,
+            weight=-0.15,
             params={
-                "std": math.sqrt(0.2),
-                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY, body_names=(BASE_BODY,)),
-                "terrain_sensor_names": ("terrain_scan",) if rough else None,
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "roll_weight": 2.0,
+                "pitch_weight": 1.0,
             },
         ),
         "flat_orientation": RewardTermCfg(
             func=mdp.flat_orientation_l2,
-            weight=-3.0,
+            weight=-10.0,
             params={"asset_cfg": SceneEntityCfg(ROBOT_ENTITY)},
         ),
         "base_height": RewardTermCfg(
             func=mdp.base_height_l2,
-            weight=-50.0,
+            weight=-300.0,
             params={
                 "target_height": BASE_HEIGHT_TARGET,
                 "deadband": 0.04,
@@ -806,6 +890,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 "terrain_quantile": 0.75,
             },
         ),
+        # Leg posture and zero-command stability.
         "pose": RewardTermCfg(
             func=mdp.variable_posture,
             weight=0.5,
@@ -834,21 +919,13 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "stand_still": RewardTermCfg(
             func=mdp.stand_still,
-            weight=-2.0,
+            weight=-3.0,
             params={
                 "command_name": COMMAND_NAME,
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
             },
         ),
-        "wheel_distance": RewardTermCfg(
-            func=mdp.wheel_distance,
-            weight=-5.0,
-            params={
-                "asset_cfg": wheel_body_cfg,
-                "min_distance": WHEEL_DISTANCE_RANGE[0],
-                "max_distance": WHEEL_DISTANCE_RANGE[1],
-            },
-        ),
+        # Joint and action regularization.
         "leg_joint_pos_limits": RewardTermCfg(
             func=mdp.joint_pos_limits,
             weight=-5.0,
@@ -866,23 +943,48 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "wheel_joint_vel": RewardTermCfg(
             func=mdp.joint_vel_l2,
-            weight=-0.0005,
+            weight=-0.0002,
             params={"asset_cfg": wheel_joint_cfg},
         ),
-        "joint_acc": RewardTermCfg(
+        "leg_joint_acc": RewardTermCfg(
+            func=mdp.joint_acc_l2,
+            weight=-3.0e-7,
+            params={"asset_cfg": leg_joint_cfg},
+        ),
+        "wheel_joint_acc": RewardTermCfg(
             func=mdp.joint_acc_l2,
             weight=-1.0e-7,
-            params={"asset_cfg": all_joint_cfg},
+            params={"asset_cfg": wheel_joint_cfg},
         ),
         "joint_power": RewardTermCfg(
             func=mdp.joint_power_l1,
             weight=-5.0e-5,
             params={"asset_cfg": all_joint_cfg},
         ),
-        "action_rate": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.2),
+        "leg_action_rate": RewardTermCfg(
+            func=mdp.action_term_rate_l2,
+            weight=-0.1,
+            params={"action_term_name": "leg_pos"},
+        ),
+        "wheel_action_rate": RewardTermCfg(
+            func=mdp.action_term_rate_l2,
+            weight=-0.3,
+            params={"action_term_name": "wheel_vel"},
+        ),
+        "leg_action_smoothness": RewardTermCfg(
+            func=mdp.action_term_smoothness_l2,
+            weight=-0.01,
+            params={"action_term_name": "leg_pos"},
+        ),
+        "wheel_action_smoothness": RewardTermCfg(
+            func=mdp.action_term_smoothness_l2,
+            weight=-0.03,
+            params={"action_term_name": "wheel_vel"},
+        ),
+        # Contact safety and wheel contact quality.
         "self_collisions": RewardTermCfg(
             func=mdp.self_collision_cost,
-            weight=-0.2,
+            weight=-0.1,
             params={"sensor_name": "self_collision"},
         ),
         "illegal_ground_contact": RewardTermCfg(
@@ -892,7 +994,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "soft_landing": RewardTermCfg(
             func=mdp.soft_landing,
-            weight=-3.0e-4,
+            weight=-3.0e-5,
             params={
                 "sensor_name": "wheels_ground_contact",
                 "command_name": COMMAND_NAME,
@@ -910,6 +1012,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
     }
 
+    roughness_params = {}
     if rough:
         roughness_params = {
             "roughness_sensor_name": "terrain_scan",
@@ -923,8 +1026,36 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             ),
             "grid_shape": TERRAIN_SCAN_GRID_SHAPE,
         }
+
+    # Wheel geometry: always active on flat terrain and roughness-gated otherwise.
+    rewards["non_rough_wheel_distance"] = RewardTermCfg(
+        func=mdp.non_rough_wheel_distance,
+        weight=0.4,
+        params={
+            **roughness_params,
+            "asset_cfg": wheel_body_cfg,
+            "min_dist": WHEEL_DISTANCE_RANGE[0],
+            "max_dist": WHEEL_DISTANCE_RANGE[1],
+            "desired_dist": 0.38,
+            "std": math.sqrt(0.01),
+            "command_name": COMMAND_NAME,
+        },
+    )
+    rewards["non_rough_base_at_midpoint"] = RewardTermCfg(
+        func=mdp.non_rough_base_at_midpoint,
+        weight=0.5,
+        params={
+            **roughness_params,
+            "std": 0.05,
+            "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+            "feet_cfg": wheel_body_cfg,
+        },
+    )
+
+    if rough:
         rewards.update(
-            {   # legged motion
+            {
+                # Rough-terrain legged motion.
                 "rough_wheel_usage": RewardTermCfg(
                     func=mdp.rough_wheel_usage,
                     weight=-1.5e-2,
@@ -959,10 +1090,20 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                         "command_threshold": 0.05,
                     },
                 ),
-                # wheeled motion
+                "rough_min_wheel_distance": RewardTermCfg(
+                    func=mdp.rough_min_wheel_distance,
+                    weight=-0.5,
+                    params={
+                        **roughness_params,
+                        "asset_cfg": wheel_body_cfg,
+                        "min_dist": 0.25,
+                        "std": 0.05,
+                    },
+                ),
+                # Wheeled motion in non-rough regions of the rough environment.
                 "non_rough_wheel_lateral_symmetry": RewardTermCfg(
                     func=mdp.non_rough_wheel_lateral_symmetry,
-                    weight=0.5,
+                    weight=1,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_body_cfg,
@@ -977,25 +1118,16 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                         "asset_cfg": wheel_body_cfg,
                     },
                 ),
-                "non_rough_flat_orientation": RewardTermCfg(
-                    func=mdp.non_rough_flat_orientation,
-                    weight=-10.0,
-                    params={
-                        **roughness_params,
-                        "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
-                        "roll_weight": 2.0,
-                        "pitch_weight": 1.0,
-                    },
-                ),
+                # Wheel contact quality when standing or moving forward.
                 "standing_forward_wheel_air_time": RewardTermCfg(
                     func=mdp.standing_forward_wheel_air_time,
-                    weight=-10.0,
+                    weight=-20.0,
                     params={
                         **roughness_params,
                         "contact_sensor_name": "wheels_ground_contact",
                         "command_name": COMMAND_NAME,
                         "max_time": 0.5,
-                        "air_time_offset": 0.05,
+                        "air_time_offset": 0.2,
                     },
                 ),
             }
@@ -1012,6 +1144,16 @@ def make_terminations(*, rough: bool) -> dict[str, TerminationTermCfg]:
         "fell_over": TerminationTermCfg(
             func=mdp.bad_orientation,
             params={"limit_angle": FELL_OVER_LIMIT_ANGLE_INITIAL},
+        ),
+        "base_height_below_minimum": TerminationTermCfg(
+            func=mdp.base_height_below_minimum,
+            params={
+                "minimum_height": BASE_HEIGHT_TERMINATION_MINIMUM,
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "sensor_name": "terrain_scan" if rough else None,
+                "terrain_sample": "quantile" if rough else "center",
+                "terrain_quantile": 0.75,
+            },
         ),
         "illegal_contact": TerminationTermCfg(
             func=mdp.illegal_contact,
@@ -1071,7 +1213,22 @@ def make_curriculum(*, rough: bool) -> dict[str, CurriculumTermCfg]:
 
 def make_metrics() -> dict[str, MetricsTermCfg]:
     return {
-        "mean_action_acc": MetricsTermCfg(func=mdp.mean_action_acc),
+        "leg_action_rate": MetricsTermCfg(
+            func=mdp.action_term_rate_l2,
+            params={"action_term_name": "leg_pos"},
+        ),
+        "wheel_action_rate": MetricsTermCfg(
+            func=mdp.action_term_rate_l2,
+            params={"action_term_name": "wheel_vel"},
+        ),
+        "leg_action_smoothness": MetricsTermCfg(
+            func=mdp.action_term_smoothness_l2,
+            params={"action_term_name": "leg_pos"},
+        ),
+        "wheel_action_smoothness": MetricsTermCfg(
+            func=mdp.action_term_smoothness_l2,
+            params={"action_term_name": "wheel_vel"},
+        ),
     }
 
 
@@ -1108,6 +1265,8 @@ def make_env_cfg(
     lin_vel_representation: bool = False,
     async_depth: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    enable_depth_gaussian_blur: bool = DEPTH_GAUSSIAN_BLUR_ENABLED,
+    enable_depth_edge_noise: bool = DEPTH_EDGE_NOISE_ENABLED,
     enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
@@ -1120,6 +1279,8 @@ def make_env_cfg(
             lin_vel_representation=lin_vel_representation,
             async_depth=async_depth,
             enable_depth_distance_noise=enable_depth_distance_noise,
+            enable_depth_gaussian_blur=enable_depth_gaussian_blur,
+            enable_depth_edge_noise=enable_depth_edge_noise,
             enable_depth_dropout=enable_depth_dropout,
             depth_noise_base_m=depth_noise_base_m,
             depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,
@@ -1158,6 +1319,8 @@ def apply_play_overrides(cfg: ManagerBasedRlEnvCfg, *, rough: bool) -> None:
         depth_term = cfg.observations[DEPTH_CAMERA_NAME].terms[DEPTH_CAMERA_NAME]
         depth_term.params["enable_depth_randomization"] = False
         depth_term.params["enable_depth_distance_noise"] = False
+        depth_term.params["enable_depth_gaussian_blur"] = False
+        depth_term.params["enable_depth_edge_noise"] = False
         depth_term.params["enable_depth_dropout"] = False
         if "system_delay_range_s" in depth_term.params:
             depth_term.params["system_delay_range_s"] = (0.0, 0.0)
@@ -1203,6 +1366,8 @@ def wf_tron1b_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def wf_tron1b_rough_depth_env_cfg(
     play: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    enable_depth_gaussian_blur: bool = DEPTH_GAUSSIAN_BLUR_ENABLED,
+    enable_depth_edge_noise: bool = DEPTH_EDGE_NOISE_ENABLED,
     enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
@@ -1213,6 +1378,8 @@ def wf_tron1b_rough_depth_env_cfg(
         play=play,
         depth=True,
         enable_depth_distance_noise=enable_depth_distance_noise,
+        enable_depth_gaussian_blur=enable_depth_gaussian_blur,
+        enable_depth_edge_noise=enable_depth_edge_noise,
         enable_depth_dropout=enable_depth_dropout,
         depth_noise_base_m=depth_noise_base_m,
         depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,
@@ -1232,6 +1399,8 @@ def wf_tron1b_rough_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRl
 def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(
     play: bool = False,
     enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    enable_depth_gaussian_blur: bool = DEPTH_GAUSSIAN_BLUR_ENABLED,
+    enable_depth_edge_noise: bool = DEPTH_EDGE_NOISE_ENABLED,
     enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
     depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
     depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
@@ -1244,6 +1413,8 @@ def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(
         lin_vel_representation=True,
         async_depth=True,
         enable_depth_distance_noise=enable_depth_distance_noise,
+        enable_depth_gaussian_blur=enable_depth_gaussian_blur,
+        enable_depth_edge_noise=enable_depth_edge_noise,
         enable_depth_dropout=enable_depth_dropout,
         depth_noise_base_m=depth_noise_base_m,
         depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,

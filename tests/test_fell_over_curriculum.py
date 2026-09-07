@@ -14,7 +14,9 @@ from wheeled_legged_mjlab.assets.WF_TRON1B.wf_tron1b import (
     WF_TRON1B_XML,
 )
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
+    ALIVE_REWARD_DISABLE_AFTER_STEPS,
     BASE_HEIGHT_TARGET,
+    BASE_HEIGHT_TERMINATION_MINIMUM,
     FELL_OVER_LIMIT_ANGLE_FINAL,
     FELL_OVER_LIMIT_ANGLE_INITIAL,
     FELL_OVER_LIMIT_ANGLE_RAMP_STEPS,
@@ -34,9 +36,13 @@ from wheeled_legged_mjlab.tasks.velocity.mdp.curriculums import (
 from wheeled_legged_mjlab.tasks.velocity.mdp import rewards as reward_terms
 from wheeled_legged_mjlab.tasks.velocity.mdp.rewards import (
     base_height_l2,
+    is_alive_before_step,
     variable_posture,
 )
-from wheeled_legged_mjlab.tasks.velocity.mdp.terminations import out_of_terrain_bounds
+from wheeled_legged_mjlab.tasks.velocity.mdp.terminations import (
+    base_height_below_minimum,
+    out_of_terrain_bounds,
+)
 
 
 @dataclass
@@ -58,6 +64,17 @@ class DummyEnv:
         self.common_step_counter = common_step_counter
         self.device = "cpu"
         self.termination_manager = DummyTerminationManager()
+
+
+def alive_reward_env(common_step_counter: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        common_step_counter=common_step_counter,
+        num_envs=2,
+        device="cpu",
+        termination_manager=SimpleNamespace(
+            terminated=torch.tensor([False, True]),
+        ),
+    )
 
 
 def apply_curriculum(env: DummyEnv) -> float:
@@ -105,6 +122,32 @@ def test_training_and_play_configs_use_expected_fell_over_limits() -> None:
             FELL_OVER_LIMIT_ANGLE_FINAL,
         )
         assert play_cfg.curriculum == {}
+
+
+def test_alive_reward_stops_at_configured_step() -> None:
+    assert torch.equal(
+        is_alive_before_step(
+            alive_reward_env(ALIVE_REWARD_DISABLE_AFTER_STEPS - 1),
+            ALIVE_REWARD_DISABLE_AFTER_STEPS,
+        ),
+        torch.tensor([1.0, 0.0]),
+    )
+    assert torch.equal(
+        is_alive_before_step(
+            alive_reward_env(ALIVE_REWARD_DISABLE_AFTER_STEPS),
+            ALIVE_REWARD_DISABLE_AFTER_STEPS,
+        ),
+        torch.zeros(2),
+    )
+
+
+def test_training_configs_use_alive_reward_cutoff() -> None:
+    for cfg_factory in (wf_tron1b_flat_env_cfg, wf_tron1b_rough_env_cfg):
+        alive_cfg = cfg_factory().rewards["alive"]
+        assert alive_cfg.func is is_alive_before_step
+        assert alive_cfg.params == {
+            "disable_after_steps": ALIVE_REWARD_DISABLE_AFTER_STEPS,
+        }
 
 
 EXPECTED_TERRAIN_COLUMNS = (
@@ -319,6 +362,38 @@ def test_base_height_quantile_ignores_sparse_stepping_stone_pit_samples(
 
     assert mean_cost.item() > 0.1
     assert torch.allclose(support_cost, torch.zeros(1))
+
+    assert not base_height_below_minimum(
+        env,
+        minimum_height=0.80,
+        sensor_name="terrain_scan",
+        terrain_sample="quantile",
+        terrain_quantile=0.75,
+    ).item()
+    assert base_height_below_minimum(
+        env,
+        minimum_height=0.83,
+        sensor_name="terrain_scan",
+        terrain_sample="quantile",
+        terrain_quantile=0.75,
+    ).item()
+
+
+def test_base_height_termination_uses_the_reward_height_definition() -> None:
+    flat_cfg = wf_tron1b_flat_env_cfg().terminations["base_height_below_minimum"]
+    rough_cfg = wf_tron1b_rough_env_cfg().terminations["base_height_below_minimum"]
+
+    assert flat_cfg.func is base_height_below_minimum
+    assert flat_cfg.params["minimum_height"] == BASE_HEIGHT_TERMINATION_MINIMUM
+    assert flat_cfg.params["asset_cfg"].name == "robot"
+    assert flat_cfg.params["sensor_name"] is None
+    assert flat_cfg.params["terrain_sample"] == "center"
+    assert flat_cfg.params["terrain_quantile"] == 0.75
+    assert rough_cfg.func is base_height_below_minimum
+    assert rough_cfg.params["minimum_height"] == BASE_HEIGHT_TERMINATION_MINIMUM
+    assert rough_cfg.params["sensor_name"] == "terrain_scan"
+    assert rough_cfg.params["terrain_sample"] == "quantile"
+    assert rough_cfg.params["terrain_quantile"] == 0.75
 
 
 class DummyPostureAsset:

@@ -10,6 +10,7 @@ from mjlab.sensor import ContactSensor, RayCastSensor
 from mjlab.sensor.camera_sensor import CameraSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.utils.lab_api.math import quat_apply_inverse
+from torchvision.transforms.functional import gaussian_blur
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -153,9 +154,19 @@ class _DepthFrameProcessor:
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
+    enable_depth_gaussian_blur: bool = False,
+    enable_depth_edge_noise: bool = False,
     enable_depth_dropout: bool = False,
     noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
+    gaussian_blur_kernel_size: tuple[int, int] = (3, 3),
+    gaussian_blur_sigma: float = 1.0,
+    edge_focal_length_px: float = 28.0,
+    edge_baseline_m: float = 0.05,
+    edge_disparity_threshold_px: float = 0.5,
+    edge_band_radius_px: int = 1,
+    edge_corruption_probability: float = 0.5,
+    edge_empty_ratio: float = 0.5,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -167,6 +178,14 @@ class _DepthFrameProcessor:
       calibration_bias_range_m=calibration_bias_range_m,
       noise_base_m=noise_base_m,
       noise_quadratic_coeff=noise_quadratic_coeff,
+      gaussian_blur_kernel_size=gaussian_blur_kernel_size,
+      gaussian_blur_sigma=gaussian_blur_sigma,
+      edge_focal_length_px=edge_focal_length_px,
+      edge_baseline_m=edge_baseline_m,
+      edge_disparity_threshold_px=edge_disparity_threshold_px,
+      edge_band_radius_px=edge_band_radius_px,
+      edge_corruption_probability=edge_corruption_probability,
+      edge_empty_ratio=edge_empty_ratio,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,
@@ -201,6 +220,8 @@ class _DepthFrameProcessor:
         original_invalid = original_invalid.index_select(0, env_ids)
         scale = self._calibration_scale.index_select(0, env_ids)
         bias_m = self._calibration_bias_m.index_select(0, env_ids)
+      edge_reference_depth_m = depth_m
+      edge_reference_invalid = original_invalid
       depth_m = depth_m * scale + bias_m
       if enable_depth_distance_noise:
         depth_for_sigma = torch.nan_to_num(
@@ -211,6 +232,37 @@ class _DepthFrameProcessor:
         ).clamp(min=depth_min_m, max=depth_max_m)
         sigma = noise_base_m + noise_quadratic_coeff * depth_for_sigma.square()
         depth_m = depth_m + sigma * torch.randn_like(depth_m)
+      if enable_depth_gaussian_blur:
+        depth_for_blur = torch.nan_to_num(
+          depth_m,
+          nan=depth_max_m,
+          posinf=depth_max_m,
+          neginf=depth_max_m,
+        ).masked_fill(original_invalid, depth_max_m)
+        depth_for_blur = torch.where(
+          depth_for_blur >= depth_min_m,
+          depth_for_blur,
+          torch.full_like(depth_for_blur, depth_max_m),
+        ).clamp(max=depth_max_m)
+        depth_m = gaussian_blur(
+          depth_for_blur.unsqueeze(1),
+          kernel_size=list(gaussian_blur_kernel_size),
+          sigma=[gaussian_blur_sigma, gaussian_blur_sigma],
+        ).squeeze(1)
+      if enable_depth_edge_noise:
+        depth_m = self._apply_depth_edge_noise(
+          depth_m,
+          reference_depth_m=edge_reference_depth_m,
+          reference_invalid=edge_reference_invalid,
+          depth_min_m=depth_min_m,
+          depth_max_m=depth_max_m,
+          focal_length_px=edge_focal_length_px,
+          baseline_m=edge_baseline_m,
+          disparity_threshold_px=edge_disparity_threshold_px,
+          band_radius_px=edge_band_radius_px,
+          corruption_probability=edge_corruption_probability,
+          empty_ratio=edge_empty_ratio,
+        )
       if enable_depth_dropout and dropout_probability > 0.0:
         dropout_mask = self._structured_dropout_mask(
           batch_size=depth_m.shape[0],
@@ -229,6 +281,117 @@ class _DepthFrameProcessor:
 
     depth_m = depth_m.masked_fill(original_invalid, 0.0)
     return _encode_invalid_depth(depth_m)
+
+  @staticmethod
+  def _apply_depth_edge_noise(
+    depth_m: torch.Tensor,
+    *,
+    reference_depth_m: torch.Tensor,
+    reference_invalid: torch.Tensor,
+    depth_min_m: float,
+    depth_max_m: float,
+    focal_length_px: float,
+    baseline_m: float,
+    disparity_threshold_px: float,
+    band_radius_px: int,
+    corruption_probability: float,
+    empty_ratio: float,
+  ) -> torch.Tensor:
+    if corruption_probability <= 0.0:
+      return depth_m
+
+    valid = ~reference_invalid
+    safe_min_m = max(depth_min_m, torch.finfo(reference_depth_m.dtype).eps)
+    reference_depth_m = torch.nan_to_num(
+      reference_depth_m,
+      nan=depth_max_m,
+      posinf=depth_max_m,
+      neginf=safe_min_m,
+    ).clamp(min=safe_min_m, max=depth_max_m)
+    disparity = focal_length_px * baseline_m / reference_depth_m
+
+    edge_band = torch.zeros_like(valid)
+    horizontal_edge = (
+      valid[..., :, :-1]
+      & valid[..., :, 1:]
+      & (
+        torch.abs(disparity[..., :, :-1] - disparity[..., :, 1:])
+        > disparity_threshold_px
+      )
+    )
+    edge_band[..., :, :-1] |= horizontal_edge
+    edge_band[..., :, 1:] |= horizontal_edge
+    vertical_edge = (
+      valid[..., :-1, :]
+      & valid[..., 1:, :]
+      & (
+        torch.abs(disparity[..., :-1, :] - disparity[..., 1:, :])
+        > disparity_threshold_px
+      )
+    )
+    edge_band[..., :-1, :] |= vertical_edge
+    edge_band[..., 1:, :] |= vertical_edge
+
+    for _ in range(band_radius_px - 1):
+      previous_band = edge_band
+      expanded_band = previous_band.clone()
+      expanded_band[..., 1:, :] |= previous_band[..., :-1, :]
+      expanded_band[..., :-1, :] |= previous_band[..., 1:, :]
+      expanded_band[..., :, 1:] |= previous_band[..., :, :-1]
+      expanded_band[..., :, :-1] |= previous_band[..., :, 1:]
+      edge_band = expanded_band
+
+    corrupt_mask = edge_band & (
+      torch.rand_like(depth_m) < corruption_probability
+    )
+    empty_mask = corrupt_mask & (torch.rand_like(depth_m) < empty_ratio)
+    replace_mask = corrupt_mask & ~empty_mask
+
+    replacement = depth_m
+    best_score = torch.full_like(depth_m, -1.0)
+    height, width = depth_m.shape[-2:]
+    for distance in range(1, band_radius_px + 1):
+      for row_offset, col_offset in (
+        (-distance, 0),
+        (distance, 0),
+        (0, -distance),
+        (0, distance),
+      ):
+        shifts = (-row_offset, -col_offset)
+        candidate_disparity = torch.roll(
+          disparity,
+          shifts=shifts,
+          dims=(-2, -1),
+        )
+        candidate_valid = torch.roll(valid, shifts=shifts, dims=(-2, -1))
+        candidate_depth = torch.roll(depth_m, shifts=shifts, dims=(-2, -1))
+        in_bounds = torch.ones_like(valid)
+        if row_offset < 0:
+          in_bounds[..., : -row_offset, :] = False
+        elif row_offset > 0:
+          in_bounds[..., height - row_offset :, :] = False
+        if col_offset < 0:
+          in_bounds[..., :, : -col_offset] = False
+        elif col_offset > 0:
+          in_bounds[..., :, width - col_offset :] = False
+
+        is_cross_edge_neighbor = (
+          replace_mask
+          & valid
+          & candidate_valid
+          & in_bounds
+          & (
+            torch.abs(disparity - candidate_disparity)
+            > disparity_threshold_px
+          )
+        )
+        score = torch.rand_like(depth_m)
+        take_candidate = is_cross_edge_neighbor & (score > best_score)
+        replacement = torch.where(take_candidate, candidate_depth, replacement)
+        best_score = torch.where(take_candidate, score, best_score)
+
+    depth_m = torch.where(empty_mask, torch.zeros_like(depth_m), depth_m)
+    return torch.where(replace_mask & (best_score >= 0.0), replacement, depth_m)
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     if not self._randomization_enabled or self._calibration_scale is None:
@@ -416,6 +579,14 @@ class _DepthFrameProcessor:
     calibration_bias_range_m: tuple[float, float],
     noise_base_m: float,
     noise_quadratic_coeff: float,
+    gaussian_blur_kernel_size: tuple[int, int],
+    gaussian_blur_sigma: float,
+    edge_focal_length_px: float,
+    edge_baseline_m: float,
+    edge_disparity_threshold_px: float,
+    edge_band_radius_px: int,
+    edge_corruption_probability: float,
+    edge_empty_ratio: float,
     dropout_probability: float,
     dropout_patch_count_range: tuple[int, int],
     dropout_area_fraction_range: tuple[float, float],
@@ -439,6 +610,48 @@ class _DepthFrameProcessor:
       raise ValueError(
         "noise_quadratic_coeff must be finite and non-negative, "
         f"got {noise_quadratic_coeff}"
+      )
+    if len(gaussian_blur_kernel_size) != 2 or any(
+      size <= 0 or size % 2 == 0 for size in gaussian_blur_kernel_size
+    ):
+      raise ValueError(
+        "gaussian_blur_kernel_size must contain two positive odd values, "
+        f"got {gaussian_blur_kernel_size}"
+      )
+    if not math.isfinite(gaussian_blur_sigma) or gaussian_blur_sigma <= 0.0:
+      raise ValueError(
+        "gaussian_blur_sigma must be finite and positive, "
+        f"got {gaussian_blur_sigma}"
+      )
+    if not math.isfinite(edge_focal_length_px) or edge_focal_length_px <= 0.0:
+      raise ValueError(
+        "edge_focal_length_px must be finite and positive, "
+        f"got {edge_focal_length_px}"
+      )
+    if not math.isfinite(edge_baseline_m) or edge_baseline_m <= 0.0:
+      raise ValueError(
+        f"edge_baseline_m must be finite and positive, got {edge_baseline_m}"
+      )
+    if (
+      not math.isfinite(edge_disparity_threshold_px)
+      or edge_disparity_threshold_px <= 0.0
+    ):
+      raise ValueError(
+        "edge_disparity_threshold_px must be finite and positive, "
+        f"got {edge_disparity_threshold_px}"
+      )
+    if edge_band_radius_px not in (1, 2):
+      raise ValueError(
+        f"edge_band_radius_px must be 1 or 2, got {edge_band_radius_px}"
+      )
+    if not 0.0 <= edge_corruption_probability <= 1.0:
+      raise ValueError(
+        "edge_corruption_probability must be in [0, 1], "
+        f"got {edge_corruption_probability}"
+      )
+    if not 0.0 <= edge_empty_ratio <= 1.0:
+      raise ValueError(
+        f"edge_empty_ratio must be in [0, 1], got {edge_empty_ratio}"
       )
     if not 0.0 <= dropout_probability <= 1.0:
       raise ValueError(
@@ -485,9 +698,19 @@ class DepthBuffer:
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
+    enable_depth_gaussian_blur: bool = False,
+    enable_depth_edge_noise: bool = False,
     enable_depth_dropout: bool = False,
     noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
+    gaussian_blur_kernel_size: tuple[int, int] = (3, 3),
+    gaussian_blur_sigma: float = 1.0,
+    edge_focal_length_px: float = 28.0,
+    edge_baseline_m: float = 0.05,
+    edge_disparity_threshold_px: float = 0.5,
+    edge_band_radius_px: int = 1,
+    edge_corruption_probability: float = 0.5,
+    edge_empty_ratio: float = 0.5,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -527,9 +750,19 @@ class DepthBuffer:
       calibration_scale_range=calibration_scale_range,
       calibration_bias_range_m=calibration_bias_range_m,
       enable_depth_distance_noise=enable_depth_distance_noise,
+      enable_depth_gaussian_blur=enable_depth_gaussian_blur,
+      enable_depth_edge_noise=enable_depth_edge_noise,
       enable_depth_dropout=enable_depth_dropout,
       noise_base_m=noise_base_m,
       noise_quadratic_coeff=noise_quadratic_coeff,
+      gaussian_blur_kernel_size=gaussian_blur_kernel_size,
+      gaussian_blur_sigma=gaussian_blur_sigma,
+      edge_focal_length_px=edge_focal_length_px,
+      edge_baseline_m=edge_baseline_m,
+      edge_disparity_threshold_px=edge_disparity_threshold_px,
+      edge_band_radius_px=edge_band_radius_px,
+      edge_corruption_probability=edge_corruption_probability,
+      edge_empty_ratio=edge_empty_ratio,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,
@@ -614,9 +847,19 @@ class AsyncDepthBuffer:
     calibration_scale_range: tuple[float, float] = (1.0, 1.0),
     calibration_bias_range_m: tuple[float, float] = (0.0, 0.0),
     enable_depth_distance_noise: bool = True,
+    enable_depth_gaussian_blur: bool = False,
+    enable_depth_edge_noise: bool = False,
     enable_depth_dropout: bool = False,
     noise_base_m: float = 0.001,
     noise_quadratic_coeff: float = 0.005,
+    gaussian_blur_kernel_size: tuple[int, int] = (3, 3),
+    gaussian_blur_sigma: float = 1.0,
+    edge_focal_length_px: float = 28.0,
+    edge_baseline_m: float = 0.05,
+    edge_disparity_threshold_px: float = 0.5,
+    edge_band_radius_px: int = 1,
+    edge_corruption_probability: float = 0.5,
+    edge_empty_ratio: float = 0.5,
     dropout_probability: float = 0.0,
     dropout_patch_count_range: tuple[int, int] = (1, 1),
     dropout_area_fraction_range: tuple[float, float] = (0.0, 0.0),
@@ -679,9 +922,19 @@ class AsyncDepthBuffer:
       calibration_scale_range=calibration_scale_range,
       calibration_bias_range_m=calibration_bias_range_m,
       enable_depth_distance_noise=enable_depth_distance_noise,
+      enable_depth_gaussian_blur=enable_depth_gaussian_blur,
+      enable_depth_edge_noise=enable_depth_edge_noise,
       enable_depth_dropout=enable_depth_dropout,
       noise_base_m=noise_base_m,
       noise_quadratic_coeff=noise_quadratic_coeff,
+      gaussian_blur_kernel_size=gaussian_blur_kernel_size,
+      gaussian_blur_sigma=gaussian_blur_sigma,
+      edge_focal_length_px=edge_focal_length_px,
+      edge_baseline_m=edge_baseline_m,
+      edge_disparity_threshold_px=edge_disparity_threshold_px,
+      edge_band_radius_px=edge_band_radius_px,
+      edge_corruption_probability=edge_corruption_probability,
+      edge_empty_ratio=edge_empty_ratio,
       dropout_probability=dropout_probability,
       dropout_patch_count_range=dropout_patch_count_range,
       dropout_area_fraction_range=dropout_area_fraction_range,
@@ -965,16 +1218,43 @@ def _normalize_to_unit_range(
   return torch.clamp(scaled, -1.0, 1.0)
 
 
+def _normalized_ratio_to_default(
+  current: torch.Tensor,
+  default: torch.Tensor,
+  scale_range: tuple[float, float],
+) -> torch.Tensor:
+  ratio = current / default
+  return _normalize_to_unit_range(ratio, *scale_range)
+
+
 def domain_randomization_delta_quantity(
   env: ManagerBasedRlEnv,
   wheel_friction_event: str = "wheel_friction",
+  wheel_friction_difference_event: str = "wheel_friction_difference",
   encoder_bias_event: str = "encoder_bias",
   base_com_event: str = "base_com",
+  link_com_event: str = "link_com",
+  mass_inertia_event: str = "body_mass_inertia",
+  pd_gains_event: str = "pd_gains",
 ) -> torch.Tensor:
-  """Normalized domain-randomization quantities visible to the policy."""
+  """Return normalized domain-randomization quantities in a stable order.
+
+  The WF-TRON1B layout is wheel friction (2), encoder bias (8), base COM
+  offset (3), non-base body COM offsets (24), body mass scale (9),
+  principal-inertia scale (27), leg Kp scale (6), and leg Kd plus wheel Kv
+  scale (8), for 87 values in total.
+  """
   wheel_friction_cfg = env.event_manager.get_term_cfg(wheel_friction_event)
   friction_asset_cfg: SceneEntityCfg = wheel_friction_cfg.params["asset_cfg"]
-  wheel_friction_range = wheel_friction_cfg.params["ranges"]
+  wheel_friction_common_range = wheel_friction_cfg.params["ranges"]
+  wheel_friction_difference_cfg = env.event_manager.get_term_cfg(
+    wheel_friction_difference_event
+  )
+  wheel_friction_difference_range = wheel_friction_difference_cfg.params["ranges"]
+  wheel_friction_range = (
+    wheel_friction_common_range[0] + wheel_friction_difference_range[0],
+    wheel_friction_common_range[1] + wheel_friction_difference_range[1],
+  )
   friction_asset = env.scene[friction_asset_cfg.name]
   wheel_geom_ids = friction_asset.indexing.geom_ids[friction_asset_cfg.geom_ids]
   wheel_friction = env.sim.model.geom_friction[:, wheel_geom_ids, 0]
@@ -995,24 +1275,82 @@ def domain_randomization_delta_quantity(
     encoder_bias_range[1],
   )
 
-  base_com_cfg = env.event_manager.get_term_cfg(base_com_event)
-  base_com_asset_cfg: SceneEntityCfg = base_com_cfg.params["asset_cfg"]
-  base_com_ranges = base_com_cfg.params["ranges"]
-  base_com_asset = env.scene[base_com_asset_cfg.name]
-  base_body_ids = base_com_asset.indexing.body_ids[base_com_asset_cfg.body_ids]
-  current_body_ipos = env.sim.model.body_ipos[:, base_body_ids, :].reshape(
-    env.num_envs, -1
+  com_deltas = []
+  for com_event in (base_com_event, link_com_event):
+    com_cfg = env.event_manager.get_term_cfg(com_event)
+    com_asset_cfg: SceneEntityCfg = com_cfg.params["asset_cfg"]
+    com_ranges = com_cfg.params["ranges"]
+    com_asset = env.scene[com_asset_cfg.name]
+    com_body_ids = com_asset.indexing.body_ids[com_asset_cfg.body_ids]
+    current_body_ipos = env.sim.model.body_ipos[:, com_body_ids, :]
+    default_body_ipos = env.sim.get_default_field("body_ipos")[
+      com_body_ids, :
+    ].unsqueeze(0)
+    com_delta = current_body_ipos - default_body_ipos
+    normalized_com_delta = torch.stack(
+      [
+        _normalize_to_unit_range(com_delta[..., axis], *com_ranges[axis])
+        for axis in range(3)
+      ],
+      dim=-1,
+    ).reshape(env.num_envs, -1)
+    com_deltas.append(normalized_com_delta)
+
+  mass_inertia_cfg = env.event_manager.get_term_cfg(mass_inertia_event)
+  mass_inertia_asset_cfg: SceneEntityCfg = mass_inertia_cfg.params["asset_cfg"]
+  mass_inertia_asset = env.scene[mass_inertia_asset_cfg.name]
+  body_ids = mass_inertia_asset.indexing.body_ids[mass_inertia_asset_cfg.body_ids]
+  alpha_range = mass_inertia_cfg.params["alpha_range"]
+  mass_inertia_scale_range = tuple(math.exp(2.0 * alpha) for alpha in alpha_range)
+
+  body_mass_scale = _normalized_ratio_to_default(
+    env.sim.model.body_mass[:, body_ids],
+    env.sim.get_default_field("body_mass")[body_ids],
+    mass_inertia_scale_range,
   )
-  default_body_ipos = env.sim.get_default_field("body_ipos")[base_body_ids, :].reshape(
-    1, -1
-  )
-  base_com_delta = current_body_ipos - default_body_ipos
-  base_com_delta = torch.stack(
-    [
-      _normalize_to_unit_range(base_com_delta[:, axis], *base_com_ranges[axis])
-      for axis in range(3)
-    ],
+  body_inertia_scale = _normalized_ratio_to_default(
+    env.sim.model.body_inertia[:, body_ids, :],
+    env.sim.get_default_field("body_inertia")[body_ids, :],
+    mass_inertia_scale_range,
+  ).reshape(env.num_envs, -1)
+
+  pd_gains_cfg = env.event_manager.get_term_cfg(pd_gains_event)
+  pd_asset_cfg: SceneEntityCfg = pd_gains_cfg.params["asset_cfg"]
+  pd_asset = env.scene[pd_asset_cfg.name]
+  stiffness_scale_range = pd_gains_cfg.params["stiffness_scale_range"]
+  damping_scale_range = pd_gains_cfg.params["damping_scale_range"]
+  default_gainprm = env.sim.get_default_field("actuator_gainprm")
+  default_biasprm = env.sim.get_default_field("actuator_biasprm")
+  stiffness_scales = []
+  damping_scales = []
+  for actuator in pd_asset.actuators:
+    ctrl_ids = actuator.global_ctrl_ids
+    if actuator.command_field == "position":
+      stiffness_scales.append(
+        _normalized_ratio_to_default(
+          env.sim.model.actuator_gainprm[:, ctrl_ids, 0],
+          default_gainprm[ctrl_ids, 0],
+          stiffness_scale_range,
+        )
+      )
+    if actuator.command_field in ("position", "velocity"):
+      damping_scales.append(
+        _normalized_ratio_to_default(
+          env.sim.model.actuator_biasprm[:, ctrl_ids, 2],
+          default_biasprm[ctrl_ids, 2],
+          damping_scale_range,
+        )
+      )
+
+  return torch.cat(
+    (
+      wheel_friction,
+      encoder_bias,
+      *com_deltas,
+      body_mass_scale,
+      body_inertia_scale,
+      *stiffness_scales,
+      *damping_scales,
+    ),
     dim=1,
   )
-
-  return torch.cat((wheel_friction, encoder_bias, base_com_delta), dim=1)
