@@ -139,7 +139,7 @@ DEPTH_CAMERA_PITCH_DELTA_RANGE_RAD = (-math.radians(1.0), math.radians(1.0))
 DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG = (-1.0, 1.0)
 ROUGHNESS_GATE_THRESHOLD_INITIAL = 0.2
 ROUGHNESS_GATE_THRESHOLD_FINAL = 0.75
-ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 5_000 * 24
+ROUGHNESS_GATE_THRESHOLD_RAMP_STEPS = 10_000 * 24
 FELL_OVER_LIMIT_ANGLE_INITIAL = math.radians(65.0)
 FELL_OVER_LIMIT_ANGLE_FINAL = math.radians(85.0)
 FELL_OVER_LIMIT_ANGLE_RAMP_STEPS = 5_000 * 24
@@ -963,22 +963,22 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
         "leg_action_rate": RewardTermCfg(
             func=mdp.action_term_rate_l2,
-            weight=-0.3,
+            weight=-0.1,
             params={"action_term_name": "leg_pos"},
         ),
         "wheel_action_rate": RewardTermCfg(
             func=mdp.action_term_rate_l2,
-            weight=-0.1,
+            weight=-0.3,
             params={"action_term_name": "wheel_vel"},
         ),
         "leg_action_smoothness": RewardTermCfg(
             func=mdp.action_term_smoothness_l2,
-            weight=-0.03,
+            weight=-0.01,
             params={"action_term_name": "leg_pos"},
         ),
         "wheel_action_smoothness": RewardTermCfg(
             func=mdp.action_term_smoothness_l2,
-            weight=-0.01,
+            weight=-0.03,
             params={"action_term_name": "wheel_vel"},
         ),
         # Contact safety and wheel contact quality.
@@ -1103,7 +1103,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
                 # Wheeled motion in non-rough regions of the rough environment.
                 "non_rough_wheel_lateral_symmetry": RewardTermCfg(
                     func=mdp.non_rough_wheel_lateral_symmetry,
-                    weight=0.5,
+                    weight=1,
                     params={
                         **roughness_params,
                         "asset_cfg": wheel_body_cfg,
