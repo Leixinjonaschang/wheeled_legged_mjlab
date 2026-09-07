@@ -4,13 +4,17 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import torch
-
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import BuiltinSensor, ContactSensor, RayCastSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.tasks.velocity.mdp.terrain_utils import terrain_normal_from_sensors
-from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse, wrap_to_pi
+from mjlab.utils.lab_api.math import (
+  quat_apply,
+  quat_apply_inverse,
+  wrap_to_pi,
+  yaw_quat,
+)
 from mjlab.utils.lab_api.string import (
   resolve_matching_names_values,
 )
@@ -210,11 +214,6 @@ def _terrain_roughness_from_sensor(
   if log:
     log_data = env.extras.setdefault("log", {})
     log_data["Metrics/roughness_mean"] = stats.foot_roughness.mean()
-    if stats.foot_roughness.shape[1] >= 2:
-      log_data["Metrics/roughness_left_mean"] = stats.foot_roughness[:, 0].mean()
-      log_data["Metrics/roughness_right_mean"] = stats.foot_roughness[:, 1].mean()
-    log_data["Metrics/roughness_max_mean"] = stats.robot_roughness.mean()
-    log_data["Metrics/roughness_lambda_mean"] = stats.gate.mean()
     log_data["Metrics/roughness_jump_over_R_mean"] = (
       stats.jump / wheel_radius
     ).mean()
@@ -250,7 +249,7 @@ def track_linear_velocity(
 ) -> torch.Tensor:
   """Reward for tracking the commanded base linear velocity.
 
-  The commanded z velocity is assumed to be zero.
+  Only the commanded x and y velocities are tracked.
   """
   asset: Entity = env.scene[asset_cfg.name]
   command_term = env.command_manager.get_term(command_name)
@@ -264,9 +263,7 @@ def track_linear_velocity(
     command_xy = command[:, :2]
     actual = asset.data.root_link_lin_vel_b
   xy_error = torch.sum(torch.square(command_xy - actual[:, :2]), dim=1)
-  z_error = torch.square(actual[:, 2])
-  lin_vel_error = xy_error + z_error
-  return torch.exp(-lin_vel_error / std**2)
+  return torch.exp(-xy_error / std**2)
 
 
 def track_angular_velocity(
@@ -282,6 +279,15 @@ def track_angular_velocity(
   actual = asset.data.root_link_ang_vel_b
   z_error = torch.square(command[:, 2] - actual[:, 2])
   return torch.exp(-z_error / std**2)
+
+
+def lin_vel_z_l2(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize vertical base linear velocity in the body frame."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.square(asset.data.root_link_lin_vel_b[:, 2])
 
 
 def base_ang_vel_xy_l2(
@@ -322,20 +328,20 @@ def stand_still(
   ang_threshold: float = 0.05,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Penalize drifting when the sampled velocity command is near zero."""
+  """Penalize linear and angular motion when their commands are near zero."""
   asset: Entity = env.scene[asset_cfg.name]
   command = env.command_manager.get_command(command_name)
   assert command is not None, f"Command '{command_name}' not found."
 
-  lin_command_norm = torch.norm(command[:, :2], dim=1)
-  ang_command_norm = torch.abs(command[:, 2])
-  still_command = (lin_command_norm < lin_threshold) & (
-    ang_command_norm < ang_threshold
+  lin_drift = torch.sum(
+    torch.abs(asset.data.root_link_lin_vel_w[:, :2])
+    * (torch.norm(command[:, :2], dim=1, keepdim=True) < lin_threshold),
+    dim=1,
   )
-
-  lin_drift = torch.sum(torch.abs(asset.data.root_link_lin_vel_w[:, :2]), dim=1)
-  yaw_drift = torch.abs(asset.data.root_link_ang_vel_w[:, 2])
-  return (lin_drift + yaw_drift) * still_command.float()
+  yaw_drift = torch.abs(asset.data.root_link_ang_vel_w[:, 2]) * (
+    torch.abs(command[:, 2]) < ang_threshold
+  )
+  return lin_drift + yaw_drift
 
 
 class upright:
@@ -478,27 +484,22 @@ def angular_momentum_penalty(
   angmom_sensor: BuiltinSensor = env.scene[sensor_name]
   angmom = angmom_sensor.data
   angmom_magnitude_sq = torch.sum(torch.square(angmom), dim=-1)
-  angmom_magnitude = torch.sqrt(angmom_magnitude_sq)
-  env.extras["log"]["Metrics/angular_momentum_mean"] = torch.mean(angmom_magnitude)
   return angmom_magnitude_sq
 
 
-def base_height_l2(
+def base_height(
   env: ManagerBasedRlEnv,
-  target_height: float,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
   sensor_name: str | None = None,
   terrain_sample: str = "mean",
   terrain_quantile: float = 0.5,
-  deadband: float = 0.0,
 ) -> torch.Tensor:
-  """Penalize base height error outside a symmetric deadband using an L2 kernel.
+  """Return base height in the world frame or relative to local terrain.
 
   When a terrain raycast sensor is provided, height is measured relative to the
   local terrain under the scan instead of world z. ``terrain_sample="quantile"``
   uses a height quantile over the scan and is robust to sparse deep holes such
-  as stepping-stone pits. Errors inside the deadband produce zero cost; only
-  the excess error is penalized.
+  as stepping-stone pits.
   """
   asset: Entity = env.scene[asset_cfg.name]
   base_z = asset.data.root_link_pos_w[:, 2]
@@ -508,7 +509,7 @@ def base_height_l2(
     sensor = env.scene[sensor_name]
     if not isinstance(sensor, RayCastSensor):
       raise TypeError(
-        "base_height_l2 terrain-relative mode requires a RayCastSensor, "
+        "base_height terrain-relative mode requires a RayCastSensor, "
         f"got {type(sensor).__name__}"
       )
     data = sensor.data
@@ -537,8 +538,28 @@ def base_height_l2(
     else:
       raise ValueError(f"Unsupported terrain_sample: {terrain_sample}")
     base_height = base_z - ground_z
+  return base_height
+
+
+def base_height_l2(
+  env: ManagerBasedRlEnv,
+  target_height: float,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  sensor_name: str | None = None,
+  terrain_sample: str = "mean",
+  terrain_quantile: float = 0.5,
+  deadband: float = 0.0,
+) -> torch.Tensor:
+  """Penalize base height error outside a symmetric deadband using an L2 kernel."""
+  measured_height = base_height(
+    env,
+    asset_cfg=asset_cfg,
+    sensor_name=sensor_name,
+    terrain_sample=terrain_sample,
+    terrain_quantile=terrain_quantile,
+  )
   height_error = torch.clamp(
-    torch.abs(base_height - target_height) - deadband,
+    torch.abs(measured_height - target_height) - deadband,
     min=0.0,
   )
   return torch.square(height_error)
@@ -554,6 +575,103 @@ def joint_power_l1(
     :, asset_cfg.joint_ids
   ]
   return torch.sum(torch.abs(joint_power), dim=1)
+
+
+def action_rate_l2(
+  env: ManagerBasedRlEnv,
+  leg_coefficient: float = 1.0,
+  wheel_coefficient: float = 1.0,
+) -> torch.Tensor:
+  """Sum raw action-rate costs with separate leg/wheel multipliers.
+
+  Coefficients multiply the squared costs, before the reward term's weight.
+  """
+  return (
+    leg_coefficient * action_term_rate_l2(env, "leg_pos")
+    + wheel_coefficient * action_term_rate_l2(env, "wheel_vel")
+  )
+
+
+class ActionSmoothnessPenalty:
+  """Penalize raw action second differences with leg/wheel cost multipliers."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg, env
+    self.prev_prev_action: torch.Tensor | None = None
+    self.prev_action: torch.Tensor | None = None
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    leg_coefficient: float = 1.0,
+    wheel_coefficient: float = 1.0,
+  ) -> torch.Tensor:
+    current_action = env.action_manager.action.clone()
+    if self.prev_action is None:
+      self.prev_action = current_action
+      return torch.zeros(current_action.shape[0], device=current_action.device)
+    if self.prev_prev_action is None:
+      self.prev_prev_action = self.prev_action
+      self.prev_action = current_action
+      return torch.zeros(current_action.shape[0], device=current_action.device)
+
+    action_second_diff = current_action - 2 * self.prev_action + self.prev_prev_action
+    leg_slice = _action_term_slice(env, "leg_pos")
+    wheel_slice = _action_term_slice(env, "wheel_vel")
+    penalty = (
+      leg_coefficient * torch.sum(torch.square(action_second_diff[:, leg_slice]), dim=1)
+      + wheel_coefficient
+      * torch.sum(torch.square(action_second_diff[:, wheel_slice]), dim=1)
+    )
+    self.prev_prev_action = self.prev_action
+    self.prev_action = current_action
+    penalty[env.episode_length_buf < 3] = 0.0
+    return penalty
+
+  def reset(self, env_ids: torch.Tensor | slice | None) -> None:
+    if self.prev_action is None or self.prev_prev_action is None:
+      return
+    if env_ids is None:
+      env_ids = slice(None)
+    self.prev_action[env_ids] = 0.0
+    self.prev_prev_action[env_ids] = 0.0
+
+
+def _action_term_slice(env: ManagerBasedRlEnv, action_term_name: str) -> slice:
+  start = 0
+  for name in env.action_manager.active_terms:
+    action_dim = env.action_manager.get_term(name).action_dim
+    if name == action_term_name:
+      return slice(start, start + action_dim)
+    start += action_dim
+  raise ValueError(f"Unknown action term: {action_term_name}")
+
+
+def action_term_rate_l2(
+  env: ManagerBasedRlEnv, action_term_name: str
+) -> torch.Tensor:
+  """Return the squared action rate summed over one action term."""
+  term_slice = _action_term_slice(env, action_term_name)
+  action_rate = (
+    env.action_manager.action[:, term_slice]
+    - env.action_manager.prev_action[:, term_slice]
+  )
+  return torch.sum(torch.square(action_rate), dim=1)
+
+
+def action_term_smoothness_l2(
+  env: ManagerBasedRlEnv, action_term_name: str
+) -> torch.Tensor:
+  """Return the squared second action difference for one action term."""
+  term_slice = _action_term_slice(env, action_term_name)
+  action_second_diff = (
+    env.action_manager.action[:, term_slice]
+    - 2 * env.action_manager.prev_action[:, term_slice]
+    + env.action_manager.prev_prev_action[:, term_slice]
+  )
+  penalty = torch.sum(torch.square(action_second_diff), dim=1)
+  penalty[env.episode_length_buf < 3] = 0.0
+  return penalty
 
 
 def _body_positions_in_base_frame(
@@ -692,17 +810,197 @@ def non_rough_flat_orientation(
 
 def wheel_distance(
   env: ManagerBasedRlEnv,
-  min_distance: float,
-  max_distance: float,
+  min_dist: float,
+  max_dist: float,
+  desired_dist: float,
+  std: float,
   asset_cfg: SceneEntityCfg,
+  command_name: str = "twist",
+  vy_max: float = 0.8,
+  decay_power: float = 1.0,
 ) -> torch.Tensor:
-  """Penalize wheel distance outside an allowed range in the horizontal plane."""
-  wheel_pos_b = _body_positions_in_base_frame(env, asset_cfg)
-  distance = torch.norm(wheel_pos_b[:, 0, :2] - wheel_pos_b[:, 1, :2], dim=1)
-  return torch.clip(min_distance - distance, min=0.0) + torch.clip(
-    distance - max_distance,
-    min=0.0,
+  """Reward lateral wheel spacing, with desired spacing relaxed for side motion."""
+  asset: Entity = env.scene[asset_cfg.name]
+
+  left_idx = asset_cfg.body_ids[0]
+  right_idx = asset_cfg.body_ids[1]
+  heading_aligned = yaw_quat(asset.data.root_link_quat_w)
+
+  left_pos = quat_apply_inverse(
+    heading_aligned, asset.data.body_link_pos_w[:, left_idx]
   )
+  right_pos = quat_apply_inverse(
+    heading_aligned, asset.data.body_link_pos_w[:, right_idx]
+  )
+
+  distance_y = torch.abs(left_pos[:, 1] - right_pos[:, 1])
+  d_min = torch.where(
+    distance_y < min_dist, min_dist - distance_y, torch.zeros_like(distance_y)
+  )
+  d_max = torch.where(
+    distance_y > max_dist, distance_y - max_dist, torch.zeros_like(distance_y)
+  )
+
+  range_error = d_min + d_max
+  range_reward = torch.exp(-torch.square(range_error) / std**2)
+  desired_reward = torch.exp(-torch.square(distance_y - desired_dist) / std**2)
+
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  normalized_vy = torch.clamp(torch.abs(command[:, 1]) / vy_max, 0.0, 1.0)
+  desired_weight = (1.0 - normalized_vy) ** decay_power
+
+  return (range_reward + desired_weight * desired_reward) / (1.0 + desired_weight)
+
+
+def non_rough_wheel_distance(
+  env: ManagerBasedRlEnv,
+  min_dist: float,
+  max_dist: float,
+  desired_dist: float,
+  std: float,
+  asset_cfg: SceneEntityCfg,
+  command_name: str = "twist",
+  vy_max: float = 0.8,
+  decay_power: float = 1.0,
+  roughness_sensor_name: str | None = None,
+  wheel_radius: float = 0.127,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
+  grid_shape: tuple[int, int] | None = None,
+) -> torch.Tensor:
+  """Reward wheel spacing only when terrain is not rough."""
+  reward = wheel_distance(
+    env,
+    min_dist,
+    max_dist,
+    desired_dist,
+    std,
+    asset_cfg,
+    command_name,
+    vy_max,
+    decay_power,
+  )
+  if roughness_sensor_name is None:
+    return reward
+
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
+  )
+  non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
+  return non_rough_active * reward
+
+
+def rough_min_wheel_distance(
+  env: ManagerBasedRlEnv,
+  min_dist: float,
+  std: float,
+  asset_cfg: SceneEntityCfg,
+  roughness_sensor_name: str,
+  wheel_radius: float = 0.127,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
+  grid_shape: tuple[int, int] | None = None,
+) -> torch.Tensor:
+  """Penalize wheel spacing below a minimum only on rough terrain."""
+  asset: Entity = env.scene[asset_cfg.name]
+  left_idx = asset_cfg.body_ids[0]
+  right_idx = asset_cfg.body_ids[1]
+  heading_aligned = yaw_quat(asset.data.root_link_quat_w)
+  left_pos = quat_apply_inverse(
+    heading_aligned, asset.data.body_link_pos_w[:, left_idx]
+  )
+  right_pos = quat_apply_inverse(
+    heading_aligned, asset.data.body_link_pos_w[:, right_idx]
+  )
+  distance_y = torch.abs(left_pos[:, 1] - right_pos[:, 1])
+  distance_violation = torch.clamp(min_dist - distance_y, min=0.0)
+
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
+  )
+  rough_active = _roughness_gate_active(stats.gate, roughness_gate_threshold)
+  cost = rough_active * torch.square(distance_violation / std)
+
+  rough_count = torch.clamp(rough_active.sum(), min=1.0)
+  log_data = env.extras.setdefault("log", {})
+  log_data["Metrics/rough_wheel_distance_mean"] = (
+    distance_y * rough_active
+  ).sum() / rough_count
+  log_data["Metrics/rough_wheel_distance_violation_mean"] = (
+    distance_violation * rough_active
+  ).sum() / rough_count
+  return cost
+
+
+def non_rough_base_at_midpoint(
+  env: ManagerBasedRlEnv,
+  std: float,
+  feet_cfg: SceneEntityCfg,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+  roughness_sensor_name: str | None = None,
+  wheel_radius: float = 0.127,
+  gate_min: float = 0.10,
+  gate_max: float = 0.40,
+  roughness_gate_threshold: float = 0.2,
+  roughness_gate_threshold_final: float | None = None,
+  roughness_gate_threshold_ramp_steps: int = 0,
+  grid_shape: tuple[int, int] | None = None,
+) -> torch.Tensor:
+  """Reward base projection at the wheel midpoint only on non-rough terrain."""
+  asset: Entity = env.scene[asset_cfg.name]
+  feet_pos_w = asset.data.body_link_pos_w[:, feet_cfg.body_ids, :2]
+  midpoint_xy = torch.mean(feet_pos_w, dim=1)
+  base_xy = asset.data.root_link_pos_w[:, :2]
+  error_sq = torch.sum(torch.square(base_xy - midpoint_xy), dim=1)
+  reward = torch.exp(-error_sq / std**2)
+  if roughness_sensor_name is None:
+    return reward
+
+  stats = _terrain_roughness_from_sensor(
+    env,
+    roughness_sensor_name,
+    wheel_radius=wheel_radius,
+    gate_min=gate_min,
+    gate_max=gate_max,
+    grid_shape=grid_shape,
+  )
+  roughness_gate_threshold = _scheduled_roughness_gate_threshold(
+    env,
+    roughness_gate_threshold,
+    roughness_gate_threshold_final,
+    roughness_gate_threshold_ramp_steps,
+  )
+  non_rough_active = _roughness_gate_inactive(stats.gate, roughness_gate_threshold)
+  return non_rough_active * reward
 
 
 def feet_air_time(
@@ -720,12 +1018,6 @@ def feet_air_time(
   assert current_air_time is not None
   in_range = (current_air_time > threshold_min) & (current_air_time < threshold_max)
   reward = torch.sum(in_range.float(), dim=1)
-  in_air = current_air_time > 0
-  num_in_air = torch.sum(in_air.float())
-  mean_air_time = torch.sum(current_air_time * in_air.float()) / torch.clamp(
-    num_in_air, min=1
-  )
-  env.extras["log"]["Metrics/air_time_mean"] = mean_air_time
   if command_name is not None:
     command = env.command_manager.get_command(command_name)
     if command is not None:
@@ -856,32 +1148,22 @@ def standing_forward_wheel_air_time(
     dim=1,
   )
 
-  command_term = env.command_manager.get_term(command_name)
-  assert command_term is not None, f"Command '{command_name}' not found."
-  if isinstance(command_term, UniformVelocityCommand):
-    standing = command_term.is_standing_env
-    forward = command_term.is_forward_env & ~standing
-  else:
-    command = env.command_manager.get_command(command_name)
-    assert command is not None, f"Command '{command_name}' not found."
-    linear_norm = torch.norm(command[:, :2], dim=1)
-    angular_norm = torch.abs(command[:, 2])
-    standing = (linear_norm < lin_threshold) & (angular_norm < ang_threshold)
-    forward = (
-      (command[:, 0] > forward_speed_threshold)
-      & (torch.abs(command[:, 1]) < forward_lateral_threshold)
-      & (torch.abs(command[:, 2]) < forward_ang_threshold)
-      & ~standing
-    )
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  linear_norm = torch.norm(command[:, :2], dim=1)
+  angular_norm = torch.abs(command[:, 2])
+  standing = (linear_norm < lin_threshold) & (angular_norm < ang_threshold)
+  forward = (
+    (command[:, 0] > forward_speed_threshold)
+    & (torch.abs(command[:, 1]) < forward_lateral_threshold)
+    & (torch.abs(command[:, 2]) < forward_ang_threshold)
+    & ~standing
+  )
 
   standing_cost = air_time * standing.float()
   forward_cost = air_time * forward.float() * non_rough_active
   cost = standing_cost + forward_cost
 
-  log_data = env.extras.setdefault("log", {})
-  log_data["Metrics/standing_forward_wheel_air_time_mean"] = cost.mean()
-  log_data["Metrics/standing_wheel_air_time_mean"] = standing_cost.mean()
-  log_data["Metrics/non_rough_forward_wheel_air_time_mean"] = forward_cost.mean()
   return cost
 
 
@@ -1045,9 +1327,6 @@ def rough_contact_pattern(
   log_data = env.extras.setdefault("log", {})
   log_data["Metrics/rough_double_contact_mean"] = double_contact.float().mean()
   log_data["Metrics/rough_no_contact_mean"] = no_contact.float().mean()
-  log_data["Metrics/rough_single_contact_mean"] = (
-    (contact_count == 1).float().mean()
-  )
   return reward
 
 
@@ -1122,12 +1401,6 @@ class feet_swing_height:
     active = (total_command > command_threshold).float()
     error = self.peak_heights / target_height - 1.0
     cost = torch.sum(torch.square(error) * first_contact.float(), dim=1) * active
-    num_landings = torch.sum(first_contact.float())
-    peak_heights_at_landing = self.peak_heights * first_contact.float()
-    mean_peak_height = torch.sum(peak_heights_at_landing) / torch.clamp(
-      num_landings, min=1
-    )
-    env.extras["log"]["Metrics/peak_height_mean"] = mean_peak_height
     self.peak_heights = torch.where(
       first_contact,
       torch.zeros_like(self.peak_heights),
@@ -1158,11 +1431,6 @@ def feet_slip(
   vel_xy_norm = torch.norm(foot_vel_xy, dim=-1)  # [B, N]
   vel_xy_norm_sq = torch.square(vel_xy_norm)  # [B, N]
   cost = torch.sum(vel_xy_norm_sq * in_contact, dim=1) * active
-  num_in_contact = torch.sum(in_contact)
-  mean_slip_vel = torch.sum(vel_xy_norm * in_contact) / torch.clamp(
-    num_in_contact, min=1
-  )
-  env.extras["log"]["Metrics/slip_velocity_mean"] = mean_slip_vel
   return cost
 
 

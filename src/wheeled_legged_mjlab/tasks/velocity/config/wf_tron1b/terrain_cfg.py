@@ -117,8 +117,8 @@ TERRAINS_CFG = TerrainGeneratorCfg(
             proportion=0.07,
             # Level zero is a contiguous, uniform tiled surface. Difficulty then
             # ramps across 50 rows into smaller, separated, irregular stones.
-            stone_size_range=(0.50, 0.75),
-            stone_distance_range=(0.0, 0.15),
+            stone_size_range=(0.50, 0.55),
+            stone_distance_range=(0.0, 0.05),
             stone_height=0.0,
             stone_height_variation=0.075,
             stone_size_variation=0.075,

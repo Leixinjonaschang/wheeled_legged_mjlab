@@ -8,7 +8,9 @@ Current branch: `feature/action_delay`
   `LEG_JOINT_NAMES`. Wheel joint positions are no longer part of actor
   proprioception.
 - `9c825a7` split wheel velocity into its own observation term:
-  `wheel_vel` now uses `WHEEL_JOINT_NAMES` with `scale=0.5`.
+  `wheel_vel` now uses `WHEEL_JOINT_NAMES`.
+- `wheel_vel` scale changed `0.5 -> 0.05` (actor, critic, and privileged
+  encoder groups all use `0.05`). Deployment must apply the new value.
 - Leg joint velocity observation remains `scale=0.05`.
 - Action scale did not change in these recent commits:
   - leg position action: `scale=0.5`
@@ -26,7 +28,7 @@ Deployment should build `actor_obs` in this exact term order:
 | `projected_gravity` | 3 | body-frame gravity projection | 1.0 |
 | `joint_pos` | 6 | leg joint positions relative to default | 1.0 |
 | `joint_vel` | 6 | leg joint velocities | 0.05 |
-| `wheel_vel` | 2 | wheel joint velocities | 0.5 |
+| `wheel_vel` | 2 | wheel joint velocities | 0.05 |
 | `actions` | 8 | previous policy action, raw normalized action | 1.0 |
 | `command` | 3 | body-frame command `[vx_b, vy_b, yaw_rate]` | 1.0 |
 
