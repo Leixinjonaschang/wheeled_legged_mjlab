@@ -77,8 +77,8 @@ NON_WHEEL_COLLISION_GEOMS = (
     "knee_R_collision",
 )
 
-BASE_HEIGHT_TARGET = 0.82
-BASE_HEIGHT_TERMINATION_MINIMUM = 0.55
+BASE_HEIGHT_TARGET = 0.76
+BASE_HEIGHT_TERMINATION_MINIMUM = 0.50
 POSE_TARGET_JOINT_POS = {
     "abad_L_Joint": 0.1,
     "hip_L_Joint": 0.2,
@@ -604,7 +604,7 @@ def make_commands() -> dict[str, CommandTermCfg]:
             debug_vis=True,
             ranges=UniformVelocityCommandCfg.Ranges(
                 lin_vel_x=(-1.0, 2.0),
-                lin_vel_y=(-1.0, 1.0),
+                lin_vel_y=(-0.0, 0.0),
                 ang_vel_z=(-math.pi / 2, math.pi / 2),
                 heading=(-math.pi, math.pi),
             ),
@@ -1036,7 +1036,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
             "asset_cfg": wheel_body_cfg,
             "min_dist": WHEEL_DISTANCE_RANGE[0],
             "max_dist": WHEEL_DISTANCE_RANGE[1],
-            "desired_dist": 0.38,
+            "desired_dist": 0.35,
             "std": math.sqrt(0.01),
             "command_name": COMMAND_NAME,
         },
