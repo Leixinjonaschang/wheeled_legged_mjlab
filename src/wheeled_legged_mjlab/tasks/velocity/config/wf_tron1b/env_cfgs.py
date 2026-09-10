@@ -1421,6 +1421,37 @@ def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(
     )
 
 
+def wf_tron1b_rough_depth_predict_env_cfg(
+    play: bool = False,
+    enable_depth_distance_noise: bool = DEPTH_DISTANCE_NOISE_ENABLED,
+    enable_depth_gaussian_blur: bool = DEPTH_GAUSSIAN_BLUR_ENABLED,
+    enable_depth_edge_noise: bool = DEPTH_EDGE_NOISE_ENABLED,
+    enable_depth_dropout: bool = DEPTH_DROPOUT_ENABLED,
+    depth_noise_base_m: float = DEPTH_NOISE_BASE_M,
+    depth_noise_quadratic_coeff: float = DEPTH_NOISE_QUADRATIC_COEFF,
+) -> ManagerBasedRlEnvCfg:
+    """Create the direct-depth task without a privileged encoder observation."""
+    cfg = wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(
+        play=play,
+        enable_depth_distance_noise=enable_depth_distance_noise,
+        enable_depth_gaussian_blur=enable_depth_gaussian_blur,
+        enable_depth_edge_noise=enable_depth_edge_noise,
+        enable_depth_dropout=enable_depth_dropout,
+        depth_noise_base_m=depth_noise_base_m,
+        depth_noise_quadratic_coeff=depth_noise_quadratic_coeff,
+    )
+    cfg.observations.pop("privileged_encoder")
+    if play:
+        for group in (
+            "critic",
+            "dynamics_context",
+            "lin_vel_target",
+            "wheel_roughness",
+        ):
+            cfg.observations.pop(group, None)
+    return cfg
+
+
 def wf_tron1b_flat_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     """Create WF-TRON1B flat-ground velocity representation configuration."""
     return make_env_cfg(rough=False, play=play, lin_vel_representation=True)

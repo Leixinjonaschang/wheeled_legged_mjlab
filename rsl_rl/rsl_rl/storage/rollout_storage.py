@@ -294,6 +294,51 @@ class RolloutStorage:
                     ),
                 )
 
+    def sequence_mini_batch_generator(self, num_mini_batches: int, num_epochs: int = 1) -> Generator[Batch, None, None]:
+        """Yield full-rollout sequences while shuffling only environments.
+
+        Each batch keeps the leading time dimension intact. The actor hidden state
+        is the state saved immediately before the first transition in the rollout.
+        """
+        if self.training_type != "rl":
+            raise ValueError("This function is only available for reinforcement learning training.")
+        if num_mini_batches <= 0 or num_epochs <= 0:
+            raise ValueError("Sequence epochs and mini-batches must be positive.")
+        if self.num_envs < num_mini_batches:
+            raise ValueError(
+                "Full-rollout sequence mini-batches require at least one environment "
+                f"per batch, got {self.num_envs} environments and "
+                f"{num_mini_batches} mini-batches."
+            )
+        if self.distribution_params is None:
+            raise ValueError("No action-distribution parameters were recorded.")
+
+        for _ in range(num_epochs):
+            permutation = torch.randperm(self.num_envs, device=self.device)
+            for env_ids in torch.tensor_split(permutation, num_mini_batches):
+                initial_actor_state = self._select_chunk_initial_states(
+                    self.saved_hidden_state_a,
+                    torch.zeros_like(env_ids),
+                    env_ids,
+                )
+                initial_critic_state = self._select_chunk_initial_states(
+                    self.saved_hidden_state_c,
+                    torch.zeros_like(env_ids),
+                    env_ids,
+                )
+                yield RolloutStorage.Batch(
+                    observations=self.observations[:, env_ids],
+                    actions=self.actions[:, env_ids],
+                    applied_actions=(None if self.applied_actions is None else self.applied_actions[:, env_ids]),
+                    values=self.values[:, env_ids],
+                    advantages=self.advantages[:, env_ids],
+                    returns=self.returns[:, env_ids],
+                    old_actions_log_prob=self.actions_log_prob[:, env_ids],
+                    old_distribution_params=tuple(parameter[:, env_ids] for parameter in self.distribution_params),
+                    dones=self.dones[:, env_ids],
+                    hidden_states=(initial_actor_state, initial_critic_state),
+                )
+
     def representation_chunk_generator(
         self,
         num_mini_batches: int,

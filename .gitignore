@@ -67,6 +67,7 @@ rsl_rl/tests/algorithms/*
 !rsl_rl/tests/algorithms/test_representation_teacher_student_ppo.py
 !rsl_rl/tests/algorithms/test_representation_velocity_teacher_student_ppo.py
 !rsl_rl/tests/algorithms/test_checkpoint_learning_rates.py
+!rsl_rl/tests/algorithms/test_depth_predictor_ppo.py
 !rsl_rl/tests/storage/
 rsl_rl/tests/storage/*
 !rsl_rl/tests/storage/test_rollout_storage_dtype.py

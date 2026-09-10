@@ -6,6 +6,7 @@
 """Neural models for the learning algorithm."""
 
 from .cnn_model import CNNModel
+from .depth_actor import DepthActor
 from .depth_representation_velocity_actor_critic import DepthRepresentationVelocityActorCritic
 from .mlp_model import MLPModel
 from .representation_actor_critic import RepresentationActorCritic
@@ -14,6 +15,7 @@ from .rnn_model import RNNModel
 
 __all__ = [
     "CNNModel",
+    "DepthActor",
     "DepthRepresentationVelocityActorCritic",
     "MLPModel",
     "RNNModel",

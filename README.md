@@ -53,6 +53,8 @@ Available WF-Tron1B tasks:
 ```shell
 uv run python scripts/rsl_rl/train.py Mjlab-Velocity-Flat-WF-Tron1B
 uv run python scripts/rsl_rl/train.py Mjlab-Velocity-Rough-WF-Tron1B
+uv run python scripts/rsl_rl/train.py Mjlab-Velocity-Rough-WF-Tron1B-Depth-Predict
+uv run python scripts/rsl_rl/train.py Mjlab-Velocity-Rough-WF-Tron1B-Depth-Predict-NoRough
 ```
 
 Show all task-specific options:
@@ -165,6 +167,15 @@ uv run python scripts/rsl_rl/train.py Mjlab-Velocity-Rough-WF-Tron1B \
 The training script uses `tyro`, so task config fields can be overridden with
 deep CLI paths such as `--env.xxx.yyy` and `--agent.xxx.yyy`.
 
+The two `Depth-Predict` tasks train the deployable depth policy directly. The
+actor consumes proprioceptive history, commands, and depth; a separate critic
+consumes privileged observations. Latent dynamics, linear-velocity estimation,
+and (except for `NoRough`) wheel-roughness supervision are auxiliary losses.
+They start from random initialization by default and resume through the normal
+`--agent.resume`, `--agent.load-run`, and `--agent.load-checkpoint` options.
+Only checkpoints produced by this architecture are supported; older
+teacher-student predictor checkpoints are not migrated.
+
 </details>
 
 ### Policy Evaluation
@@ -188,6 +199,8 @@ Available WF-Tron1B tasks:
 ```shell
 uv run python scripts/rsl_rl/play.py Mjlab-Velocity-Flat-WF-Tron1B
 uv run python scripts/rsl_rl/play.py Mjlab-Velocity-Rough-WF-Tron1B
+uv run python scripts/rsl_rl/play.py Mjlab-Velocity-Rough-WF-Tron1B-Depth-Predict
+uv run python scripts/rsl_rl/play.py Mjlab-Velocity-Rough-WF-Tron1B-Depth-Predict-NoRough
 ```
 
 Show all task-specific options:
@@ -269,5 +282,11 @@ checkpoint or `--wandb-run-path` for a W&B run. If `--wandb-checkpoint-name` is
 omitted, the script resolves the checkpoint through the run path helper. With
 `--viewer auto`, the script uses the native MuJoCo viewer when a display is
 available and falls back to `viser` otherwise.
+
+For a depth predictor checkpoint, evaluation and `--export-onnx True` use only
+the depth actor. The deployment contract remains
+`proprio_history / actor_command / depth / hidden_state_in` to
+`actions / predicted_lin_vel / hidden_state_out`; the critic, dynamics
+predictor, and roughness head are not exported.
 
 </details>

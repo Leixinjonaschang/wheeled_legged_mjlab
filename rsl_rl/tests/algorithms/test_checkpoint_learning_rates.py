@@ -8,9 +8,7 @@ from rsl_rl.algorithms import (
     RepresentationTeacherStudentPPO,
     RepresentationVelocityTeacherStudentPPO,
 )
-from rsl_rl.algorithms.representation_velocity_predictor_teacher_student_ppo import (
-    RepresentationVelocityPredictorTeacherStudentPPO,
-)
+from rsl_rl.algorithms.depth_predictor_ppo import DepthPredictorPPO
 
 
 def _optimizer(learning_rate: float) -> torch.optim.Adam:
@@ -44,18 +42,13 @@ def _optimizer(learning_rate: float) -> torch.optim.Adam:
             ),
         ),
         (
-            RepresentationVelocityPredictorTeacherStudentPPO,
+            DepthPredictorPPO,
             (
                 ("optimizer", "learning_rate", "optimizer_state_dict"),
                 (
                     "predictor_optimizer",
                     "predictor_learning_rate",
                     "predictor_optimizer_state_dict",
-                ),
-                (
-                    "student_optimizer",
-                    "student_learning_rate",
-                    "student_optimizer_state_dict",
                 ),
             ),
         ),

@@ -11,6 +11,7 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 from rsl_rl.models import (
+    DepthActor,
     DepthRepresentationVelocityActorCritic,
     RepresentationActorCritic,
     RepresentationVelocityActorCritic,
@@ -97,7 +98,7 @@ def get_wheeled_legged_metadata(
                 "student_history_order": "oldest_to_newest",
             }
         )
-    if isinstance(policy, DepthRepresentationVelocityActorCritic):
+    if isinstance(policy, (DepthActor, DepthRepresentationVelocityActorCritic)):
         proprio_history_cfg = env.cfg.observations["proprio_history"]
         metadata.update(
             {

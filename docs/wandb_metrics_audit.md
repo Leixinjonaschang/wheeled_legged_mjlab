@@ -195,46 +195,45 @@
 | Distillation | `Loss/behavior` | student/teacher 行为匹配损失。 |
 | RepresentationTeacherStudentPPO | `Loss/value`, `Loss/surrogate`, `Loss/entropy`, `Loss/representation` | PPO 加表示匹配。 |
 | RepresentationVelocityTeacherStudentPPO | `Loss/value`, `Loss/surrogate`, `Loss/entropy`, `Loss/student`, `Loss/representation`, `Loss/lin_vel`, `Loss/roughness` | student 是 representation、lin_vel、roughness 的加权和；无 roughness head 时 roughness 写 0。 |
-| RepresentationVelocityPredictorTeacherStudentPPO | 同上一行七项，另加下文所有符合条件的指标 | PPO loss 平均所有 PPO minibatch；student loss 平均实际 student 更新。 |
+| DepthPredictorPPO | `Loss/value`, `Loss/surrogate`, `Loss/entropy`, `Loss/student`, `Loss/lin_vel`, `Loss/roughness`，另加下文 predictor 指标 | PPO loss 平均 20 个 PPO step；student/监督指标平均 4 个辅助 step。不存在 teacher representation loss。 |
 
-来源：`rsl_rl/rsl_rl/algorithms/ppo.py:331`、`distillation.py:170`、`representation_teacher_student_ppo.py:213`、`representation_velocity_teacher_student_ppo.py:309`、`representation_velocity_predictor_teacher_student_ppo.py:588`。
+来源：`rsl_rl/rsl_rl/algorithms/ppo.py`、`distillation.py`、`representation_teacher_student_ppo.py`、`representation_velocity_teacher_student_ppo.py`、`depth_predictor_ppo.py`。
 
 ### Predictor 固定输出
 
-以下来源均为 `rsl_rl/rsl_rl/algorithms/representation_velocity_predictor_teacher_student_ppo.py`。
+以下来源均为 `rsl_rl/rsl_rl/algorithms/depth_predictor_ppo.py`。
 
 | 最终名称 | 口径 |
 |---|---|
-| `Grad/ppo_total_norm` | 纯 PPO 梯度 L2 norm，平均所有 PPO 步。 |
-| `Grad/privileged_encoder_ppo_norm` | privileged encoder 纯 PPO 梯度 L2 norm，平均所有 PPO 步。 |
-| `Grad/ppo_joint_total_norm` | 加入 dynamics 后的 PPO 参数组裁剪前 L2 norm，平均所有 PPO 步（包括纯 PPO 步）。 |
-| `Grad/ppo_joint_clip_fraction` | PPO 参数组触发裁剪的更新步占全部 PPO 更新比例。 |
+| `Grad/student_backbone_ppo_norm` | CNN、GRU 和 student encoder 的纯 PPO 梯度 L2 norm，平均所有 PPO 步。 |
+| `Grad/student_backbone_prediction_norm` | dynamics 反传增加的 student 主干梯度 L2 norm，仅平均有效 predictor 步。 |
+| `Grad/student_backbone_ppo_prediction_cosine` | 同一 joint step 上 PPO 与 dynamics 的 student 主干梯度夹角余弦。 |
+| `Grad/main_total_norm` | actor + critic 主参数裁剪前 L2 norm，平均所有 PPO 步。 |
+| `Grad/main_clip_fraction` | 主参数组触发裁剪的 PPO step 比例。 |
 | `Grad/predictor_total_norm` | predictor 裁剪前 L2 norm，仅平均 dynamics 更新步。 |
 | `Grad/predictor_clip_fraction` | predictor 触发裁剪占 dynamics 更新比例。 |
 | `Loss/Learning/ppo_lr` | PPO optimizer 当前第一参数组学习率。 |
 | `Loss/Learning/predictor_lr` | predictor optimizer 当前第一参数组学习率。 |
-| `Update/privileged_encoder_norm_joint` | joint step 前后 privileged encoder 参数 L2 差的均值。 |
-| `Update/privileged_encoder_norm_ppo_only` | 被采样 PPO-only step 前后 privileged encoder 参数 L2 差的均值。 |
-| `Update/policy_kl_joint` | joint 单步 optimizer 更新前后策略 KL。 |
-| `Update/policy_kl_ppo_only` | 被采样 PPO-only 单步 optimizer 更新前后策略 KL。 |
-| `Update/joint_step_fraction` | joint step 数 / 全部 PPO 更新数。 |
+| `Update/ppo_steps` | 本轮主 optimizer step 数，默认 20。 |
+| `Update/auxiliary_steps` | 本轮监督辅助 step 数，默认 4。 |
+| `Update/predictor_steps` | 本轮有全局有效样本的 predictor step 数，最多 4。 |
+| `Loss/latent_variance` | 重放 student latent 各维方差的平均，用于观察表示退化。 |
 
-记录位置 596–610；梯度计算在 439–478；更新诊断采样在 309–311，policy KL 在 1169–1194。所有 Grad/* norm 都是裁剪前指标；Update/* norm 则是优化器实际更新后的参数差。这里的单步 KL 不等同于 rollout-old policy 到当前 policy 的 adaptive PPO KL。
+所有 Grad/* norm 都是裁剪前指标。Adaptive KL 只修改主 optimizer 学习率；predictor 学习率保持独立。
 
 ### 开启 latent dynamics 时
 
-条件：`latent_dynamics_loss_coef > 0`。记录位置 617–705。
+条件：`latent_dynamics_loss_coef > 0`。
 
-固定梯度指标：
+固定 student 主干梯度指标：
 
 ```text
-Grad/dynamics_total_norm
-Grad/privileged_encoder_dynamics_norm
-Grad/privileged_encoder_dynamics_to_ppo_ratio
-Grad/privileged_encoder_ppo_dynamics_cosine
+Grad/student_backbone_ppo_norm
+Grad/student_backbone_prediction_norm
+Grad/student_backbone_ppo_prediction_cosine
 ```
 
-前两项是 dynamics 反传增加的梯度 L2 norm；cosine 比较 privileged encoder 的 PPO 与 dynamics 梯度方向。均平均实际 dynamics 更新。ratio 为 dynamics encoder 平均 norm 除以 PPO encoder 平均 norm。
+prediction norm 是 dynamics 反传相对 PPO + 监督梯度快照增加的梯度；cosine 比较 student 主干的 PPO 与 dynamics 梯度方向。不存在 privileged encoder 梯度指标。
 
 以下九项同时输出汇总名称及 `_k{horizon}` 版本，horizon 遍历配置 `latent_dynamics_horizons`：
 
@@ -267,11 +266,11 @@ Loss/latent_reversed_action_loss_k{horizon}
 Loss/latent_reversed_action_ratio_k{horizon}
 ```
 
-计算位置 794 起。representation 为 `1 - cosine_similarity`；velocity 为归一化速度 smooth-L1；dynamics 为 representation + velocity_coef × velocity。identity 是保持当前状态的 baseline；shuffled 是打乱不同样本的动作块；reversed 是反转动作时间顺序。prediction/identity ratio 越低表示越优于恒等 baseline；shuffled/prediction 和 reversed/prediction ratio 大于 1 表示正确动作优于扰动动作。每个 horizon 按实际样本数加权，再按配置 horizon 权重汇总。valid_fraction 是有效训练样本占比。
+representation 为 `1 - cosine_similarity`；velocity 为归一化速度 smooth-L1；dynamics 为 representation + velocity_coef × velocity。identity 是保持当前状态的 baseline；shuffled 是打乱不同样本的动作块；reversed 是反转动作时间顺序。prediction/identity ratio 越低表示越优于恒等 baseline；shuffled/prediction 和 reversed/prediction ratio 大于 1 表示正确动作优于扰动动作。每个 horizon 按配置权重汇总。valid_fraction 是有效训练样本占比。
 
 ### 同时开启 latent rollout 时
 
-条件：latent dynamics 已开启，且 `latent_rollout_loss_coef > 0`。位置 718–750。
+条件：latent dynamics 已开启，且 `latent_rollout_loss_coef > 0`。
 
 ```text
 Loss/latent_rollout_loss
@@ -304,10 +303,7 @@ Loss/latent_direct_rollout_velocity_loss_k{H}
 
 ### 检查发现与解释限制
 
-1. **没有测量时仍写 0。** Predictor 604–610 使用 `max(count, 1)`；dynamics disabled 时连 `Update/*ppo_only` 都不采样，但记录为 0。全部 PPO 步都是 joint 时，ppo_only 同样为 0。没有有效样本的 horizon 也写 0（626–705）。这不能解释为 KL/误差完美或没有参数更新。
-2. **PPO-only 诊断是子集。** 309–311 仅选择 joint 步前的相邻 PPO-only 步，不是全部 PPO-only 更新的均值。
-3. **梯度 ratio 的平均范围不同。** 620–622 的分子平均 dynamics 步，分母平均全部 PPO 步，不是同批次梯度比。
-4. **DDP loss 未跨 rank 汇总。** 梯度和 KL 有归约，但 `.item()` 累加的 loss 没有 all_reduce，例如 predictor 505–507、588 起及基础 PPO 309–328。若仅 rank 0 输出，它代表 rank 0 的 loss。
-5. **零 student 更新存在除零边界。** Predictor 592–595、velocity PPO 313–316 直接除 `student_updates`；如果允许 substeps/representation epochs 为 0，会报错。未确认当前运行配置是否触发。
-6. **loss 与 gradient 的权重口径不同。** dynamics loss 日志没有乘总 `latent_dynamics_loss_coef`；dynamics Grad 来自加权目标反传，不能将二者数值直接对照。
-7. **缺少部分常用诊断。** 未输出总 joint objective、student_lr、student grad norm、标准 PPO clipping fraction 和 rollout-old 到当前策略 KL。这是监控缺项，不是已证实的计算错误。
+1. **无有效样本时误差写 0。** 必须结合 `latent_dynamics_valid_fraction*` 和 `Update/predictor_steps` 解读；0 不一定表示预测完美。
+2. **DDP 口径不同。** predictor、监督损失、latent variance 和 adaptive KL 使用全局样本统计；基础 PPO 的 value/surrogate/entropy 日志仍是当前记录 rank 的平均值。
+3. **loss 与 gradient 的权重口径不同。** dynamics 分项日志没有乘总 `latent_dynamics_loss_coef`；gradient 来自加权总目标，不能直接比较数值。
+4. **仍未输出总 joint objective 或标准 PPO clipping fraction。** 这是监控缺项，不是已证实的计算错误。
