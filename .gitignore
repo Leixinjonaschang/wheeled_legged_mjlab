@@ -55,6 +55,7 @@ tests/
 tests/*
 !tests/test_action_delay.py
 !tests/test_dependency_versions.py
+!tests/test_training_input_migration.py
 !tests/test_fell_over_curriculum.py
 !tests/test_mjlab160_integration.py
 !tests/test_representation_teacher_student_config.py

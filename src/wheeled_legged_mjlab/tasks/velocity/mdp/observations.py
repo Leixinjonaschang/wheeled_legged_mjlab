@@ -4,7 +4,6 @@ import math
 from typing import TYPE_CHECKING
 
 import torch
-
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor, RayCastSensor
 from mjlab.sensor.camera_sensor import CameraSensor
@@ -76,8 +75,16 @@ def depth_image(
   env: ManagerBasedRlEnv,
   sensor_name: str = "depth_camera",
   left_crop: int = 0,
+  depth_min_m: float = 0.2,
+  depth_max_m: float = 2.0,
 ) -> torch.Tensor:
   """Depth image from the forward-facing camera."""
+  if depth_min_m < 0.0:
+    raise ValueError(f"depth_min_m must be >= 0, got {depth_min_m}")
+  if depth_max_m <= depth_min_m:
+    raise ValueError(
+      f"depth_max_m must be greater than depth_min_m, got {depth_max_m}"
+    )
   camera: CameraSensor = env.scene[sensor_name]
   assert camera.data.depth is not None, f"Sensor '{sensor_name}' has no depth data"
   depth = camera.data.depth.squeeze(-1)
@@ -87,7 +94,15 @@ def depth_image(
     )
   if left_crop > 0:
     depth = depth[..., left_crop:].contiguous()
-  return depth
+  depth = torch.nan_to_num(
+    depth,
+    nan=depth_max_m,
+    posinf=depth_max_m,
+    neginf=depth_max_m,
+  )
+  depth = torch.where(depth <= 0.0, depth_max_m, depth)
+  depth = depth.clamp(min=depth_min_m, max=depth_max_m)
+  return (depth - depth_min_m) / (depth_max_m - depth_min_m)
 
 
 class DepthBuffer:
@@ -106,6 +121,8 @@ class DepthBuffer:
     buffer_size: int = 5,
     update_period: int = 5,
     left_crop: int = 0,
+    depth_min_m: float = 0.2,
+    depth_max_m: float = 2.0,
   ) -> torch.Tensor:
     if buffer_size < 1:
       raise ValueError(f"buffer_size must be >= 1, got {buffer_size}")
@@ -124,7 +141,13 @@ class DepthBuffer:
       assert self._buffer is not None
       return self._buffer
 
-    frame = depth_image(env, sensor_name=sensor_name, left_crop=left_crop)
+    frame = depth_image(
+      env,
+      sensor_name=sensor_name,
+      left_crop=left_crop,
+      depth_min_m=depth_min_m,
+      depth_max_m=depth_max_m,
+    )
 
     if needs_init:
       self._buffer = frame.unsqueeze(1).repeat(
@@ -189,6 +212,8 @@ class AsyncDepthBuffer:
     capture_frequency_hz: float = 30.0,
     system_delay_range_s: tuple[float, float] = (0.0, 0.0),
     left_crop: int = 0,
+    depth_min_m: float = 0.2,
+    depth_max_m: float = 2.0,
   ) -> torch.Tensor:
     if capture_frequency_hz <= 0.0:
       raise ValueError(
@@ -236,6 +261,8 @@ class AsyncDepthBuffer:
       env,
       sensor_name=sensor_name,
       left_crop=left_crop,
+      depth_min_m=depth_min_m,
+      depth_max_m=depth_max_m,
     ).unsqueeze(1)
 
     if needs_init:
@@ -516,16 +543,43 @@ def _normalize_to_unit_range(
   return torch.clamp(scaled, -1.0, 1.0)
 
 
+def _normalized_ratio_to_default(
+  current: torch.Tensor,
+  default: torch.Tensor,
+  scale_range: tuple[float, float],
+) -> torch.Tensor:
+  ratio = current / default
+  return _normalize_to_unit_range(ratio, *scale_range)
+
+
 def domain_randomization_delta_quantity(
   env: ManagerBasedRlEnv,
   wheel_friction_event: str = "wheel_friction",
+  wheel_friction_difference_event: str = "wheel_friction_difference",
   encoder_bias_event: str = "encoder_bias",
   base_com_event: str = "base_com",
+  link_com_event: str = "link_com",
+  mass_inertia_event: str = "body_mass_inertia",
+  pd_gains_event: str = "pd_gains",
 ) -> torch.Tensor:
-  """Normalized domain-randomization quantities visible to the policy."""
+  """Return normalized domain-randomization quantities in a stable order.
+
+  The WF-TRON1B layout is wheel friction (2), encoder bias (8), base COM
+  offset (3), non-base body COM offsets (24), body mass scale (9),
+  principal-inertia scale (27), leg Kp scale (6), and leg Kd plus wheel Kv
+  scale (8), for 87 values in total.
+  """
   wheel_friction_cfg = env.event_manager.get_term_cfg(wheel_friction_event)
   friction_asset_cfg: SceneEntityCfg = wheel_friction_cfg.params["asset_cfg"]
-  wheel_friction_range = wheel_friction_cfg.params["ranges"]
+  wheel_friction_common_range = wheel_friction_cfg.params["ranges"]
+  wheel_friction_difference_cfg = env.event_manager.get_term_cfg(
+    wheel_friction_difference_event
+  )
+  wheel_friction_difference_range = wheel_friction_difference_cfg.params["ranges"]
+  wheel_friction_range = (
+    wheel_friction_common_range[0] + wheel_friction_difference_range[0],
+    wheel_friction_common_range[1] + wheel_friction_difference_range[1],
+  )
   friction_asset = env.scene[friction_asset_cfg.name]
   wheel_geom_ids = friction_asset.indexing.geom_ids[friction_asset_cfg.geom_ids]
   wheel_friction = env.sim.model.geom_friction[:, wheel_geom_ids, 0]
@@ -546,24 +600,85 @@ def domain_randomization_delta_quantity(
     encoder_bias_range[1],
   )
 
-  base_com_cfg = env.event_manager.get_term_cfg(base_com_event)
-  base_com_asset_cfg: SceneEntityCfg = base_com_cfg.params["asset_cfg"]
-  base_com_ranges = base_com_cfg.params["ranges"]
-  base_com_asset = env.scene[base_com_asset_cfg.name]
-  base_body_ids = base_com_asset.indexing.body_ids[base_com_asset_cfg.body_ids]
-  current_body_ipos = env.sim.model.body_ipos[:, base_body_ids, :].reshape(
-    env.num_envs, -1
+  com_deltas = []
+  for com_event in (base_com_event, link_com_event):
+    com_cfg = env.event_manager.get_term_cfg(com_event)
+    com_asset_cfg: SceneEntityCfg = com_cfg.params["asset_cfg"]
+    com_ranges = com_cfg.params["ranges"]
+    com_asset = env.scene[com_asset_cfg.name]
+    com_body_ids = com_asset.indexing.body_ids[com_asset_cfg.body_ids]
+    current_body_ipos = env.sim.model.body_ipos[:, com_body_ids, :]
+    default_body_ipos = env.sim.get_default_field("body_ipos")[
+      com_body_ids, :
+    ].unsqueeze(0)
+    com_delta = current_body_ipos - default_body_ipos
+    normalized_com_delta = torch.stack(
+      [
+        _normalize_to_unit_range(com_delta[..., axis], *com_ranges[axis])
+        for axis in range(3)
+      ],
+      dim=-1,
+    ).reshape(env.num_envs, -1)
+    com_deltas.append(normalized_com_delta)
+
+  mass_inertia_cfg = env.event_manager.get_term_cfg(mass_inertia_event)
+  mass_inertia_asset_cfg: SceneEntityCfg = mass_inertia_cfg.params["asset_cfg"]
+  mass_inertia_asset = env.scene[mass_inertia_asset_cfg.name]
+  body_ids = mass_inertia_asset.indexing.body_ids[mass_inertia_asset_cfg.body_ids]
+  alpha_range = mass_inertia_cfg.params["alpha_range"]
+  mass_inertia_scale_range = tuple(math.exp(2.0 * alpha) for alpha in alpha_range)
+
+  body_mass_scale = _normalized_ratio_to_default(
+    env.sim.model.body_mass[:, body_ids],
+    env.sim.get_default_field("body_mass")[body_ids],
+    mass_inertia_scale_range,
   )
-  default_body_ipos = env.sim.get_default_field("body_ipos")[base_body_ids, :].reshape(
-    1, -1
-  )
-  base_com_delta = current_body_ipos - default_body_ipos
-  base_com_delta = torch.stack(
-    [
-      _normalize_to_unit_range(base_com_delta[:, axis], *base_com_ranges[axis])
-      for axis in range(3)
-    ],
+  body_inertia_scale = _normalized_ratio_to_default(
+    # pseudo_inertia re-diagonalizes the tensor and can permute its principal
+    # axes. Match moments by magnitude so a pure density scale does not appear
+    # as a large anisotropic change and saturate the privileged observation.
+    env.sim.model.body_inertia[:, body_ids, :].sort(dim=-1).values,
+    env.sim.get_default_field("body_inertia")[body_ids, :].sort(dim=-1).values,
+    mass_inertia_scale_range,
+  ).reshape(env.num_envs, -1)
+
+  pd_gains_cfg = env.event_manager.get_term_cfg(pd_gains_event)
+  pd_asset_cfg: SceneEntityCfg = pd_gains_cfg.params["asset_cfg"]
+  pd_asset = env.scene[pd_asset_cfg.name]
+  stiffness_scale_range = pd_gains_cfg.params["stiffness_scale_range"]
+  damping_scale_range = pd_gains_cfg.params["damping_scale_range"]
+  default_gainprm = env.sim.get_default_field("actuator_gainprm")
+  default_biasprm = env.sim.get_default_field("actuator_biasprm")
+  stiffness_scales = []
+  damping_scales = []
+  for actuator in pd_asset.actuators:
+    ctrl_ids = actuator.global_ctrl_ids
+    if actuator.command_field == "position":
+      stiffness_scales.append(
+        _normalized_ratio_to_default(
+          env.sim.model.actuator_gainprm[:, ctrl_ids, 0],
+          default_gainprm[ctrl_ids, 0],
+          stiffness_scale_range,
+        )
+      )
+    if actuator.command_field in ("position", "velocity"):
+      damping_scales.append(
+        _normalized_ratio_to_default(
+          env.sim.model.actuator_biasprm[:, ctrl_ids, 2],
+          default_biasprm[ctrl_ids, 2],
+          damping_scale_range,
+        )
+      )
+
+  return torch.cat(
+    (
+      wheel_friction,
+      encoder_bias,
+      *com_deltas,
+      body_mass_scale,
+      body_inertia_scale,
+      *stiffness_scales,
+      *damping_scales,
+    ),
     dim=1,
   )
-
-  return torch.cat((wheel_friction, encoder_bias, base_com_delta), dim=1)

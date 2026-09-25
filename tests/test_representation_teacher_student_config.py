@@ -195,6 +195,8 @@ def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
         "buffer_size": DEPTH_BUFFER_SIZE,
         "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
         "left_crop": DEPTH_LEFT_CROP,
+        "depth_min_m": 0.2,
+        "depth_max_m": 2.0,
     }
     depth_sensor = next(
         sensor for sensor in cfg.scene.sensors if sensor.name == DEPTH_CAMERA_NAME
@@ -242,6 +244,8 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
         "system_delay_range_s": DEPTH_SYSTEM_DELAY_RANGE_S,
         "left_crop": DEPTH_LEFT_CROP,
+        "depth_min_m": 0.2,
+        "depth_max_m": 2.0,
     }
     assert cfg.observations["wheel_roughness"].terms["wheel_roughness"].func is mdp.wheel_roughness_gate
     assert agent["actor"]["class_name"] == "DepthRepresentationVelocityActorCritic"
@@ -397,7 +401,8 @@ def test_depth_image_crops_left_columns() -> None:
     depth = observation_mdp.depth_image(env, left_crop=DEPTH_LEFT_CROP)
 
     assert depth.shape == (1, DEPTH_CAMERA_HEIGHT, DEPTH_MODEL_WIDTH)
-    assert torch.equal(depth, raw_depth.squeeze(-1)[..., DEPTH_LEFT_CROP:])
+    expected = (raw_depth.squeeze(-1)[..., DEPTH_LEFT_CROP:].clamp(0.2, 2.0) - 0.2) / 1.8
+    torch.testing.assert_close(depth, expected)
     assert depth.is_contiguous()
     with pytest.raises(ValueError, match="left_crop must be in"):
         observation_mdp.depth_image(env, left_crop=DEPTH_CAMERA_WIDTH)
@@ -409,7 +414,7 @@ def test_depth_buffer_updates_every_five_policy_steps(monkeypatch) -> None:
     depth_calls = 0
     left_crops = []
 
-    def get_depth(env, sensor_name, left_crop=0):
+    def get_depth(env, sensor_name, left_crop=0, depth_min_m=0.2, depth_max_m=2.0):
         nonlocal depth_calls
         depth_calls += 1
         left_crops.append(left_crop)
@@ -455,7 +460,7 @@ def test_async_depth_buffer_updates_on_capture_clock(monkeypatch) -> None:
     depth_calls = 0
     left_crops = []
 
-    def get_depth(env, sensor_name, left_crop=0):
+    def get_depth(env, sensor_name, left_crop=0, depth_min_m=0.2, depth_max_m=2.0):
         nonlocal depth_calls
         depth_calls += 1
         left_crops.append(left_crop)
@@ -524,7 +529,7 @@ def test_async_depth_buffer_applies_per_env_delay_and_reset(monkeypatch) -> None
     term = observation_mdp.async_depth_buffer(cfg=None, env=env)
     depth_calls = 0
 
-    def get_depth(env, sensor_name, left_crop=0):
+    def get_depth(env, sensor_name, left_crop=0, depth_min_m=0.2, depth_max_m=2.0):
         nonlocal depth_calls
         depth_calls += 1
         return env.frame[..., left_crop:]
@@ -697,7 +702,7 @@ def _make_representation_policy() -> RepresentationActorCritic:
             "actor": torch.randn(2, 3),
             "actor_history": torch.randn(2, 5, 3),
             "critic": torch.randn(2, 4),
-            "dynamics_context": torch.randn(2, 13),
+            "dynamics_context": torch.randn(2, 87),
         },
         batch_size=[2],
     )
@@ -736,7 +741,7 @@ def _make_velocity_representation_policy() -> RepresentationVelocityActorCritic:
             "lin_vel_target": torch.randn(2, 3),
             "critic": torch.randn(2, 5),
             "privileged_encoder": torch.randn(2, 4),
-            "dynamics_context": torch.randn(2, 13),
+            "dynamics_context": torch.randn(2, 87),
         },
         batch_size=[2],
     )
@@ -764,7 +769,7 @@ def _make_depth_velocity_representation_policy() -> DepthRepresentationVelocityA
             "lin_vel_target": torch.randn(2, 3),
             "critic": torch.randn(2, 5),
             "privileged_encoder": torch.randn(2, 4),
-            "dynamics_context": torch.randn(2, 13),
+            "dynamics_context": torch.randn(2, 87),
             "depth_camera": torch.randn(2, 1, 32, 24),
         },
         batch_size=[2],

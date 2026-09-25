@@ -38,11 +38,11 @@ from mjlab.viewer import ViewerConfig
 
 from wheeled_legged_mjlab.assets.WF_TRON1B.wf_tron1b import WF_TRON1B_ROBOT_CFG
 from wheeled_legged_mjlab.tasks.velocity import mdp
+from wheeled_legged_mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from wheeled_legged_mjlab.tasks.velocity.mdp.actions import (
     DelayedJointPositionActionCfg,
     DelayedJointVelocityActionCfg,
 )
-from wheeled_legged_mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 
 from .terrain_cfg import PLANE_ENTITY_CFG, TERRAINS_ENTITY_CFG
 
@@ -50,6 +50,12 @@ ROBOT_ENTITY = "robot"
 COMMAND_NAME = "twist"
 
 BASE_BODY = "base_Link"
+NON_BASE_BODY_NAMES = (
+    "abad_[LR]_Link",
+    "hip_[LR]_Link",
+    "knee_[LR]_Link",
+    "wheel_[LR]_Link",
+)
 LEG_JOINT_NAMES = (
     "abad_[LR]_Joint",
     "hip_[LR]_Joint",
@@ -92,6 +98,8 @@ DEPTH_CAMERA_WIDTH = 53
 DEPTH_CAMERA_HEIGHT = 30
 DEPTH_LEFT_CROP = 8
 DEPTH_MODEL_WIDTH = DEPTH_CAMERA_WIDTH - DEPTH_LEFT_CROP
+DEPTH_MIN_M = 0.2
+DEPTH_MAX_M = 2.0
 DEPTH_BUFFER_SIZE = 5
 DEPTH_BUFFER_UPDATE_PERIOD = 5
 DEPTH_CAPTURE_FREQUENCY_HZ = 30.0
@@ -272,8 +280,11 @@ def make_observations(
                     joint_names=WHEEL_JOINT_NAMES,
                 )
             },
+            # Keep wheel-speed corruption moderate relative to the physical
+            # signal. The policy's empirical normalizer largely cancels this
+            # term's scalar observation scale once its statistics converge.
             noise=Unoise(n_min=-0.2, n_max=0.2),
-            scale=0.5,
+            scale=0.05,
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
         "command": ObservationTermCfg(
@@ -320,7 +331,7 @@ def make_observations(
                     joint_names=WHEEL_JOINT_NAMES,
                 )
             },
-            scale=0.5,
+            scale=0.05,
         ),
         "actions": ObservationTermCfg(func=mdp.last_action),
         "command": ObservationTermCfg(
@@ -451,6 +462,8 @@ def make_observations(
                         "capture_frequency_hz": DEPTH_CAPTURE_FREQUENCY_HZ,
                         "system_delay_range_s": DEPTH_SYSTEM_DELAY_RANGE_S,
                         "left_crop": DEPTH_LEFT_CROP,
+                        "depth_min_m": DEPTH_MIN_M,
+                        "depth_max_m": DEPTH_MAX_M,
                     },
                 )
             },
@@ -467,6 +480,8 @@ def make_observations(
                         "buffer_size": DEPTH_BUFFER_SIZE,
                         "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
                         "left_crop": DEPTH_LEFT_CROP,
+                        "depth_min_m": DEPTH_MIN_M,
+                        "depth_max_m": DEPTH_MAX_M,
                     },
                 )
             },
@@ -558,7 +573,10 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                 },
                 "velocity_range": {
                     "x": (-0.3, 0.3),
-                    "y": (-0.2, 0.2),
+                    "y": (-0.3, 0.3),
+                    "z": (-0.2, 0.2),
+                    "roll": (-0.25, 0.25),
+                    "pitch": (-0.25, 0.25),
                     "yaw": (-0.2, 0.2),
                 },
                 "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
@@ -568,7 +586,7 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
             func=mdp.reset_joints_by_offset,
             mode="reset",
             params={
-                "position_range": (-0.3, 0.5),
+                "position_range": (-0.3, 0.3),
                 "velocity_range": (-0.2, 0.2),
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
@@ -581,7 +599,7 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
             mode="reset",
             params={
                 "position_range": (0.0, 0.0),
-                "velocity_range": (-0.1, 0.1),
+                "velocity_range": (-0.5, 0.5),
                 "asset_cfg": SceneEntityCfg(
                     ROBOT_ENTITY,
                     joint_names=WHEEL_JOINT_NAMES,
@@ -596,11 +614,11 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
         "push_robot": EventTermCfg(
             func=mdp.push_by_setting_velocity,
             mode="interval",
-            interval_range_s=(15.0, 15.5),
+            interval_range_s=(10, 15),
             params={
                 "velocity_range": {
                     "x": (-0.5, 0.5),
-                    "y": (-0.5, 0.5),
+                    "y": (-0.6, 0.6),
                     "z": (-0.2, 0.2),
                     "roll": (-0.35, 0.35),
                     "pitch": (-0.35, 0.35),
@@ -618,8 +636,34 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                     geom_names=WHEEL_GEOM_NAMES,
                 ),
                 "operation": "abs",
-                "ranges": (0.3, 1.2),
+                "ranges": (0.45, 1.1),
+                "shared_random": True,
+            },
+        ),
+        # Must stack on the value written by "wheel_friction" above. The built-in
+        # "add" operation reads the compile-time default, which would discard that
+        # event's shared sample and pin friction to the XML default.
+        "wheel_friction_difference": EventTermCfg(
+            func=mdp.dr.geom_friction,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    geom_names=WHEEL_GEOM_NAMES,
+                ),
+                "operation": mdp.ADD_TO_CURRENT,
+                "ranges": (-0.04, 0.04),
                 "shared_random": False,
+            },
+        ),
+        # Keep the sampled mass and inertia physically consistent. For the
+        # pseudo-inertia global scale alpha, both scale by exp(2 * alpha).
+        "body_mass_inertia": EventTermCfg(
+            func=mdp.dr.pseudo_inertia,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "alpha_range": (0.5 * math.log(0.8), 0.5 * math.log(1.2)),
             },
         ),
         "encoder_bias": EventTermCfg(
@@ -630,16 +674,44 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
                 "bias_range": (-0.015, 0.015),
             },
         ),
+        "pd_gains": EventTermCfg(
+            func=mdp.randomize_pd_gains,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY),
+                "stiffness_scale_range": (0.8, 1.2),
+                "damping_scale_range": (0.8, 1.2),
+            },
+        ),
         "base_com": EventTermCfg(
             func=mdp.dr.body_com_offset,
             mode="startup",
             params={
-                "asset_cfg": SceneEntityCfg(ROBOT_ENTITY, body_names=(BASE_BODY,)),
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    body_names=(BASE_BODY,),
+                ),
                 "operation": "add",
                 "ranges": {
-                    0: (-0.025, 0.025),
-                    1: (-0.025, 0.025),
+                    0: (-0.03, 0.03),
+                    1: (-0.03, 0.03),
                     2: (-0.03, 0.03),
+                },
+            },
+        ),
+        "link_com": EventTermCfg(
+            func=mdp.dr.body_com_offset,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    ROBOT_ENTITY,
+                    body_names=NON_BASE_BODY_NAMES,
+                ),
+                "operation": "add",
+                "ranges": {
+                    0: (-0.015, 0.015),
+                    1: (-0.015, 0.015),
+                    2: (-0.015, 0.015),
                 },
             },
         ),

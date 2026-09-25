@@ -1,6 +1,6 @@
 # WF-TRON1B Deployment Scale Notes
 
-Current branch: `feature/action_delay`
+Training input changes are documented in [training input migration](training-input-migration.md).
 
 ## Recent Scale-Relevant Changes
 
@@ -8,13 +8,13 @@ Current branch: `feature/action_delay`
   `LEG_JOINT_NAMES`. Wheel joint positions are no longer part of actor
   proprioception.
 - `9c825a7` split wheel velocity into its own observation term:
-  `wheel_vel` now uses `WHEEL_JOINT_NAMES` with `scale=0.5`.
+  `wheel_vel` now uses `WHEEL_JOINT_NAMES` with `scale=0.05`.
 - Leg joint velocity observation remains `scale=0.05`.
 - Action scale did not change in these recent commits:
   - leg position action: `scale=0.5`
   - wheel velocity action: `scale=10.0`
-- The current uncommitted diff only changes reward weight
-  `wheel_air_time_balance: -1.0 -> -4.0`; it does not change deployment scale.
+- Wheel velocity observation scale changed from `0.5` to `0.05`. Use the
+  training scale associated with each checkpoint when deploying it.
 
 ## Actor Observation Layout
 
@@ -26,17 +26,16 @@ Deployment should build `actor_obs` in this exact term order:
 | `projected_gravity` | 3 | body-frame gravity projection | 1.0 |
 | `joint_pos` | 6 | leg joint positions relative to default | 1.0 |
 | `joint_vel` | 6 | leg joint velocities | 0.05 |
-| `wheel_vel` | 2 | wheel joint velocities | 0.5 |
+| `wheel_vel` | 2 | wheel joint velocities | 0.05 |
 | `actions` | 8 | previous policy action, raw normalized action | 1.0 |
 | `command` | 3 | body-frame command `[vx_b, vy_b, yaw_rate]` | 1.0 |
 
 Single-frame actor observation dimension: `31`.
 
-The representation student ONNX path uses two inputs:
-
-- `actor_obs`: current 31-dim actor observation.
-- `proprio_obs`: flattened actor history, `5 * 31 = 155` dims, using the same
-  term order for each frame.
+Exported input names and shapes depend on the selected representation task.
+Inspect the exported model before constructing inputs. LinVel tasks exclude
+commands from the 28-dimensional proprioceptive frame and supply commands
+separately. Depth tasks also require depth and recurrent state inputs.
 
 ## Joint And Action Order
 
