@@ -25,8 +25,6 @@ from rsl_rl.models import (
 from wheeled_legged_mjlab.rl.runner import get_wheeled_legged_metadata
 from wheeled_legged_mjlab.tasks.velocity import mdp
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
-    DEPTH_BUFFER_SIZE,
-    DEPTH_BUFFER_UPDATE_PERIOD,
     DEPTH_CAPTURE_FREQUENCY_HZ,
     DEPTH_CAMERA_ENTITY_NAME,
     DEPTH_CAMERA_FOVY_DELTA_RANGE_DEG,
@@ -66,15 +64,16 @@ def _assert_dynamics_context_group(cfg) -> None:
 def test_representation_teacher_student_tasks_are_registered() -> None:
     tasks = set(list_tasks())
 
-    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS" in tasks
     assert "Mjlab-Velocity-Flat-WF-Tron1B-RepTS" in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS" not in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth" not in tasks
 
-    rough_agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS"))
+    flat_agent = asdict(load_rl_cfg("Mjlab-Velocity-Flat-WF-Tron1B-RepTS"))
     flat_env = load_env_cfg("Mjlab-Velocity-Flat-WF-Tron1B-RepTS")
 
-    assert rough_agent["algorithm"]["class_name"] == "RepresentationTeacherStudentPPO"
-    assert rough_agent["actor"]["class_name"] == "RepresentationActorCritic"
-    assert rough_agent["obs_groups"] == {
+    assert flat_agent["algorithm"]["class_name"] == "RepresentationTeacherStudentPPO"
+    assert flat_agent["actor"]["class_name"] == "RepresentationActorCritic"
+    assert flat_agent["obs_groups"] == {
         "teacher_actor": ("actor",),
         "critic": ("critic", "dynamics_context"),
         "student_history": ("actor_history",),
@@ -87,10 +86,11 @@ def test_representation_teacher_student_tasks_are_registered() -> None:
 def test_representation_velocity_tasks_are_registered() -> None:
     tasks = set(list_tasks())
 
-    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel" in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-BlindGP" in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel" not in tasks
     assert "Mjlab-Velocity-Flat-WF-Tron1B-RepTS-LinVel" in tasks
 
-    rough_agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel"))
+    rough_agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-BlindGP"))
     flat_env = load_env_cfg("Mjlab-Velocity-Flat-WF-Tron1B-RepTS-LinVel")
 
     assert rough_agent["algorithm"]["class_name"] == "RepresentationVelocityTeacherStudentPPO"
@@ -182,58 +182,18 @@ def test_representation_velocity_observation_groups() -> None:
     assert "height_scan" in privileged_terms
 
 
-def test_depth_task_constructs_depth_buffer_without_training_input() -> None:
-    cfg = load_env_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth")
-    agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-Depth"))
-
-    depth_group = cfg.observations[DEPTH_CAMERA_NAME]
-    depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
-
-    assert depth_term.func is mdp.depth_buffer
-    assert depth_term.params == {
-        "sensor_name": DEPTH_CAMERA_NAME,
-        "buffer_size": DEPTH_BUFFER_SIZE,
-        "update_period": DEPTH_BUFFER_UPDATE_PERIOD,
-        "left_crop": DEPTH_LEFT_CROP,
-        "depth_min_m": 0.2,
-        "depth_max_m": 2.0,
-    }
-    depth_sensor = next(
-        sensor for sensor in cfg.scene.sensors if sensor.name == DEPTH_CAMERA_NAME
-    )
-    assert (depth_sensor.height, depth_sensor.width) == (
-        DEPTH_CAMERA_HEIGHT,
-        DEPTH_CAMERA_WIDTH,
-    )
-    assert DEPTH_MODEL_WIDTH == DEPTH_CAMERA_WIDTH - DEPTH_LEFT_CROP == 45
-    assert depth_group.enable_corruption is False
-    _assert_dynamics_context_group(cfg)
-    assert agent["obs_groups"] == {
-        "teacher_actor": ("actor",),
-        "critic": ("critic", "dynamics_context"),
-        "student_history": ("actor_history",),
-        "privileged_encoder": ("critic", "dynamics_context"),
-    }
-    training_obs_groups = {
-        group for groups in agent["obs_groups"].values() for group in groups
-    }
-    assert DEPTH_CAMERA_NAME not in training_obs_groups
-
-
 def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     tasks = set(list_tasks())
 
     assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth" in tasks
-    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict" in tasks
-    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict-NoRough" in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict-OursGP" in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict" not in tasks
+    assert "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict-NoRough" not in tasks
 
     cfg = wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg()
     agent = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth"))
     predict_agent = asdict(
-        load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict")
-    )
-    no_rough_agent = asdict(
-        load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict-NoRough")
+        load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict-OursGP")
     )
     depth_group = cfg.observations[DEPTH_CAMERA_NAME]
     depth_term = depth_group.terms[DEPTH_CAMERA_NAME]
@@ -267,8 +227,6 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     )
     assert predict_agent["algorithm"]["predictor_learning_rate"] == 1.0e-3
     assert predict_agent["algorithm"]["roughness_loss_coef"] == 0.2
-    assert no_rough_agent["algorithm"]["roughness_loss_coef"] == 0.0
-    assert no_rough_agent["experiment_name"].endswith("depth_predict_no_rough_latent64")
     assert predict_agent["algorithm"]["latent_dynamics_loss_coef"] == 3.0
     assert predict_agent["algorithm"]["latent_dynamics_velocity_loss_coef"] == 1.0
     assert predict_agent["algorithm"]["latent_dynamics_use_ema_target"] is False
