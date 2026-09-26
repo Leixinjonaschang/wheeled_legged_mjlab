@@ -267,3 +267,4 @@ MUJOCO_LOG.TXT
 tests/
 !tests/
 !tests/test_action_delay.py
+!tests/test_ablation_launcher.py
