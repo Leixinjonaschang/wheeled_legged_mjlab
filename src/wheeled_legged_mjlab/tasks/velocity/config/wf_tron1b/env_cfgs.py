@@ -770,7 +770,9 @@ def make_events(*, depth: bool = False) -> dict[str, EventTermCfg]:
     return events
 
 
-def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
+def make_rewards(
+    *, rough: bool, roughness_conditioned_rewards: bool = True
+) -> dict[str, RewardTermCfg]:
     """Velocity tracking rewards plus wheel-legged posture and safety terms."""
     wheel_body_cfg = SceneEntityCfg(ROBOT_ENTITY, body_names=WHEEL_BODY_NAMES)
     wheel_joint_cfg = SceneEntityCfg(ROBOT_ENTITY, joint_names=WHEEL_JOINT_NAMES)
@@ -937,7 +939,7 @@ def make_rewards(*, rough: bool) -> dict[str, RewardTermCfg]:
         ),
     }
 
-    if rough:
+    if rough and roughness_conditioned_rewards:
         roughness_params = {
             "roughness_sensor_name": "terrain_scan",
             "wheel_radius": WHEEL_RADIUS,
@@ -1134,6 +1136,7 @@ def make_env_cfg(
     depth: bool = False,
     lin_vel_representation: bool = False,
     async_depth: bool = False,
+    roughness_conditioned_rewards: bool = True,
 ) -> ManagerBasedRlEnvCfg:
     cfg = ManagerBasedRlEnvCfg(
         scene=make_scene(rough=rough, depth=depth),
@@ -1146,7 +1149,9 @@ def make_env_cfg(
         actions=make_actions(action_delay=not play),
         commands=make_commands(),
         events=make_events(depth=depth),
-        rewards=make_rewards(rough=rough),
+        rewards=make_rewards(
+            rough=rough, roughness_conditioned_rewards=roughness_conditioned_rewards
+        ),
         terminations=make_terminations(rough=rough),
         curriculum=make_curriculum(rough=rough),
         metrics=make_metrics(),
@@ -1231,7 +1236,9 @@ def wf_tron1b_rough_rep_ts_lin_vel_env_cfg(play: bool = False) -> ManagerBasedRl
     return make_env_cfg(rough=True, play=play, lin_vel_representation=True)
 
 
-def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(
+    play: bool = False, *, roughness_conditioned_rewards: bool = True
+) -> ManagerBasedRlEnvCfg:
     """Create rough-terrain velocity representation configuration with async depth."""
     return make_env_cfg(
         rough=True,
@@ -1239,6 +1246,7 @@ def wf_tron1b_rough_rep_ts_lin_vel_depth_env_cfg(play: bool = False) -> ManagerB
         depth=True,
         lin_vel_representation=True,
         async_depth=True,
+        roughness_conditioned_rewards=roughness_conditioned_rewards,
     )
 
 

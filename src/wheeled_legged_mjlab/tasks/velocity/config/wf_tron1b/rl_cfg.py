@@ -316,6 +316,13 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg() -> WFTRON1BRslRlOnPolicy
     return cfg
 
 
+def wf_tron1b_rep_ts_lin_vel_depth_predict_rggp_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
+    """Keep predictor training unchanged for the roughness reward ablation."""
+    cfg = wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg()
+    cfg.experiment_name = "wf_tron1b_velocity_rep_ts_lin_vel_depth_predict_rggp_latent64"
+    return cfg
+
+
 def wf_tron1b_rep_ts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
     """Create representation-level teacher-student runner configuration."""
     return WFTRON1BRslRlOnPolicyRunnerCfg(
