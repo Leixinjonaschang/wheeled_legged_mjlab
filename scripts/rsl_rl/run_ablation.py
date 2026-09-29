@@ -1,4 +1,7 @@
-"""Run the three depth ablations, seed by seed, on disjoint two-GPU groups.
+"""Run the depth ablations, then the blind baseline, for three seeds on two-GPU groups.
+
+Depth jobs are queued seed by seed, followed by the blind baseline for every seed;
+a freed GPU pair starts the next queued job at once.
 
 Preview: uv run python scripts/rsl_rl/run_ablation.py --dry-run
 Launch:  uv run python scripts/rsl_rl/run_ablation.py
@@ -25,7 +28,16 @@ TASKS = (
     ("RGGP", PREFIX + "-Predict-RGGP"),
     ("OursGP", PREFIX + "-Predict-OursGP"),
 )
-SEEDS = (0, 1, 2)  # Trial indices used in scheduling.
+# Queued after every depth job so the depth ablation results arrive first.
+TAIL_TASKS = (("BlindGP", "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-BlindGP"),)
+SEEDS = (0, 1, 2)  # Trial indices; jobs are queued in this order.
+
+
+def jobs() -> list[tuple[int, str, str]]:
+    """Return (trial, name, task) in launch order."""
+    return [(seed, name, task) for seed in SEEDS for name, task in TASKS] + [
+        (seed, name, task) for name, task in TAIL_TASKS for seed in SEEDS
+    ]
 
 
 def worker_seeds(seed: int) -> tuple[int, int]:
@@ -120,8 +132,7 @@ def run(args: argparse.Namespace, groups: list[str]) -> int:
             "command": command(task, name, seed, args),
             "status": "pending",
         }
-        for seed in SEEDS
-        for name, task in TASKS
+        for seed, name, task in jobs()
     ]
 
     def save_status():
@@ -133,81 +144,80 @@ def run(args: argparse.Namespace, groups: list[str]) -> int:
     save_status()
     print(f"Launcher logs and status: {output}", flush=True)
     try:
-        for seed in SEEDS:
-            print(f"=== Trial {seed}; worker seeds {worker_seeds(seed)} ===", flush=True)
-            pending = deque(record for record in records if record["seed"] == seed)
-            while pending or running:
-                # Check every active job before assigning any newly freed slot.
-                for slot, (process, stream, record) in list(running.items()):
-                    code = process.poll()
-                    if code is None:
-                        continue
-                    record.update(
-                        exit_code=code, finished_at=datetime.now(UTC).isoformat()
-                    )
-                    record["status"] = "completed" if code == 0 else "failed"
-                    save_status()
-                    if code != 0:
-                        print(
-                            f"FAILED {record['run_name']}: see {record['stdout']}",
-                            flush=True,
-                        )
-                        return 1
-                    stream.close()
-                    del running[slot]
-                    print(f"DONE {record['run_name']}", flush=True)
-
-                for slot, devices in enumerate(groups):
-                    if not pending or len(running) >= args.max_concurrent:
-                        break
-                    if slot in running:
-                        continue
-                    record = pending.popleft()
-                    stdout = output / f"{record['run_name']}.log"
-                    child_env = os.environ.copy()
-                    child_env["CUDA_VISIBLE_DEVICES"] = devices
-                    child_env["PYTHONUNBUFFERED"] = "1"
-                    # Keep torchrunx output local to this experiment even if the
-                    # parent shell defines a shared logging directory.
-                    child_env["TORCHRUNX_LOG_DIR"] = str(
-                        output / f"{record['run_name']}_workers"
-                    )
-                    record.update(
-                        gpus=devices,
-                        stdout=str(stdout),
-                        started_at=datetime.now(UTC).isoformat(),
-                        status="starting",
-                    )
-                    save_status()
-                    stream = stdout.open("w")
-                    stream.write(
-                        f"CUDA_VISIBLE_DEVICES={devices} {shlex.join(record['command'])}\n"
-                    )
-                    stream.flush()
-                    try:
-                        process = subprocess.Popen(
-                            record["command"],
-                            cwd=ROOT,
-                            env=child_env,
-                            stdout=stream,
-                            stderr=subprocess.STDOUT,
-                            start_new_session=True,
-                        )
-                    except OSError:
-                        stream.close()
-                        record["status"] = "failed"
-                        save_status()
-                        raise
-                    running[slot] = (process, stream, record)
-                    record.update(pid=process.pid, status="running")
-                    save_status()
+        # One global queue: a freed GPU pair immediately takes the next job, even
+        # if it belongs to the next seed, so no pair idles while jobs are pending.
+        pending = deque(records)
+        while pending or running:
+            # Check every active job before assigning any newly freed slot.
+            for slot, (process, stream, record) in list(running.items()):
+                code = process.poll()
+                if code is None:
+                    continue
+                record.update(
+                    exit_code=code, finished_at=datetime.now(UTC).isoformat()
+                )
+                record["status"] = "completed" if code == 0 else "failed"
+                save_status()
+                if code != 0:
                     print(
-                        f"START {record['run_name']} GPUs={devices} log={stdout}",
+                        f"FAILED {record['run_name']}: see {record['stdout']}",
                         flush=True,
                     )
-                if running:
-                    time.sleep(1)
-            # This barrier prevents seed N+1 from starting before all of seed N.
+                    return 1
+                stream.close()
+                del running[slot]
+                print(f"DONE {record['run_name']}", flush=True)
+
+            for slot, devices in enumerate(groups):
+                if not pending or len(running) >= args.max_concurrent:
+                    break
+                if slot in running:
+                    continue
+                record = pending.popleft()
+                stdout = output / f"{record['run_name']}.log"
+                child_env = os.environ.copy()
+                child_env["CUDA_VISIBLE_DEVICES"] = devices
+                child_env["PYTHONUNBUFFERED"] = "1"
+                # Keep torchrunx output local to this experiment even if the
+                # parent shell defines a shared logging directory.
+                child_env["TORCHRUNX_LOG_DIR"] = str(
+                    output / f"{record['run_name']}_workers"
+                )
+                record.update(
+                    gpus=devices,
+                    stdout=str(stdout),
+                    started_at=datetime.now(UTC).isoformat(),
+                    status="starting",
+                )
+                save_status()
+                stream = stdout.open("w")
+                stream.write(
+                    f"CUDA_VISIBLE_DEVICES={devices} {shlex.join(record['command'])}\n"
+                )
+                stream.flush()
+                try:
+                    process = subprocess.Popen(
+                        record["command"],
+                        cwd=ROOT,
+                        env=child_env,
+                        stdout=stream,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+                except OSError:
+                    stream.close()
+                    record["status"] = "failed"
+                    save_status()
+                    raise
+                running[slot] = (process, stream, record)
+                record.update(pid=process.pid, status="running")
+                save_status()
+                print(
+                    f"START {record['run_name']} GPUs={devices} log={stdout}",
+                    flush=True,
+                )
+            if running:
+                time.sleep(1)
         return 0
     finally:
         stop_processes(running)
@@ -247,7 +257,7 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print all nine jobs without launching or writing files.",
+        help="Print all queued jobs without launching or writing files.",
     )
     args = parser.parse_args()
     try:
@@ -265,15 +275,11 @@ def main() -> int:
         flush=True,
     )
     if args.dry_run:
-        for seed in SEEDS:
+        for index, (seed, name, task) in enumerate(jobs(), start=1):
+            print(f"Job {index}: trial {seed}; worker seeds {worker_seeds(seed)}")
             print(
-                f"Trial {seed}; worker seeds {worker_seeds(seed)} "
-                "(wait for all three jobs before the next seed):"
+                f"  CUDA_VISIBLE_DEVICES=<free GPU pair> {shlex.join(command(task, name, seed, args))}"
             )
-            for name, task in TASKS:
-                print(
-                    f"  CUDA_VISIBLE_DEVICES=<free GPU pair> {shlex.join(command(task, name, seed, args))}"
-                )
         return 0
 
     # Preflight only when launching, so dry-run works without CUDA or mjlab.
@@ -286,7 +292,7 @@ def main() -> int:
         parser.error(
             f"Requested GPU index is unavailable; only {count} CUDA devices are visible."
         )
-    missing = [task for _, task in TASKS if task not in list_tasks()]
+    missing = [task for _, task in TASKS + TAIL_TASKS if task not in list_tasks()]
     if missing:
         parser.error(f"Tasks are not registered: {missing}")
 

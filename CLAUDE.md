@@ -17,9 +17,9 @@ MuJoCo / mujoco-warp 3.11.0, warp-lang 1.14.0, rsl-rl-lib 5.3.0 (from `rsl_rl/`)
 ```shell
 uv sync --locked                      # install; do NOT use `pip install .` (skips the uv overrides)
 
-uv run pytest tests                   # project tests (GPU-only tests skip without CUDA)
-uv run pytest rsl_rl/tests            # bundled RSL-RL tests
-uv run pytest tests/test_velocity_command.py::<test_name>   # single test
+uv run python -m pytest tests         # project tests (`python -m` puts the repo root on sys.path for `scripts.*` imports; GPU-only tests skip without CUDA)
+uv run python -m pytest rsl_rl/tests  # bundled RSL-RL tests
+uv run python -m pytest tests/test_velocity_command.py::<test_name>   # single test
 
 uv run ruff check <path>              # rsl_rl/ has its own ruff.toml (line length 120)
 
@@ -30,7 +30,7 @@ uv run python scripts/rsl_rl/train.py <TASK> --gpu-ids [0,1]      # multi-GPU vi
 uv run python scripts/rsl_rl/play.py <TASK> --checkpoint-file logs/rsl_rl/<experiment>/<run>/model_N.pt
 uv run python scripts/rsl_rl/play.py <TASK> --agent zero --num-envs 1 --no-terminations True
 
-# Depth ablation batch (LPGP, RGGP, OursGP × seeds 42/44/46 on GPU pairs (0,1),(2,3))
+# Ablation batch: LPGP, RGGP, OursGP × seeds 42/44/46, then BlindGP × 3 seeds; GPU pairs (0,1),(2,3)
 uv run python scripts/rsl_rl/run_ablation.py --dry-run
 ```
 
@@ -49,7 +49,7 @@ Only the tasks in `src/wheeled_legged_mjlab/__init__.py` exist (the package is d
 
 The README and `tests/test_mjlab160_integration.py` still reference `Mjlab-Velocity-Flat-WF-Tron1B` /
 `Mjlab-Velocity-Rough-WF-Tron1B`, which are no longer registered (their cfg factories still exist).
-`run_ablation.py` derives task IDs from the `...-RepTS-LinVel-Depth` prefix, so renaming tasks breaks it.
+`run_ablation.py` hard-codes these task IDs (`TASKS`, `TAIL_TASKS`), so renaming tasks breaks it.
 
 ## Architecture
 

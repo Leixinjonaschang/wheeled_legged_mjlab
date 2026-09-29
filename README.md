@@ -35,21 +35,23 @@ uv sync --locked
 
 ### Training
 
-For the depth ablation batch on four GPUs:
+For the depth ablation batch plus the blind baseline on four GPUs:
 
 ```shell
 uv run python scripts/rsl_rl/run_ablation.py --dry-run
 uv run python scripts/rsl_rl/run_ablation.py
 ```
 
-The batch runs base seeds `42`, `44`, `46` in order. Within each trial it launches
-`LPGP`, `RGGP`, then `OursGP`, with up to two experiments running concurrently
-on GPU pairs `(0,1)` and `(2,3)`. All three experiments for a seed must finish
-before the next seed starts. Each experiment uses 2048 environments per GPU
+The batch queues twelve jobs in order: first the depth ablations for base seeds
+`42`, `44`, `46` (within each seed `LPGP`, `RGGP`, then `OursGP`), then the blind
+baseline `BlindGP` for seeds `42`, `44`, `46`. Up to two experiments run concurrently on GPU
+pairs `(0,1)` and `(2,3)`; as soon as a pair is free it starts the next queued job,
+even if that job belongs to the next seed, so no pair idles while jobs remain.
+Each experiment uses 2048 environments per GPU
 (4096 total), 30,000 iterations, and run names such as `LPGP_seed42`.
 The launcher passes base seeds `42`, `44`, `46` to `--agent.seed`, respectively.
 The existing trainer adds the local rank, so worker seeds are `(42,43)`, `(44,45)`,
-and `(46,47)`. All three tasks use the same seed pair for a given trial.
+and `(46,47)`. All four tasks use the same seed pair for a given trial.
 Run names include the actual base seed (for example, `LPGP_seed44` uses base seed `44`).
 
 Use `--max-concurrent 1` for strictly sequential training, or

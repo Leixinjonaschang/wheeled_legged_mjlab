@@ -20,7 +20,7 @@ def options(tmp_path, max_concurrent=2):
 
 
 @pytest.mark.parametrize("max_concurrent", [1, 2])
-def test_seed_barrier_and_exclusive_gpu_pairs(tmp_path, monkeypatch, max_concurrent):
+def test_queue_order_no_idle_pairs_and_exclusive_gpus(tmp_path, monkeypatch, max_concurrent):
     active = {}
     launched = []
     tick = [0]
@@ -33,7 +33,6 @@ def test_seed_barrier_and_exclusive_gpu_pairs(tmp_path, monkeypatch, max_concurr
             assert self.seed in (42, 44, 46)
             self.gpus = env["CUDA_VISIBLE_DEVICES"]
             assert self.gpus not in active
-            assert all(process.seed == self.seed for process in active.values())
             assert len(active) < max_concurrent
             assert cmd[cmd.index("--env.scene.num-envs") + 1] == "2048"
             assert cmd[cmd.index("--gpu-ids") + 1] == "[0,1]"
@@ -51,17 +50,23 @@ def test_seed_barrier_and_exclusive_gpu_pairs(tmp_path, monkeypatch, max_concurr
             return 0
 
     monkeypatch.setattr(launcher.subprocess, "Popen", Process)
-    monkeypatch.setattr(
-        launcher.time, "sleep", lambda _: tick.__setitem__(0, tick[0] + 1)
-    )
+    def sleep(_):
+        # Every pair must be busy while jobs are still queued.
+        assert len(active) == max_concurrent or len(launched) == 12
+        tick[0] += 1
+
+    monkeypatch.setattr(launcher.time, "sleep", sleep)
     args = options(tmp_path, max_concurrent)
     assert launcher.run(args, ["0,1", "2,3"]) == 0
     assert launched == [
         f"{name}_seed{seed}"
         for seed in (42, 44, 46)
         for name in ("LPGP", "RGGP", "OursGP")
-    ]
+    ] + [f"BlindGP_seed{seed}" for seed in (42, 44, 46)]
     assert not active
+    # LPGP takes 3 ticks and the others 1; a per-seed barrier would leave one
+    # pair idle while each LPGP finishes.
+    assert tick[0] == (9 if max_concurrent == 2 else 18)
     records = json.loads((args.output_dir / "status.json").read_text())
     assert all(record["status"] == "completed" for record in records)
     expected_seeds = {0: [42, 43], 1: [44, 45], 2: [46, 47]}
@@ -100,7 +105,7 @@ def test_failure_stops_queue_and_cleans_up_active_jobs(tmp_path, monkeypatch):
     records = json.loads((args.output_dir / "status.json").read_text())
     assert [record["status"] for record in records] == ["interrupted", "failed"] + [
         "pending"
-    ] * 7
+    ] * 10
 
 
 def test_gpu_mapping_respects_visible_devices(monkeypatch):
@@ -134,13 +139,23 @@ def test_dry_run_does_not_launch_or_create_output(tmp_path):
             k: v for k, v in launcher.os.environ.items() if k != "CUDA_VISIBLE_DEVICES"
         },
     )
-    assert result.stdout.count("--agent.run-name") == 9
+    assert result.stdout.count("--agent.run-name") == 12
+    run_names = [
+        line.split("--agent.run-name ")[1].split()[0]
+        for line in result.stdout.splitlines()
+        if "--agent.run-name" in line
+    ]
+    assert run_names == [
+        f"{name}_seed{seed}"
+        for seed in (42, 44, 46)
+        for name in ("LPGP", "RGGP", "OursGP")
+    ] + [f"BlindGP_seed{seed}" for seed in (42, 44, 46)]
     for trial_seed, base_seed in ((0, 42), (1, 44), (2, 46)):
         assert (
-            f"Trial {trial_seed}; worker seeds ({base_seed}, {base_seed + 1})"
+            f"trial {trial_seed}; worker seeds ({base_seed}, {base_seed + 1})"
             in result.stdout
         )
-        for name in ("LPGP", "RGGP", "OursGP"):
+        for name in ("LPGP", "RGGP", "OursGP", "BlindGP"):
             assert (
                 f"--agent.seed {base_seed} --agent.run-name {name}_seed{base_seed}"
                 in result.stdout
