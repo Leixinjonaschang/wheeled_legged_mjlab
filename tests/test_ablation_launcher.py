@@ -59,10 +59,10 @@ def test_queue_order_no_idle_pairs_and_exclusive_gpus(tmp_path, monkeypatch, max
     args = options(tmp_path, max_concurrent)
     assert launcher.run(args, ["0,1", "2,3"]) == 0
     assert launched == [
-        f"{name}_seed{seed}"
+        f"{name}_noDynCtx_seed{seed}"
         for seed in (42, 44, 46)
         for name in ("LPGP", "RGGP", "OursGP")
-    ] + [f"BlindGP_seed{seed}" for seed in (42, 44, 46)]
+    ] + [f"BlindGP_noDynCtx_seed{seed}" for seed in (42, 44, 46)]
     assert not active
     # LPGP takes 3 ticks and the others 1; a per-seed barrier would leave one
     # pair idle while each LPGP finishes.
@@ -101,7 +101,7 @@ def test_failure_stops_queue_and_cleans_up_active_jobs(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher, "stop_processes", stop)
     args = options(tmp_path)
     assert launcher.run(args, ["0,1", "2,3"]) == 1
-    assert launched == stopped == ["LPGP_seed42", "RGGP_seed42"]
+    assert launched == stopped == ["LPGP_noDynCtx_seed42", "RGGP_noDynCtx_seed42"]
     records = json.loads((args.output_dir / "status.json").read_text())
     assert [record["status"] for record in records] == ["interrupted", "failed"] + [
         "pending"
@@ -146,10 +146,10 @@ def test_dry_run_does_not_launch_or_create_output(tmp_path):
         if "--agent.run-name" in line
     ]
     assert run_names == [
-        f"{name}_seed{seed}"
+        f"{name}_noDynCtx_seed{seed}"
         for seed in (42, 44, 46)
         for name in ("LPGP", "RGGP", "OursGP")
-    ] + [f"BlindGP_seed{seed}" for seed in (42, 44, 46)]
+    ] + [f"BlindGP_noDynCtx_seed{seed}" for seed in (42, 44, 46)]
     for trial_seed, base_seed in ((0, 42), (1, 44), (2, 46)):
         assert (
             f"trial {trial_seed}; worker seeds ({base_seed}, {base_seed + 1})"
@@ -157,7 +157,7 @@ def test_dry_run_does_not_launch_or_create_output(tmp_path):
         )
         for name in ("LPGP", "RGGP", "OursGP", "BlindGP"):
             assert (
-                f"--agent.seed {base_seed} --agent.run-name {name}_seed{base_seed}"
+                f"--agent.seed {base_seed} --agent.run-name {name}_noDynCtx_seed{base_seed}"
                 in result.stdout
             )
     assert not output.exists()

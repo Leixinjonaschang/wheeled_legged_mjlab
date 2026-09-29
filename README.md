@@ -48,11 +48,12 @@ baseline `BlindGP` for seeds `42`, `44`, `46`. Up to two experiments run concurr
 pairs `(0,1)` and `(2,3)`; as soon as a pair is free it starts the next queued job,
 even if that job belongs to the next seed, so no pair idles while jobs remain.
 Each experiment uses 2048 environments per GPU
-(4096 total), 30,000 iterations, and run names such as `LPGP_seed42`.
+(4096 total), 30,000 iterations, and run names such as `LPGP_noDynCtx_seed42`
+(`noDynCtx`: dynamics context is not an input to the teacher encoder or critic).
 The launcher passes base seeds `42`, `44`, `46` to `--agent.seed`, respectively.
 The existing trainer adds the local rank, so worker seeds are `(42,43)`, `(44,45)`,
 and `(46,47)`. All four tasks use the same seed pair for a given trial.
-Run names include the actual base seed (for example, `LPGP_seed44` uses base seed `44`).
+Run names include the actual base seed (for example, `LPGP_noDynCtx_seed44` uses base seed `44`).
 
 Use `--max-concurrent 1` for strictly sequential training, or
 `--gpu-groups 0,1 2,3` to select different pairs (indices are relative to an

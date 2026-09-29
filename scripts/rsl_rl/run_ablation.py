@@ -31,6 +31,8 @@ TASKS = (
 # Queued after every depth job so the depth ablation results arrive first.
 TAIL_TASKS = (("BlindGP", "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-BlindGP"),)
 SEEDS = (0, 1, 2)  # Trial indices; jobs are queued in this order.
+# Marks this batch's setting: dynamics context removed from teacher encoder and critic.
+RUN_TAG = "noDynCtx"
 
 
 def jobs() -> list[tuple[int, str, str]]:
@@ -43,6 +45,10 @@ def jobs() -> list[tuple[int, str, str]]:
 def worker_seeds(seed: int) -> tuple[int, int]:
     """Allocate disjoint worker seeds to each two-GPU experiment repeat."""
     return 42 + 2 * seed, 43 + 2 * seed
+
+
+def run_name(name: str, seed: int) -> str:
+    return f"{name}_{RUN_TAG}_seed{worker_seeds(seed)[0]}"
 
 
 def gpu_groups(values: list[str]) -> list[tuple[int, int]]:
@@ -87,7 +93,7 @@ def command(task: str, name: str, seed: int, args: argparse.Namespace) -> list[s
         "--agent.seed",
         str(worker_seeds(seed)[0]),
         "--agent.run-name",
-        f"{name}_seed{worker_seeds(seed)[0]}",
+        run_name(name, seed),
         "--agent.max-iterations",
         str(args.max_iterations),
         "--agent.logger",
@@ -124,7 +130,7 @@ def run(args: argparse.Namespace, groups: list[str]) -> int:
     output.mkdir(parents=True, exist_ok=False)
     records = [
         {
-            "run_name": f"{name}_seed{worker_seeds(seed)[0]}",
+            "run_name": run_name(name, seed),
             "seed": seed,
             "base_seed": worker_seeds(seed)[0],
             "worker_seeds": worker_seeds(seed),
