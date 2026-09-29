@@ -75,9 +75,9 @@ def test_representation_teacher_student_tasks_are_registered() -> None:
     assert flat_agent["actor"]["class_name"] == "RepresentationActorCritic"
     assert flat_agent["obs_groups"] == {
         "teacher_actor": ("actor",),
-        "critic": ("critic", "dynamics_context"),
+        "critic": ("critic",),
         "student_history": ("actor_history",),
-        "privileged_encoder": ("critic", "dynamics_context"),
+        "privileged_encoder": ("critic",),
     }
     assert "actor_history" in flat_env.observations
     assert "dynamics_context" in flat_env.observations
@@ -103,8 +103,8 @@ def test_representation_velocity_tasks_are_registered() -> None:
         "proprio_history": ("proprio_history",),
         "actor_command": ("actor_command",),
         "lin_vel_target": ("lin_vel_target",),
-        "critic": ("critic", "dynamics_context"),
-        "privileged_encoder": ("privileged_encoder", "dynamics_context"),
+        "critic": ("critic",),
+        "privileged_encoder": ("privileged_encoder",),
     }
     assert "proprio_history" in flat_env.observations
     assert "actor_history" not in flat_env.observations
@@ -247,8 +247,8 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
         "proprio_history": ("proprio_history",),
         "actor_command": ("actor_command",),
         "lin_vel_target": ("lin_vel_target",),
-        "critic": ("critic", "dynamics_context"),
-        "privileged_encoder": ("privileged_encoder", "dynamics_context"),
+        "critic": ("critic",),
+        "privileged_encoder": ("privileged_encoder",),
         "depth_encoder": (DEPTH_CAMERA_NAME,),
         "wheel_roughness": ("wheel_roughness",),
     }
