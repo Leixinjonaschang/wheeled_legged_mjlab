@@ -52,7 +52,7 @@ Rollouts are NOT bit-reproducible run to run: terrain, DR, reset states and comm
 identical across runs and checkpoints, but the GPU physics differs from the first step
 (nondeterministic MuJoCo Warp kernels), so repeating a run changes per-cell rates by a few
 percentage points. Compare checkpoints with the confidence intervals of stats.json and
-against the run-to-run noise floor (logs/lipm_eval/mode_switch_v2/tools/noise_floor.py on
+against the run-to-run noise floor (scripts/eval/mode_switch/tools/noise_floor.py on
 a replicate run), not on point estimates.
 
 Pre-specified switching criterion (forward commands):
@@ -294,7 +294,7 @@ def make_env_cfg(task_id: str, rough_type: str, command: str, num_envs: int, see
 def rollout(args):
     import torch
 
-    sys.path.insert(0, str(ROOT / "logs/lipm_eval/full/diagnostics"))
+    sys.path.insert(0, str(ROOT / "scripts/eval/lipm_diagnostics"))
     import lipm_eval as L
     from behavior_record import build, rollout as record
     from mjlab.tasks.registry import load_env_cfg
