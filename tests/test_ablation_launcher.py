@@ -8,12 +8,16 @@ import pytest
 
 from scripts.rsl_rl import run_ablation as launcher
 
-EXPECTED_TRIALS = {
-    42: ("PredictBlindGP",),
-    44: ("PredictBlindGP", "OursGP"),
-    46: ("PredictBlindGP", "LPGP", "RGGP", "OursGP"),
-}
-EXPECTED_JOBS = [f"{name}_seed{seed}" for seed, names in EXPECTED_TRIALS.items() for name in names]
+# Launch order: slowest jobs first, blind jobs last.
+EXPECTED_JOBS = [
+    "OursGP_seed44",
+    "OursGP_seed46",
+    "RGGP_seed46",
+    "LPGP_seed46",
+    "PredictBlindGP_seed42",
+    "PredictBlindGP_seed44",
+    "PredictBlindGP_seed46",
+]
 
 
 def options(tmp_path, max_concurrent=2):
@@ -27,10 +31,11 @@ def options(tmp_path, max_concurrent=2):
 
 
 @pytest.mark.parametrize("max_concurrent", [1, 2])
-def test_seed_barrier_and_exclusive_gpu_pairs(tmp_path, monkeypatch, max_concurrent):
+def test_free_gpu_pairs_start_next_job_without_seed_barrier(tmp_path, monkeypatch, max_concurrent):
     active = {}
     launched = []
     tick = [0]
+    concurrent_seeds = []
 
     class Process:
         def __init__(self, cmd, *, cwd, env, stdout, stderr, start_new_session):
@@ -40,15 +45,15 @@ def test_seed_barrier_and_exclusive_gpu_pairs(tmp_path, monkeypatch, max_concurr
             assert self.seed in (42, 44, 46)
             self.gpus = env["CUDA_VISIBLE_DEVICES"]
             assert self.gpus not in active
-            assert all(process.seed == self.seed for process in active.values())
             assert len(active) < max_concurrent
             assert cmd[cmd.index("--env.scene.num-envs") + 1] == "2048"
             assert cmd[cmd.index("--gpu-ids") + 1] == "[0,1]"
             assert start_new_session
             assert self.name in env["TORCHRUNX_LOG_DIR"]
-            self.finish = tick[0] + (3 if self.name.startswith("LPGP") else 1)
+            self.finish = tick[0] + (1 if self.name.startswith("PredictBlindGP") else 3)
             self.pid = 100 + len(launched)
             active[self.gpus] = self
+            concurrent_seeds.append({process.seed for process in active.values()})
             launched.append(self.name)
 
         def poll(self):
@@ -63,7 +68,10 @@ def test_seed_barrier_and_exclusive_gpu_pairs(tmp_path, monkeypatch, max_concurr
     )
     args = options(tmp_path, max_concurrent)
     assert launcher.run(args, ["0,1", "2,3"]) == 0
-    assert launched == [*EXPECTED_JOBS]
+    assert launched == EXPECTED_JOBS
+    if max_concurrent == 2:
+        # A blind job of one seed starts while a depth job of another seed is still running.
+        assert max(len(seeds) for seeds in concurrent_seeds) == 2
     assert not active
     records = json.loads((args.output_dir / "status.json").read_text())
     assert all(record["status"] == "completed" for record in records)
@@ -87,9 +95,7 @@ def test_failure_stops_queue_and_cleans_up_active_jobs(tmp_path, monkeypatch):
             launched.append(self.name)
 
         def poll(self):
-            if self.name == "PredictBlindGP_seed42":
-                return 0
-            return 7 if self.name == "OursGP_seed44" else None
+            return 7 if self.name == "OursGP_seed46" else None
 
     def stop(running):
         for process, stream, _ in running.values():
@@ -101,14 +107,9 @@ def test_failure_stops_queue_and_cleans_up_active_jobs(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher, "stop_processes", stop)
     args = options(tmp_path)
     assert launcher.run(args, ["0,1", "2,3"]) == 1
-    assert launched == ["PredictBlindGP_seed42", "PredictBlindGP_seed44", "OursGP_seed44"]
-    assert stopped == ["PredictBlindGP_seed44", "OursGP_seed44"]
+    assert launched == stopped == ["OursGP_seed44", "OursGP_seed46"]
     records = json.loads((args.output_dir / "status.json").read_text())
-    assert [record["status"] for record in records] == [
-        "completed",
-        "interrupted",
-        "failed",
-    ] + ["pending"] * 4
+    assert [record["status"] for record in records] == ["interrupted", "failed"] + ["pending"] * 5
 
 
 def test_gpu_mapping_respects_visible_devices(monkeypatch):
@@ -142,12 +143,12 @@ def test_dry_run_does_not_launch_or_create_output(tmp_path):
             k: v for k, v in launcher.os.environ.items() if k != "CUDA_VISIBLE_DEVICES"
         },
     )
-    assert result.stdout.count("--agent.run-name") == len(EXPECTED_JOBS)
-    for trial_seed, base_seed in ((0, 42), (1, 44), (2, 46)):
-        assert (
-            f"Trial {trial_seed}; worker seeds ({base_seed}, {base_seed + 1})"
-            in result.stdout
-        )
+    run_names = [
+        line.split("--agent.run-name ", 1)[1].split()[0]
+        for line in result.stdout.splitlines()
+        if "--agent.run-name" in line
+    ]
+    assert run_names == EXPECTED_JOBS
     for job in EXPECTED_JOBS:
         base_seed = job.rsplit("_seed", 1)[1]
         assert f"--agent.seed {base_seed} --agent.run-name {job}" in result.stdout
