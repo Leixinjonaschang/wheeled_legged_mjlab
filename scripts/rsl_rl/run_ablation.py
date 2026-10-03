@@ -1,4 +1,4 @@
-"""Run the three depth ablations, seed by seed, on disjoint two-GPU groups.
+"""Run the ablation trials, seed by seed, on disjoint two-GPU groups.
 
 Preview: uv run python scripts/rsl_rl/run_ablation.py --dry-run
 Launch:  uv run python scripts/rsl_rl/run_ablation.py
@@ -19,13 +19,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-PREFIX = "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth"
+PREFIX = "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel"
+# (run name, task, trial indices); trial t trains with base seed 42 + 2t.
 TASKS = (
-    ("LPGP", PREFIX + "-LPGP"),
-    ("RGGP", PREFIX + "-Predict-RGGP"),
-    ("OursGP", PREFIX + "-Predict-OursGP"),
+    ("PredictBlindGP", PREFIX + "-Predict-BlindGP", (0, 1, 2)),  # Seeds 42, 44, 46.
+    ("LPGP", PREFIX + "-Depth-LPGP", (2,)),  # Seed 46.
+    ("RGGP", PREFIX + "-Depth-Predict-RGGP", (2,)),  # Seed 46.
+    ("OursGP", PREFIX + "-Depth-Predict-OursGP", (1, 2)),  # Seeds 44, 46.
 )
-SEEDS = (0, 1, 2)  # Trial indices used in scheduling.
+SEEDS = tuple(sorted({trial for _, _, trials in TASKS for trial in trials}))
+
+
+def trial_tasks(seed: int) -> list[tuple[str, str]]:
+    """Return the (run name, task) pairs scheduled for one trial."""
+    return [(name, task) for name, task, trials in TASKS if seed in trials]
 
 
 def worker_seeds(seed: int) -> tuple[int, int]:
@@ -121,7 +128,7 @@ def run(args: argparse.Namespace, groups: list[str]) -> int:
             "status": "pending",
         }
         for seed in SEEDS
-        for name, task in TASKS
+        for name, task in trial_tasks(seed)
     ]
 
     def save_status():
@@ -247,7 +254,7 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print all nine jobs without launching or writing files.",
+        help="Print all jobs without launching or writing files.",
     )
     args = parser.parse_args()
     try:
@@ -266,11 +273,12 @@ def main() -> int:
     )
     if args.dry_run:
         for seed in SEEDS:
+            jobs = trial_tasks(seed)
             print(
                 f"Trial {seed}; worker seeds {worker_seeds(seed)} "
-                "(wait for all three jobs before the next seed):"
+                f"({len(jobs)} job(s); all finish before the next seed):"
             )
-            for name, task in TASKS:
+            for name, task in jobs:
                 print(
                     f"  CUDA_VISIBLE_DEVICES=<free GPU pair> {shlex.join(command(task, name, seed, args))}"
                 )
@@ -286,7 +294,7 @@ def main() -> int:
         parser.error(
             f"Requested GPU index is unavailable; only {count} CUDA devices are visible."
         )
-    missing = [task for _, task in TASKS if task not in list_tasks()]
+    missing = [task for _, task, _ in TASKS if task not in list_tasks()]
     if missing:
         parser.error(f"Tasks are not registered: {missing}")
 

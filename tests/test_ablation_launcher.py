@@ -8,6 +8,13 @@ import pytest
 
 from scripts.rsl_rl import run_ablation as launcher
 
+EXPECTED_TRIALS = {
+    42: ("PredictBlindGP",),
+    44: ("PredictBlindGP", "OursGP"),
+    46: ("PredictBlindGP", "LPGP", "RGGP", "OursGP"),
+}
+EXPECTED_JOBS = [f"{name}_seed{seed}" for seed, names in EXPECTED_TRIALS.items() for name in names]
+
 
 def options(tmp_path, max_concurrent=2):
     return Namespace(
@@ -56,11 +63,7 @@ def test_seed_barrier_and_exclusive_gpu_pairs(tmp_path, monkeypatch, max_concurr
     )
     args = options(tmp_path, max_concurrent)
     assert launcher.run(args, ["0,1", "2,3"]) == 0
-    assert launched == [
-        f"{name}_seed{seed}"
-        for seed in (42, 44, 46)
-        for name in ("LPGP", "RGGP", "OursGP")
-    ]
+    assert launched == [*EXPECTED_JOBS]
     assert not active
     records = json.loads((args.output_dir / "status.json").read_text())
     assert all(record["status"] == "completed" for record in records)
@@ -84,7 +87,9 @@ def test_failure_stops_queue_and_cleans_up_active_jobs(tmp_path, monkeypatch):
             launched.append(self.name)
 
         def poll(self):
-            return 7 if self.name.startswith("RGGP") else None
+            if self.name == "PredictBlindGP_seed42":
+                return 0
+            return 7 if self.name == "OursGP_seed44" else None
 
     def stop(running):
         for process, stream, _ in running.values():
@@ -96,11 +101,14 @@ def test_failure_stops_queue_and_cleans_up_active_jobs(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher, "stop_processes", stop)
     args = options(tmp_path)
     assert launcher.run(args, ["0,1", "2,3"]) == 1
-    assert launched == stopped == ["LPGP_seed42", "RGGP_seed42"]
+    assert launched == ["PredictBlindGP_seed42", "PredictBlindGP_seed44", "OursGP_seed44"]
+    assert stopped == ["PredictBlindGP_seed44", "OursGP_seed44"]
     records = json.loads((args.output_dir / "status.json").read_text())
-    assert [record["status"] for record in records] == ["interrupted", "failed"] + [
-        "pending"
-    ] * 7
+    assert [record["status"] for record in records] == [
+        "completed",
+        "interrupted",
+        "failed",
+    ] + ["pending"] * 4
 
 
 def test_gpu_mapping_respects_visible_devices(monkeypatch):
@@ -134,15 +142,13 @@ def test_dry_run_does_not_launch_or_create_output(tmp_path):
             k: v for k, v in launcher.os.environ.items() if k != "CUDA_VISIBLE_DEVICES"
         },
     )
-    assert result.stdout.count("--agent.run-name") == 9
+    assert result.stdout.count("--agent.run-name") == len(EXPECTED_JOBS)
     for trial_seed, base_seed in ((0, 42), (1, 44), (2, 46)):
         assert (
             f"Trial {trial_seed}; worker seeds ({base_seed}, {base_seed + 1})"
             in result.stdout
         )
-        for name in ("LPGP", "RGGP", "OursGP"):
-            assert (
-                f"--agent.seed {base_seed} --agent.run-name {name}_seed{base_seed}"
-                in result.stdout
-            )
+    for job in EXPECTED_JOBS:
+        base_seed = job.rsplit("_seed", 1)[1]
+        assert f"--agent.seed {base_seed} --agent.run-name {job}" in result.stdout
     assert not output.exists()
