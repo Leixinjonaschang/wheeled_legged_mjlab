@@ -22,6 +22,9 @@ from rsl_rl.models import DepthRepresentationVelocityActorCritic, Representation
 from rsl_rl.models.depth_representation_velocity_predictor_actor_critic import (
     DepthRepresentationVelocityPredictorActorCritic,
 )
+from rsl_rl.models.representation_velocity_predictor_actor_critic import (
+    RepresentationVelocityPredictorActorCritic,
+)
 from rsl_rl.storage import RolloutStorage
 
 NUM_ENVS = 4
@@ -120,6 +123,26 @@ def make_depth_predictor_model(
     )
 
 
+def make_predictor_model(obs: TensorDict) -> RepresentationVelocityPredictorActorCritic:
+    return RepresentationVelocityPredictorActorCritic(
+        obs,
+        {
+            "proprio_history": ["proprio_history"],
+            "actor_command": ["actor_command"],
+            "lin_vel_target": ["lin_vel_target"],
+            "critic": ["critic"],
+            "privileged_encoder": ["privileged_encoder", "actor_command"],
+            "wheel_roughness": ["wheel_roughness"],
+        },
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        encoder_hidden_dims=[16],
+        latent_dim=4,
+        latent_dynamics_horizons=(1, 5),
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+
 def build_algorithm() -> tuple[RepresentationVelocityTeacherStudentPPO, TensorDict]:
     torch.manual_seed(11)
     obs = make_rep_obs()
@@ -188,6 +211,33 @@ def build_depth_algorithm() -> tuple[RepresentationVelocityPredictorTeacherStude
     return alg, obs
 
 
+def build_blind_predictor_algorithm() -> tuple[RepresentationVelocityPredictorTeacherStudentPPO, TensorDict]:
+    torch.manual_seed(13)
+    obs = make_rep_obs()
+    obs["wheel_roughness"] = torch.rand(NUM_ENVS, 2)
+    model = make_predictor_model(obs)
+    storage = RolloutStorage("rl", NUM_ENVS, NUM_STEPS, obs, [NUM_ACTIONS])
+    alg = RepresentationVelocityPredictorTeacherStudentPPO(
+        model,
+        storage,
+        num_learning_epochs=2,
+        num_mini_batches=2,
+        learning_rate=1.0e-3,
+        predictor_learning_rate=1.0e-3,
+        student_learning_rate=1.0e-3,
+        schedule="fixed",
+        desired_kl=0.01,
+        latent_dynamics_loss_coef=1.0,
+        latent_dynamics_horizons=(1, 5),
+        latent_dynamics_horizon_weights=(1.0, 0.5),
+        latent_rollout_horizon=5,
+        latent_rollout_loss_coef=0.5,
+        num_latent_dynamics_epochs=1,
+        num_latent_dynamics_mini_batches=2,
+    )
+    return alg, obs
+
+
 def fill_rollout(
     alg: RepresentationVelocityTeacherStudentPPO
     | RepresentationVelocityPredictorTeacherStudentPPO,
@@ -196,6 +246,8 @@ def fill_rollout(
     for _ in range(NUM_STEPS):
         alg.act(obs)
         next_obs = make_depth_rep_obs() if "depth_camera" in obs else make_rep_obs()
+        if "wheel_roughness" in obs:
+            next_obs["wheel_roughness"] = torch.rand(NUM_ENVS, 2)
         rewards = torch.randn(NUM_ENVS)
         dones = torch.zeros(NUM_ENVS)
         alg.process_env_step(
@@ -496,6 +548,41 @@ def test_depth_dynamics_updates_predictor_and_records_applied_actions() -> None:
         losses["latent_dynamics_representation_loss"]
         + alg.latent_dynamics_velocity_loss_coef * losses["latent_dynamics_velocity_loss"]
     )
+
+
+def test_blind_dynamics_updates_predictor_and_flat_student_batches() -> None:
+    alg, obs = build_blind_predictor_algorithm()
+    fill_rollout(alg, obs)
+    calls = {"student": 0}
+    original_compute_student_losses = alg.actor.compute_student_losses_with_roughness
+
+    def counted_compute_student_losses(*args, **kwargs):
+        calls["student"] += 1
+        return original_compute_student_losses(*args, **kwargs)
+
+    alg.actor.compute_student_losses_with_roughness = counted_compute_student_losses  # type: ignore[method-assign]
+    predictor_before = {
+        name: param.detach().clone() for name, param in alg.actor.latent_dynamics_predictors.named_parameters()
+    }
+    target_encoder_before = {
+        name: param.detach().clone() for name, param in alg.actor.latent_dynamics_target_encoder.named_parameters()
+    }
+    proprio_before = {name: param.detach().clone() for name, param in alg.actor.proprio_encoder.named_parameters()}
+    roughness_before = {
+        name: param.detach().clone() for name, param in alg.actor.wheel_roughness_head.named_parameters()
+    }
+
+    losses = alg.update()
+
+    assert calls["student"] == alg.num_learning_epochs * alg.num_mini_batches
+    assert any_param_changed(predictor_before, alg.actor.latent_dynamics_predictors)
+    assert not any_param_changed(target_encoder_before, alg.actor.latent_dynamics_target_encoder)
+    assert any_param_changed(proprio_before, alg.actor.proprio_encoder)
+    assert any_param_changed(roughness_before, alg.actor.wheel_roughness_head)
+    assert losses["latent_dynamics_valid_fraction_k1"] == pytest.approx(1.0)
+    assert losses["latent_dynamics_valid_fraction_k5"] == pytest.approx(1.0)
+    assert losses["latent_rollout_valid_fraction"] == pytest.approx(1.0)
+    assert losses["roughness"] > 0.0
 
 
 def test_depth_optimizer_groups_and_dynamics_only_step_ownership() -> None:

@@ -271,6 +271,47 @@ def test_no_dyn_ctx_tasks_only_drop_dynamics_context(ablation: str) -> None:
     assert load_env_cfg(f"{task}-no_dyn_ctx", play=True) == load_env_cfg(task, play=True)
 
 
+def test_blind_tasks_use_ours_network_and_predict_blind_only_adds_the_predictor() -> None:
+    blind_task = "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-BlindGP"
+    predict_task = "Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Predict-BlindGP"
+    ours = asdict(load_rl_cfg("Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-Predict-OursGP"))
+    blind = asdict(load_rl_cfg(blind_task))
+    predict = asdict(load_rl_cfg(predict_task))
+    network_keys = (
+        "hidden_dims",
+        "encoder_hidden_dims",
+        "latent_dim",
+        "activation",
+        "obs_normalization",
+        "normalize_latent",
+    )
+    predictor_keys = {
+        "actor": {key for key in ours["actor"] if "latent_dynamics" in key},
+        "algorithm": {key for key in ours["algorithm"] if "latent" in key or "predictor" in key},
+    }
+
+    def pick(cfg: dict, keys) -> dict:
+        return {key: cfg[key] for key in keys}
+
+    def drop(cfg: dict, keys) -> dict:
+        return {key: value for key, value in cfg.items() if key not in {*keys, "class_name"}}
+
+    assert pick(blind["actor"], network_keys) == pick(ours["actor"], network_keys)
+    assert blind["actor"]["class_name"].endswith(":RoughnessRepresentationVelocityActorCritic")
+    assert blind["obs_groups"]["wheel_roughness"] == ours["obs_groups"]["wheel_roughness"]
+    assert blind["algorithm"]["roughness_loss_coef"] == ours["algorithm"]["roughness_loss_coef"]
+    assert predict["actor"]["class_name"].endswith(":RepresentationVelocityPredictorActorCritic")
+    assert predict["algorithm"]["class_name"] == ours["algorithm"]["class_name"]
+    for group, keys in predictor_keys.items():
+        assert pick(predict[group], keys) == pick(ours[group], keys)
+        assert drop(predict[group], keys) == drop(blind[group], ())
+    top_level_keys = ("actor", "algorithm", "experiment_name")
+    assert drop(predict, top_level_keys) == drop(blind, top_level_keys)
+    assert predict["experiment_name"] == "wf_tron1b_velocity_rep_ts_lin_vel_predict_latent64"
+    assert load_env_cfg(predict_task) == load_env_cfg(blind_task)
+    assert load_env_cfg(predict_task, play=True) == load_env_cfg(blind_task, play=True)
+
+
 def test_plain_depth_task_loads_without_importing_predictor_modules() -> None:
     script = """
 import builtins

@@ -12,6 +12,8 @@ from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.env_cfgs import (
 )
 from wheeled_legged_mjlab.tasks.velocity.config.wf_tron1b.rl_cfg import (
     wf_tron1b_ppo_runner_cfg,
+    wf_tron1b_rep_ts_lin_vel_blind_predict_runner_cfg,
+    wf_tron1b_rep_ts_lin_vel_blind_runner_cfg,
     wf_tron1b_rep_ts_lin_vel_depth_predict_runner_cfg,
     wf_tron1b_rep_ts_lin_vel_depth_predict_rggp_runner_cfg,
     wf_tron1b_rep_ts_lin_vel_depth_runner_cfg,
@@ -24,7 +26,15 @@ register_mjlab_task(
     task_id="Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-BlindGP",
     env_cfg=wf_tron1b_rough_rep_ts_lin_vel_env_cfg(),
     play_env_cfg=wf_tron1b_rough_rep_ts_lin_vel_env_cfg(play=True),
-    rl_cfg=wf_tron1b_rep_ts_lin_vel_runner_cfg(),
+    rl_cfg=wf_tron1b_rep_ts_lin_vel_blind_runner_cfg(),
+    runner_cls=WheeledLeggedVelocityOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Predict-BlindGP",
+    env_cfg=wf_tron1b_rough_rep_ts_lin_vel_env_cfg(),
+    play_env_cfg=wf_tron1b_rough_rep_ts_lin_vel_env_cfg(play=True),
+    rl_cfg=wf_tron1b_rep_ts_lin_vel_blind_predict_runner_cfg(),
     runner_cls=WheeledLeggedVelocityOnPolicyRunner,
 )
 

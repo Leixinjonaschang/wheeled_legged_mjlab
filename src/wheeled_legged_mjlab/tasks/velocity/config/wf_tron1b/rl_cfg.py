@@ -44,6 +44,28 @@ class RslRlRepresentationVelocityModelCfg(RslRlModelCfg):
 
 
 @dataclass
+class RslRlRoughnessRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelCfg):
+    """Config for the blind model whose student also predicts wheel roughness."""
+
+    class_name: str = (
+        "rsl_rl.models.roughness_representation_velocity_actor_critic:"
+        "RoughnessRepresentationVelocityActorCritic"
+    )
+
+
+@dataclass
+class RslRlRepresentationVelocityPredictorModelCfg(RslRlRoughnessRepresentationVelocityModelCfg):
+    """Config for the blind model with latent-and-velocity dynamics prediction."""
+
+    latent_dynamics_hidden_dims: Tuple[int, ...] = (128, 256, 256, 128)
+    latent_dynamics_horizons: Tuple[int, ...] = (1, 5)
+    class_name: str = (
+        "rsl_rl.models.representation_velocity_predictor_actor_critic:"
+        "RepresentationVelocityPredictorActorCritic"
+    )
+
+
+@dataclass
 class RslRlDepthRepresentationVelocityModelCfg(RslRlRepresentationVelocityModelCfg):
     """Config for depth velocity representation teacher-student actor-critic."""
 
@@ -196,6 +218,78 @@ def wf_tron1b_rep_ts_lin_vel_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
         clip_actions=2.0,
         upload_model=False,
     )
+
+
+def wf_tron1b_rep_ts_lin_vel_blind_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
+    """Create the blind runner with the depth runners' head sizes and wheel roughness head."""
+    cfg = wf_tron1b_rep_ts_lin_vel_runner_cfg()
+    cfg.actor = RslRlRoughnessRepresentationVelocityModelCfg(
+        hidden_dims=(512, 256, 256, 128),
+        encoder_hidden_dims=(512, 256, 128),
+        activation="elu",
+        obs_normalization=True,
+        latent_dim=64,
+        normalize_latent=True,
+        distribution_cfg={
+            "class_name": "GaussianDistribution",
+            "init_std": 1.0,
+            "std_type": "scalar",
+        },
+    )
+    cfg.obs_groups["wheel_roughness"] = ("wheel_roughness",)
+    return cfg
+
+
+def wf_tron1b_rep_ts_lin_vel_blind_predict_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
+    """Create the blind runner with multi-horizon latent-and-velocity dynamics prediction."""
+    cfg = wf_tron1b_rep_ts_lin_vel_blind_runner_cfg()
+    cfg.actor = RslRlRepresentationVelocityPredictorModelCfg(
+        hidden_dims=(512, 256, 256, 128),
+        encoder_hidden_dims=(512, 256, 128),
+        activation="elu",
+        obs_normalization=True,
+        latent_dim=64,
+        normalize_latent=True,
+        latent_dynamics_hidden_dims=(128, 256, 256, 128),
+        latent_dynamics_horizons=(1, 5, 10),
+        distribution_cfg={
+            "class_name": "GaussianDistribution",
+            "init_std": 1.0,
+            "std_type": "scalar",
+        },
+    )
+    cfg.algorithm = RslRlRepresentationVelocityPredictorTeacherStudentPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-3,
+        predictor_learning_rate=1.0e-3,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+        student_learning_rate=1.0e-3,
+        num_student_substeps=1,
+        representation_loss_coef=1.0,
+        lin_vel_loss_coef=1.0,
+        latent_dynamics_loss_coef=3.0,
+        latent_dynamics_velocity_loss_coef=1.0,
+        latent_dynamics_use_ema_target=False,
+        latent_dynamics_ema_decay=0.99,
+        latent_dynamics_horizons=(1, 5, 10),
+        latent_dynamics_horizon_weights=(1.0, 0.75, 0.5),
+        latent_dynamics_detach_source=False,
+        latent_rollout_horizon=5,
+        latent_rollout_loss_coef=0.75,
+        num_latent_dynamics_epochs=1,
+        num_latent_dynamics_mini_batches=4,
+    )
+    cfg.experiment_name = "wf_tron1b_velocity_rep_ts_lin_vel_predict_latent64"
+    return cfg
 
 
 def wf_tron1b_rep_ts_lin_vel_depth_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:

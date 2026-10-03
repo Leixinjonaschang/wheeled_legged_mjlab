@@ -16,6 +16,12 @@ from rsl_rl.models import DepthRepresentationVelocityActorCritic, Representation
 from rsl_rl.models.depth_representation_velocity_predictor_actor_critic import (
     DepthRepresentationVelocityPredictorActorCritic,
 )
+from rsl_rl.models.representation_velocity_predictor_actor_critic import (
+    RepresentationVelocityPredictorActorCritic,
+)
+from rsl_rl.models.roughness_representation_velocity_actor_critic import (
+    RoughnessRepresentationVelocityActorCritic,
+)
 
 NUM_ENVS = 4
 PROPRIO_DIM = 28
@@ -134,6 +140,53 @@ def make_depth_predictor_model(
         depth_feature_dim=8,
         depth_gru_hidden_dim=8,
         depth_channels=(4, 4),
+        latent_dynamics_horizons=latent_dynamics_horizons,
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+
+def make_blind_rep_obs() -> TensorDict:
+    obs = make_rep_obs()
+    obs["wheel_roughness"] = torch.rand(NUM_ENVS, 2)
+    return obs
+
+
+BLIND_OBS_GROUPS = {
+    "proprio_history": ["proprio_history"],
+    "actor_command": ["actor_command"],
+    "lin_vel_target": ["lin_vel_target"],
+    "critic": ["critic", "dynamics_context"],
+    "privileged_encoder": ["privileged_encoder", "dynamics_context"],
+    "wheel_roughness": ["wheel_roughness"],
+}
+
+
+def make_roughness_model(obs: TensorDict | None = None) -> RoughnessRepresentationVelocityActorCritic:
+    obs = make_blind_rep_obs() if obs is None else obs
+    return RoughnessRepresentationVelocityActorCritic(
+        obs,
+        BLIND_OBS_GROUPS,
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        encoder_hidden_dims=[16],
+        latent_dim=LATENT_DIM,
+        distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
+    )
+
+
+def make_predictor_model(
+    obs: TensorDict | None = None,
+    latent_dynamics_horizons: tuple[int, ...] = (1, 5),
+) -> RepresentationVelocityPredictorActorCritic:
+    obs = make_blind_rep_obs() if obs is None else obs
+    obs_groups = BLIND_OBS_GROUPS
+    return RepresentationVelocityPredictorActorCritic(
+        obs,
+        obs_groups,
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        encoder_hidden_dims=[16],
+        latent_dim=LATENT_DIM,
         latent_dynamics_horizons=latent_dynamics_horizons,
         distribution_cfg={"class_name": "GaussianDistribution", "init_std": 1.0, "std_type": "scalar"},
     )
@@ -576,6 +629,76 @@ def test_depth_dynamics_uses_ground_truth_velocity_and_keeps_optional_ema_target
         strict=True,
     ):
         assert torch.allclose(target_parameter, 0.5 * previous_target + 0.5 * online_parameter)
+
+
+def test_blind_student_roughness_head_is_trained_with_student_encoder() -> None:
+    obs = make_blind_rep_obs()
+    model = make_roughness_model(obs)
+
+    model.zero_grad()
+    total_loss, representation_loss, lin_vel_loss, roughness_loss = model.compute_student_losses_with_roughness(obs)
+    total_loss.backward()
+
+    assert torch.allclose(total_loss, representation_loss + lin_vel_loss + roughness_loss)
+    assert roughness_loss > 0.0
+    assert any(param.grad is not None for param in model.wheel_roughness_head.parameters())
+    assert any(param.grad is not None for param in model.proprio_encoder.parameters())
+    assert all(param.grad is None for param in model.privileged_encoder.parameters())
+    student_parameter_ids = {id(parameter) for parameter in model.student_parameters()}
+    assert {id(parameter) for parameter in model.wheel_roughness_head.parameters()} <= student_parameter_ids
+    assert student_parameter_ids.isdisjoint(id(parameter) for parameter in model.ppo_parameters())
+
+
+def test_blind_dynamics_trains_only_privileged_encoder_and_horizon_predictor() -> None:
+    obs_t = make_blind_rep_obs()
+    obs_future = make_blind_rep_obs()
+    model = make_predictor_model(obs_t, latent_dynamics_horizons=(1, 5, 10))
+
+    assert set(model.latent_dynamics_predictors) == {"1", "5", "10"}
+    assert model.latent_dynamics_state_dim == LATENT_DIM + LIN_VEL_DIM
+
+    model.zero_grad()
+    representation_loss, velocity_loss = model.compute_latent_dynamics_losses(
+        obs_t,
+        torch.randn(NUM_ENVS, 5 * NUM_ACTIONS),
+        obs_future,
+        horizon=5,
+    )
+    (representation_loss + velocity_loss).backward()
+
+    assert any(param.grad is not None for param in model.latent_dynamics_predictors["5"].parameters())
+    assert any(param.grad is not None for param in model.privileged_encoder.parameters())
+    for module in (
+        model.latent_dynamics_predictors["1"],
+        model.latent_dynamics_predictors["10"],
+        model.latent_dynamics_target_encoder,
+        model.actor_head,
+        model.critic_head,
+        model.proprio_encoder,
+        model.student_latent_head,
+        model.lin_vel_head,
+        model.wheel_roughness_head,
+    ):
+        assert all(param.grad is None for param in module.parameters())
+
+    ppo_parameter_ids = {id(parameter) for parameter in model.ppo_parameters()}
+    predictor_parameter_ids = {id(parameter) for parameter in model.predictor_parameters()}
+    assert ppo_parameter_ids.isdisjoint(predictor_parameter_ids)
+    assert predictor_parameter_ids == {id(parameter) for parameter in model.latent_dynamics_predictors.parameters()}
+
+
+def test_blind_predictor_exports_only_the_student_policy() -> None:
+    obs = make_blind_rep_obs()
+    model = make_predictor_model(obs)
+    expected_actions = model(obs)
+    expected_predicted_lin_vel = model.get_predicted_lin_vel(obs)
+
+    for policy in (model.as_jit(), model.as_onnx(verbose=False)):
+        actions, predicted_lin_vel = policy(obs["proprio_history"], obs["actor_command"])
+
+        assert not any("latent_dynamics" in name or "roughness" in name for name, _ in policy.named_modules())
+        assert torch.allclose(actions, expected_actions)
+        assert torch.allclose(predicted_lin_vel, expected_predicted_lin_vel)
 
 
 def test_depth_sequence_student_losses_use_continuous_depth_state() -> None:
