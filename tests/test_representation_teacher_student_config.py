@@ -255,6 +255,22 @@ def test_depth_velocity_representation_task_uses_async_depth_input() -> None:
     assert predict_agent["obs_groups"] == agent["obs_groups"]
 
 
+@pytest.mark.parametrize("ablation", ("LPGP", "Predict-OursGP", "Predict-RGGP"))
+def test_no_dyn_ctx_tasks_only_drop_dynamics_context(ablation: str) -> None:
+    task = f"Mjlab-Velocity-Rough-WF-Tron1B-RepTS-LinVel-Depth-{ablation}"
+    agent = asdict(load_rl_cfg(task))
+    no_ctx_agent = asdict(load_rl_cfg(f"{task}-no_dyn_ctx"))
+
+    assert no_ctx_agent["obs_groups"] == {
+        **agent["obs_groups"],
+        "critic": ("critic",),
+        "privileged_encoder": ("privileged_encoder",),
+    }
+    assert {**no_ctx_agent, "obs_groups": None} == {**agent, "obs_groups": None}
+    assert load_env_cfg(f"{task}-no_dyn_ctx") == load_env_cfg(task)
+    assert load_env_cfg(f"{task}-no_dyn_ctx", play=True) == load_env_cfg(task, play=True)
+
+
 def test_plain_depth_task_loads_without_importing_predictor_modules() -> None:
     script = """
 import builtins

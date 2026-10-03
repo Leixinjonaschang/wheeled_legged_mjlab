@@ -323,6 +323,17 @@ def wf_tron1b_rep_ts_lin_vel_depth_predict_rggp_runner_cfg() -> WFTRON1BRslRlOnP
     return cfg
 
 
+def without_dynamics_context(
+    cfg: WFTRON1BRslRlOnPolicyRunnerCfg,
+) -> WFTRON1BRslRlOnPolicyRunnerCfg:
+    """Remove the dynamics context from the critic and privileged encoder inputs."""
+    for group in ("critic", "privileged_encoder"):
+        cfg.obs_groups[group] = tuple(
+            name for name in cfg.obs_groups[group] if name != "dynamics_context"
+        )
+    return cfg
+
+
 def wf_tron1b_rep_ts_runner_cfg() -> WFTRON1BRslRlOnPolicyRunnerCfg:
     """Create representation-level teacher-student runner configuration."""
     return WFTRON1BRslRlOnPolicyRunnerCfg(
